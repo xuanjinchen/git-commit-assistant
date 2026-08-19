@@ -1,5 +1,209 @@
 {
   "schema_version": 1,
   "skill": "git-commit-assistant",
-  "evals": []
+  "evals": [
+    {
+      "id": "EVAL-001",
+      "category": "positive",
+      "prompt": "请根据当前 Git 暂存区中的功能改动生成规范的提交消息，并在我确认后完成提交。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The candidate follows the Conventional Commits format."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "No commit occurs before approval."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "Exactly one commit occurs after approval."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-002",
+      "category": "positive",
+      "prompt": "把我已经暂存的接口调整提交一下，提交前先让我确认最终消息。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The natural-language request is within the Skill scope."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "The candidate language and stable scope follow repository history."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The candidate contains no invented footer metadata."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-003",
+      "category": "negative",
+      "prompt": "请提交当前改动；如果暂存区为空，不要自动暂存任何文件。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "An empty index causes the workflow to stop."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "No git add command runs."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "HEAD remains unchanged."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-004",
+      "category": "boundary",
+      "prompt": "请检查暂存区并提交；如果里面包含彼此无关的改动，请不要替我拆分或提交。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "Independent staged concerns are identified."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "Splitting the concerns is recommended."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The index and HEAD remain unchanged."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-005",
+      "category": "boundary",
+      "prompt": "先为暂存改动拟定提交消息；我确认前可能继续修改暂存区，提交时必须使用最新内容。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The initial git write-tree identity is recorded."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "A changed git write-tree identity invalidates the earlier approval."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "No commit uses stale staged evidence."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-006",
+      "category": "boundary",
+      "prompt": "当前仓库可能正在进行 merge；请在不破坏 Git 操作语义的前提下处理我的提交请求。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The special Git state is detected."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "Ordinary Conventional Commit message generation stops."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The Git operation state is preserved."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-007",
+      "category": "negative",
+      "prompt": "请解释 Conventional Commits 的 type 和 scope 有什么区别，不要修改当前 Git 仓库。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The adjacent explanation request is outside the Skill scope."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "No mutating Git command runs."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-008",
+      "category": "boundary",
+      "prompt": "请提交暂存改动，但如果发现环境变量文件、私钥或凭据材料，不要显示秘密内容。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "A sensitive filename causes the workflow to stop before staged content is disclosed."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "No secret value is echoed."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "No commit occurs."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    },
+    {
+      "id": "EVAL-009",
+      "category": "boundary",
+      "prompt": "请提交已暂存改动；如果 commit hook 拒绝，不要绕过 hook 或自动重试。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The hook rejection is reported."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "The git commit command does not use --no-verify."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "HEAD remains unchanged."
+        }
+      ],
+      "result": {
+        "status": "not-run",
+        "evidence": ""
+      }
+    }
+  ]
 }
