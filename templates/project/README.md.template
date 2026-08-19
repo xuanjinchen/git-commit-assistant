@@ -1,0 +1,14 @@
+# {{SKILL_NAME}}
+
+Objective: {{SKILL_DESCRIPTION}}
+
+Initialized: {{INITIALIZED_DATE}}
+License: {{LICENSE_ID}}
+
+## Development
+
+Read `docs/skill-brief.md` and `docs/mature-skill-development-plan.md`, then implement the current acceptance criteria with deterministic tests and behavior evaluations.
+
+## Validation
+
+Run `npm run check` during development and `npm run gate:delivery` before declaring the Skill mature.

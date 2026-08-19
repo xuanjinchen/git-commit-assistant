@@ -1,0 +1,24 @@
+---
+name: {{SKILL_NAME}}
+description: {{SKILL_DESCRIPTION}}
+---
+
+# {{SKILL_NAME}}
+
+Concrete objective: {{SKILL_DESCRIPTION}}
+
+## Preparation
+
+Read the current request, repository instructions, and nearby implementation before acting.
+
+## Execution
+
+Perform the smallest complete workflow that satisfies the concrete objective and record verifiable evidence.
+
+## Boundaries
+
+Do not claim unverified behavior, enable optional tracks without evidence, or perform destructive, paid, credentialed, or publishing actions without authorization.
+
+## Output
+
+Report the result, validation performed, changed artifacts, and any remaining verified limitation.
