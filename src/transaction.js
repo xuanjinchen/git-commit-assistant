@@ -822,9 +822,149 @@ function assertOwnedLock(expected, actual) {
 
 function staleLockError(lockPath) {
   return transactionError(
-    `Repository lock already exists at "${lockPath}" and was not removed. Verify no scaffold process is running, inspect protocol/pid/created_at, then manually remove only that unchanged lock file before retrying.`,
+    `Repository lock already exists at "${lockPath}" and was not removed. Verify no scaffold process is running, inspect protocol/pid/created_at/token and the exact SHA-256, then run npm run recover:lock -- --expected-token <token> --expected-sha256 <digest>.`,
     'TRANSACTION_LOCKED',
   );
+}
+
+function parseRecoverableLock(actual, expectedToken, expectedSha256) {
+  if (actual.digest !== expectedSha256) {
+    throw transactionError('Repository lock digest changed before recovery.', 'TRANSACTION_LOCK_OWNERSHIP');
+  }
+
+  let owner;
+  try {
+    owner = JSON.parse(actual.content.toString('utf8'));
+  } catch {
+    throw transactionError('Repository lock contents are invalid for recovery.', 'TRANSACTION_LOCK_OWNERSHIP');
+  }
+  if (
+    owner === null
+    || typeof owner !== 'object'
+    || Array.isArray(owner)
+    || owner.protocol !== LOCK_PROTOCOL
+    || owner.token !== expectedToken
+    || !Number.isSafeInteger(owner.pid)
+    || owner.pid <= 0
+  ) {
+    throw transactionError(
+      'Repository lock protocol, token, or process identity does not match recovery expectations.',
+      'TRANSACTION_LOCK_OWNERSHIP',
+    );
+  }
+  return owner;
+}
+
+function isProcessActive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') {
+      return false;
+    }
+    if (error.code === 'EPERM') {
+      return true;
+    }
+    throw transactionError(
+      `Repository lock process state could not be verified: ${error.message}`,
+      'TRANSACTION_LOCK_PROCESS_UNKNOWN',
+    );
+  }
+}
+
+export async function recoverStaleRepositoryLock(
+  root,
+  { expectedToken, expectedSha256, faults } = {},
+) {
+  if (typeof expectedToken !== 'string' || expectedToken.length === 0) {
+    throw new TypeError('Lock recovery requires a non-empty expected token.');
+  }
+  if (typeof expectedSha256 !== 'string' || !SHA256_PATTERN.test(expectedSha256)) {
+    throw new TypeError('Lock recovery requires a lowercase 64-character SHA-256 digest.');
+  }
+
+  const canonicalRoot = await realpath(root);
+  const rootStat = await lstat(canonicalRoot);
+  if (!rootStat.isDirectory()) {
+    throw new TypeError('Lock recovery root must be a directory.');
+  }
+
+  const lockPath = path.join(canonicalRoot, '.scaffold-init.lock');
+  const initial = await readOwnedPath(canonicalRoot, lockPath);
+  const owner = parseRecoverableLock(initial, expectedToken, expectedSha256);
+  if (isProcessActive(owner.pid)) {
+    throw transactionError(
+      `Repository lock process ${owner.pid} is still active; recovery was refused.`,
+      'TRANSACTION_LOCK_ACTIVE',
+    );
+  }
+
+  await invokeFault(faults, 'beforeLockRecoveryDetach', { lockPath });
+  const isolated = await detachOwnedPath(
+    canonicalRoot,
+    lockPath,
+    { digest: initial.digest, snapshot: initial.snapshot },
+    faults,
+    'lock-recovery-detached',
+    'TRANSACTION_LOCK_OWNERSHIP',
+    'Repository lock',
+  );
+
+  try {
+    // 隔离后再复核内容和 PID，避免检查期间变化的路径或复用后的活动进程被删除。
+    const actual = await assertOwnedPath(
+      canonicalRoot,
+      isolated.path,
+      { digest: isolated.digest, snapshot: isolated.snapshot },
+      'Detached repository lock',
+    );
+    const isolatedOwner = parseRecoverableLock(actual, expectedToken, expectedSha256);
+    if (isProcessActive(isolatedOwner.pid)) {
+      throw transactionError(
+        `Repository lock process ${isolatedOwner.pid} became active during recovery.`,
+        'TRANSACTION_LOCK_ACTIVE',
+      );
+    }
+    await unlinkIsolatedOwned(
+      canonicalRoot,
+      isolated.path,
+      { digest: isolated.digest, snapshot: isolated.snapshot },
+      faults,
+      'lock-recovery-unlink',
+    );
+    return { removed: true, pid: isolatedOwner.pid };
+  } catch (error) {
+    let restored = false;
+    let restoreError;
+    try {
+      restored = await restoreDetachedNoClobber(
+        canonicalRoot,
+        isolated.path,
+        lockPath,
+        { digest: isolated.digest, snapshot: isolated.snapshot },
+        faults,
+        'lock-recovery',
+      );
+    } catch (candidate) {
+      restoreError = candidate;
+    }
+    const recovery = restored
+      ? 'The verified lock was restored without overwriting another path.'
+      : `Recovery evidence remains at "${isolated.path}".`;
+    const recoveryFailure = transactionError(
+      `Repository lock recovery stopped: ${error.message} ${recovery}`,
+      error.code ?? 'TRANSACTION_LOCK_OWNERSHIP',
+    );
+    if (restoreError) {
+      throw new AggregateError(
+        [recoveryFailure, restoreError],
+        `${recoveryFailure.message} Automatic restoration also failed: ${restoreError.message}`,
+        { cause: recoveryFailure },
+      );
+    }
+    throw recoveryFailure;
+  }
 }
 
 export async function withRepositoryLock(root, operation, { faults } = {}) {

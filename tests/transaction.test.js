@@ -774,7 +774,7 @@ test('initialization failure cleanup preserves a replacement lock', async (t) =>
   assert.equal(preserved.ino, foreignIdentity.ino);
 });
 
-test('keeps an existing lock and reports a manual stale-lock recovery protocol', async (t) => {
+test('keeps an existing lock and reports the conditional stale-lock recovery command', async (t) => {
   const root = await createRepository(t);
   const lock = path.join(root, '.scaffold-init.lock');
   const stale = '{"pid":999999,"token":"stale","created_at":"2000-01-01T00:00:00.000Z"}\n';
@@ -784,7 +784,8 @@ test('keeps an existing lock and reports a manual stale-lock recovery protocol',
     withRepositoryLock(root, async () => 'unexpected'),
     (error) => {
       assert.equal(error.code, 'TRANSACTION_LOCKED');
-      assert.match(error.message, /not removed|verify no scaffold process|manually remove/i);
+      assert.match(error.message, /not removed|verify no scaffold process/i);
+      assert.match(error.message, /npm run recover:lock/i);
       return true;
     },
   );

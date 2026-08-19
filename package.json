@@ -9,8 +9,10 @@
   },
   "scripts": {
     "init:skill": "node scripts/init-skill.js",
+    "recover:lock": "node scripts/recover-lock.js",
     "test": "node --test",
     "validate": "node scripts/validate.js",
+    "audit": "node scripts/audit.js",
     "check": "npm test && npm run validate",
     "gate:delivery": "node scripts/delivery-gate.js"
   },

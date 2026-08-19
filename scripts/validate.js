@@ -1,26 +1,35 @@
 #!/usr/bin/env node
 
 import { validateRepository } from '../src/validate.js';
+import { writeOutput } from '../src/output.js';
 
 function formatIssue(level, issue) {
   const message = issue.message.replace(/[\r\n]+/gu, ' ').trim();
   return `${level} ${issue.code} ${issue.path} ${message}\n`;
 }
 
+let output = '';
+let exitCode = 0;
 try {
   const report = await validateRepository(process.cwd());
   for (const issue of report.errors) {
-    process.stdout.write(formatIssue('ERROR', issue));
+    output += formatIssue('ERROR', issue);
   }
   for (const issue of report.warnings) {
-    process.stdout.write(formatIssue('WARN', issue));
+    output += formatIssue('WARN', issue);
   }
-  process.exitCode = report.errors.length > 0 ? 1 : 0;
+  exitCode = report.errors.length > 0 ? 1 : 0;
 } catch (error) {
-  process.stdout.write(formatIssue('ERROR', {
+  output = formatIssue('ERROR', {
     code: 'VALIDATION_FAILED',
     path: '.',
     message: error instanceof Error ? error.message : String(error),
-  }));
+  });
+  exitCode = 1;
+}
+
+try {
+  process.exitCode = await writeOutput(process.stdout, output) === 'closed' ? 0 : exitCode;
+} catch {
   process.exitCode = 1;
 }
