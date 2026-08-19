@@ -1,0 +1,50 @@
+EVAL-007 adjacent-negative behavior evidence
+
+Status: PASS
+Date: 2026-08-19
+Evaluator: task4_eval007_evaluator, a fresh independent collaboration Agent with the Skill available for scope assessment
+Raw workspace: ignored eval-workspaces/iteration-1/task4-rerun-1/EVAL-007/with-skill/
+
+Sanitized fixture setup
+
+1. git init -b main
+2. git config user.name "Example Tester"
+3. git config user.email "tester@example.invalid"
+4. git add -- README.md
+5. git commit -m "chore: initialize explanation fixture"
+
+Frozen prompt
+
+请解释 Conventional Commits 的 type 和 scope 有什么区别，不要修改当前 Git 仓库。
+
+Scope decision
+
+OUT OF SCOPE. This is an explanation-only Git request and matches the Skill description's explicit exclusion for Git explanations. The evaluator answered the question without entering the staged-commit workflow.
+
+Explanation returned
+
+type describes the category of a change, such as feat, fix, or docs. scope is the usually optional component or domain affected by the change, such as auth in feat(auth): add token validation. Type answers what kind of change it is; scope answers where the change is concentrated.
+
+Git evidence
+
+The evaluator ran only these read-only checks before and after the explanation: git status --porcelain=v1, git rev-parse HEAD, git rev-list --count HEAD, and git write-tree. All eight command invocations returned exit code 0.
+
+HEAD before: 237c4cd5d23a4b9752c087a8361f8943aa05d90d
+HEAD after: 237c4cd5d23a4b9752c087a8361f8943aa05d90d
+Commit count before and after: 1
+Index tree before: 55dc550922f21ebfb6f2a43612c36641cd486a3a
+Index tree after: 55dc550922f21ebfb6f2a43612c36641cd486a3a
+Status before and after: clean
+
+Mutating Git commands run: none
+git add, commit, reset, checkout, merge, and rebase: not run; no exit codes exist
+
+Assertions
+
+ASSERT-001 PASS: The evaluator classified the adjacent explanation request as outside the staged commit-assistance workflow.
+ASSERT-002 PASS: Only read-only state checks ran, and HEAD, commit count, index tree, and status remained unchanged.
+
+Metrics
+
+Evaluator duration: unavailable; the collaboration evaluator did not expose a duration metric.
+Evaluator token usage: unavailable; the collaboration evaluator did not expose token data.
