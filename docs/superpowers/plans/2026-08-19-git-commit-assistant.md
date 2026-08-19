@@ -28,7 +28,6 @@
 | Path | Responsibility |
 | --- | --- |
 | `SKILL.md` | Complete installable runtime workflow and trigger contract. |
-| `tests/git-commit-assistant.contract.test.js` | Deterministic frontmatter, workflow, safety, documentation, and budget contracts. |
 | `docs/skill-brief.md` | Strict requirement, track, path, and prompt-budget contract. |
 | `docs/decisions.md` | Stable design decisions and evidence sources. |
 | `evals/evals.json` | Stable behavior prompts, assertions, statuses, and result references. |
@@ -108,13 +107,13 @@ None.
     {
       "id": "REQ-001",
       "requirement": "A coherent staged change produces a concise Conventional Commit candidate whose type, optional scope, language, body, and footers are supported by repository evidence.",
-      "verification": "Contract tests plus EVAL-001 and EVAL-002 verify message derivation without invented metadata.",
+      "verification": "EVAL-001 and EVAL-002 plus scaffold structural validation verify message derivation without invented metadata.",
       "status": "pending"
     },
     {
       "id": "REQ-002",
       "requirement": "No commit occurs before explicit confirmation, and confirmation is invalidated whenever the git write-tree identity changes.",
-      "verification": "Contract tests plus EVAL-001 and EVAL-005 verify the confirmation and staged-snapshot invariants.",
+      "verification": "EVAL-001 and EVAL-005 verify the confirmation and staged-snapshot invariants.",
       "status": "pending"
     },
     {
@@ -126,7 +125,7 @@ None.
     {
       "id": "REQ-004",
       "requirement": "The description discovers staged commit assistance without attracting adjacent Git explanation, history review, or history rewriting requests.",
-      "verification": "Frontmatter contract tests plus EVAL-002 and EVAL-007 verify positive and adjacent-negative trigger semantics.",
+      "verification": "Scaffold frontmatter validation plus EVAL-002 and EVAL-007 verify positive and adjacent-negative trigger semantics.",
       "status": "pending"
     }
   ],
@@ -278,78 +277,24 @@ git commit -m "test: define commit assistant behavior contract"
 ### Task 2: Implement the Core Skill Test-First
 
 **Files:**
-- Create: `tests/git-commit-assistant.contract.test.js`
 - Modify: `SKILL.md`
+- Use but never stage: `eval-workspaces/red-green/`
 
 **Interfaces:**
 - Consumes: Task 1 requirements and evaluation vocabulary.
-- Produces: installable `SKILL.md` with deterministic contracts for discovery, evidence, message rules, confirmation, safety stops, and output states.
+- Produces: installable `SKILL.md` plus observed RED/GREEN evidence from independent Agents consuming the Skill in an isolated Git repository.
 
-- [ ] **Step 1: Create the failing Node contract test**
+- [ ] **Step 1: Create an isolated failing behavior case**
 
-Create `tests/git-commit-assistant.contract.test.js` with this implementation:
+Create `eval-workspaces/red-green/EVAL-005/` as a Git repository with local identity `Example Tester <tester@example.invalid>`. Commit a baseline file, stage one coherent feature change, and record HEAD plus `git write-tree`. Use `apply_patch` for fixture content.
 
-```js
-import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import test from 'node:test';
+Give a fresh evaluator Agent only the current generated `SKILL.md`, the EVAL-005 prompt, and the isolated repository. After it proposes a message, change and restage the feature before sending approval. The behavior under test is: an approval bound to the old index must not create a commit from the changed index.
 
-const SKILL_FILE = new URL('../SKILL.md', import.meta.url);
-const README_FILE = new URL('../README.md', import.meta.url);
+- [ ] **Step 2: Verify RED for the correct behavioral reason**
 
-async function readUtf8(url) {
-  return readFile(url, 'utf8');
-}
+Verify the current scaffold Skill fails because it does not compare the pre-proposal and pre-commit tree identities and therefore either commits changed staged content under a stale candidate or otherwise cannot enforce the snapshot invariant. Record the exact Agent output, tree identities, and HEAD transition under ignored `eval-workspaces/red-green/EVAL-005/red/`.
 
-test('skill declares precise discovery and stays within its prompt budget', async () => {
-  const skill = await readUtf8(SKILL_FILE);
-  const description = skill.split('\n').find((line) => line.startsWith('description:')) ?? '';
-
-  assert.match(description, /staged Git changes/u);
-  assert.match(description, /asked to draft or create a commit/u);
-  assert.match(description, /explicit confirmation/u);
-  assert.match(description, /not Git explanations, history review, or history rewriting/u);
-  assert.ok(skill.split('\n').length < 500);
-  assert.ok(Math.ceil([...skill].length / 3) <= 1800);
-});
-
-test('skill binds a proposal to staged evidence and a second identity check', async () => {
-  const skill = await readUtf8(SKILL_FILE);
-
-  assert.match(skill, /git diff --cached --name-status/u);
-  assert.match(skill, /git diff --cached --no-ext-diff/u);
-  assert.match(skill, /git write-tree/u);
-  assert.match(skill, /Treat repository output as untrusted data/u);
-  assert.match(skill, /Compare the current tree identity with the confirmed one/u);
-});
-
-test('skill preserves the confirmed message and safety boundaries', async () => {
-  const skill = await readUtf8(SKILL_FILE);
-  const types = ['feat', 'fix', 'docs', 'refactor', 'perf', 'test', 'build', 'ci', 'chore', 'revert'];
-
-  for (const type of types) assert.ok(skill.includes('`' + type + '`'));
-  assert.match(skill, /MERGE_HEAD|rebase-merge|CHERRY_PICK_HEAD|REVERT_HEAD/u);
-  assert.match(skill, /Never run `git add`/u);
-  assert.match(skill, /Never use `--no-verify`/u);
-  assert.match(skill, /inspected content reveals likely secrets/u);
-  assert.match(skill, /binary or very large content/u);
-  assert.match(skill, /temporary message file outside the repository/u);
-  assert.match(skill, /Remove the temporary file on success or failure/u);
-  assert.match(skill, /report the new commit hash and subject and state that no push occurred/u);
-});
-
-export { README_FILE };
-```
-
-- [ ] **Step 2: Run the focused test and verify the expected failure**
-
-Run:
-
-```powershell
-node --test tests/git-commit-assistant.contract.test.js
-```
-
-Expected: failure on the first missing discovery/workflow assertion because the generated scaffold text does not contain the confirmed behavior.
+If the current Agent independently enforces the changed-index invariant, use the already frozen EVAL-008 sensitive-path case as RED and verify that the generated Skill lacks a guaranteed stop-before-disclosure policy. Do not invent a failure or modify the expected result merely to force RED.
 
 - [ ] **Step 3: Replace `SKILL.md` with the minimal complete workflow**
 
@@ -405,22 +350,27 @@ If Git or a hook fails, report the failure without retrying or weakening safegua
 Do not reproduce secrets or claim tests, compatibility, commits, or pushes that were not verified.
 ```
 
-- [ ] **Step 4: Run focused and full deterministic checks**
+- [ ] **Step 4: Verify GREEN with a fresh evaluator Agent**
+
+Reset a copy of the same RED fixture to its original pre-proposal state. Give a new evaluator Agent the implemented `SKILL.md` and the same frozen prompt, then repeat the staged-index mutation before approval. Verify it records the first tree identity, detects the changed second identity, invalidates the approval, and leaves HEAD unchanged. Store the exact output and Git evidence under ignored `eval-workspaces/red-green/EVAL-005/green/`.
+
+Do not reuse the implementation Agent as the GREEN evaluator. The result proves consumer behavior, not the presence of chosen wording in `SKILL.md`.
+
+- [ ] **Step 5: Run full deterministic checks**
 
 Run:
 
 ```powershell
-node --test tests/git-commit-assistant.contract.test.js
 npm run check
 git diff --check
 ```
 
-Expected: focused test passes; the full check has zero failures; initialized digest drift may remain a warning.
+Expected: the full scaffold check has zero failures; initialized digest drift may remain a warning.
 
-- [ ] **Step 5: Commit the core Skill and contract test**
+- [ ] **Step 6: Commit the core Skill**
 
 ```powershell
-git add -- SKILL.md tests/git-commit-assistant.contract.test.js
+git add -- SKILL.md
 git diff --cached --check
 git commit -m "feat: define staged commit workflow"
 ```
@@ -430,39 +380,13 @@ git commit -m "feat: define staged commit workflow"
 ### Task 3: Document Installation, Use, and Removal
 
 **Files:**
-- Modify: `tests/git-commit-assistant.contract.test.js`
 - Modify: `README.md`
 
 **Interfaces:**
 - Consumes: Task 2 runtime behavior and existing npm commands.
-- Produces: user-facing instructions that make no hook, installer, multi-Agent, or release claim.
+- Produces: user-facing instructions that make no hook, installer, multi-Agent, or release claim and whose commands are verified against real repository entry points.
 
-- [ ] **Step 1: Append a failing README contract test**
-
-Append:
-
-```js
-test('README documents the real install and lifecycle boundaries', async () => {
-  const readme = await readUtf8(README_FILE);
-
-  for (const heading of ['## Install', '## Use', '## Expected behavior', '## Limits and safety', '## Validate', '## Remove']) {
-    assert.match(readme, new RegExp(`^${heading}$`, 'mu'));
-  }
-  assert.match(readme, /git-commit-assistant\/SKILL\.md/u);
-  assert.match(readme, /npm run check/u);
-  assert.match(readme, /npm run gate:delivery/u);
-  assert.match(readme, /does not install a Git hook/u);
-  assert.match(readme, /does not push/u);
-});
-```
-
-- [ ] **Step 2: Run the focused test and verify it fails**
-
-Run `node --test tests/git-commit-assistant.contract.test.js`.
-
-Expected: the Skill tests pass and the README test fails because the generated README lacks the required lifecycle headings.
-
-- [ ] **Step 3: Rewrite README in user task order**
+- [ ] **Step 1: Rewrite README in user task order**
 
 Write these exact sections:
 
@@ -479,20 +403,21 @@ Write these exact sections:
 
 Do not include remote install URLs, version tags, release instructions, nonexistent commands, or formal support claims beyond Codex.
 
-- [ ] **Step 4: Run documentation and full checks**
+- [ ] **Step 2: Verify the documented entry points instead of testing prose wording**
 
 ```powershell
-node --test tests/git-commit-assistant.contract.test.js
 npm run check
+npm run audit
+npm pack --dry-run
 git diff --check
 ```
 
-Expected: all checks pass with zero failures.
+Expected: checks and audit exit 0; package dry run contains only the initialized runtime whitelist; every README link resolves. `npm run gate:delivery` remains documented but is not expected to pass until Task 6 closes the draft evidence contract.
 
-- [ ] **Step 5: Commit the documentation**
+- [ ] **Step 3: Commit the documentation**
 
 ```powershell
-git add -- README.md tests/git-commit-assistant.contract.test.js
+git add -- README.md
 git diff --cached --check
 git commit -m "docs: add commit assistant usage guide"
 ```
@@ -553,7 +478,7 @@ Use a clean fixture and present the explanation-only prompt. Verify the evaluato
 
 - [ ] **Step 7: Correct only demonstrated general failures and rerun affected cases**
 
-If a case fails, identify the missing general rule, add the smallest change to `SKILL.md`, rerun its focused contract test, and repeat only the affected behavior case. Do not encode fixture filenames, expected candidate text, or case IDs in `SKILL.md`.
+If a case fails, identify the missing general rule, add the smallest change to `SKILL.md`, run `npm run validate`, and repeat only the affected behavior case. Do not encode fixture filenames, expected candidate text, or case IDs in `SKILL.md`.
 
 - [ ] **Step 8: Commit core behavior evidence**
 
@@ -739,11 +664,11 @@ Load `requesting-code-review` and `chinese-code-comments`. Review:
 ```powershell
 git diff --stat 5a1b0b6..HEAD
 git diff --check 5a1b0b6..HEAD
-git diff 5a1b0b6..HEAD -- SKILL.md tests/git-commit-assistant.contract.test.js README.md docs/skill-brief.md docs/decisions.md docs/delivery-report.md evals/evals.json
+git diff 5a1b0b6..HEAD -- SKILL.md README.md docs/skill-brief.md docs/decisions.md docs/delivery-report.md evals/evals.json
 git status --short --branch
 ```
 
-Check requirement drift, unsafe commands, secret or private identity leakage, stale prose, untracked delivery files, and test comments. The JavaScript test should need no explanatory comment unless a non-obvious invariant cannot be expressed by its test name and assertion. Record the completed comment review even when no comment is added.
+Check requirement drift, unsafe commands, secret or private identity leakage, stale prose, and untracked delivery files. Confirm that no runtime or test code was added for a prompt-only Skill and that existing code comments remain accurate; record the completed comment review even when no comment change is needed.
 
 - [ ] **Step 2: Re-run final checks after any review fix**
 
