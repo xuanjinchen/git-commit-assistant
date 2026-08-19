@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible scaffold defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets or private repository content. Report vulnerabilities through the private process in SECURITY.md.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest repository state and exact commands that reproduce the issue.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system, Node.js version, npm version, and agent or shell.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation output
+      description: Include redacted output from the relevant npm run check or audit command.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: List affected platforms, agents, existing initialized Skills, or state formats.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Sensitive information review
+      options:
+        - label: I removed credentials, private paths, customer data, and other sensitive information.
+          required: true

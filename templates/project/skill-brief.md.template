@@ -58,3 +58,15 @@ License: {{LICENSE_ID}}
 ```
 
 Replace the empty acceptance criteria with measurable requirements before implementation begins.
+
+## Evidence References
+
+Evidence Contract v1 uses field-specific repository-relative references.
+
+- `artifact:path#sha256` means `artifact:<path>#sha256:<64 lowercase hex digest>`.
+- `path:` means `path:<path>` for delivery implementation.
+- `eval:` means `eval:<evaluation-id>[,<evaluation-id>...]` from `evals/evals.json`, such as `eval:EVAL-001,EVAL-002`.
+
+Enabled tracks, prompt budgets, evaluation results, and capability claims use `artifact:` evidence. Disabled tracks record a non-empty reason. Blocked tracks use `required:<work>;impact:<delivery-impact>` and an `unblock_condition`.
+
+Use stable IDs for conflicts and acceptance criteria. Acceptance criteria record a measurable requirement, verification method, and status. The matching requirement entry in `docs/delivery-report.md` places `path:` in `implementation` and `eval:` in `verification`; adding those fields to an acceptance criterion would violate the strict schema. The Gate checks the recorded contract but does not run an Agent or prove that a model actually produced the result.

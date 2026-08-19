@@ -1,6 +1,6 @@
 # 成熟 Skill 独立开发实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Execute this plan task by task. Prefer isolated subagents when the environment supports them; otherwise use one implementation pass and an independent final review. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 使开发 Agent 在只获得一个明确 Skill 目标的情况下，能够独立完成需求固化、设计、实现、评测、按需工程化、安全检查和可发布交付。
 
@@ -88,6 +88,16 @@ Skill Brief 必须维护以下状态，值只能是 `enabled`、`disabled` 或 `
 - 继续执行会覆盖不属于本任务的用户修改。
 
 其他选择由 Agent 做出最小、可逆、符合项目惯例的决定并记录在 `docs/decisions.md`。
+
+### 证据引用规范
+
+Evidence Contract v1 的证据字段只使用稳定 ID 和仓库相对引用。每个字段使用契约规定的一种引用：
+
+- `artifact:path#sha256`：实际写为 `artifact:<path>#sha256:<64 位小写十六进制摘要>`。
+- `path:`：实际写为 `path:<path>`。
+- `eval:`：实际写为 `eval:<evaluation-id>[,<evaluation-id>...]`，例如 `eval:EVAL-001,EVAL-002`；ID 必须存在于当前评测集且唯一。
+
+路径使用 `/`，不得包含片段、绝对路径、URL、`.` 或 `..` 段。enabled 轨道、Prompt 预算、评测结果和能力声明使用 `artifact:`；交付追踪的 `implementation` 使用 `path:`，`verification` 使用 `eval:`。disabled 轨道写明理由；blocked 轨道使用 `required:<work>;impact:<delivery-impact>` 并填写解除条件。Gate 只确定性检查记录的契约，不证明模型真实运行或证据内容真实，最终交付仍需真实 Agent 运行和独立复核。
 
 ---
 
@@ -985,7 +995,7 @@ git commit -m "chore: automate skill releases"
 
 - [ ] **Step 1: 建立需求追踪矩阵**
 
-`docs/delivery-report.md` 对每条验收标准列出实现位置、测试或评测证据、状态和说明。状态只使用 `passed`、`blocked` 或 `not-applicable`；`blocked` 必须说明为何仍可或不可交付。
+`docs/delivery-report.md` 对每条验收标准列出实现位置、测试或评测证据、状态和说明。状态只使用 Evidence Contract v1 允许的 `pass` 或 `blocked`；最终 Gate 要求每条交付需求均为 `pass`，未启用能力通过轨道的 `disabled` 状态记录，不伪造 `not-applicable` 需求。
 
 - [ ] **Step 2: 重跑完整确定性门**
 
