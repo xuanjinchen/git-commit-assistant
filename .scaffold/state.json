@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scaffold_version": "0.1.0",
+  "status": "draft",
+  "skill": {
+    "name": "git-commit-assistant",
+    "description": "Generate Conventional Commit messages from staged Git changes when Codex is asked to commit, and run git commit only after explicit confirmation.",
+    "license": "Apache-2.0"
+  },
+  "initialized_at": "2026-08-19",
+  "initial_files": {
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "README.md": "79c2c816af1fa6991e854633489c303d62c1d092d2865a16c3beb601855432b1",
+    "SKILL.md": "2468a36ffc7b772c4c02a742919b56787e3a4fdb09e1cd5c99670617cfb2bb21",
+    "docs/decisions.md": "ff46c52aba621ec361f228be18b53dc6a2f64e6e71cf421b6ce0cbd907527792",
+    "docs/delivery-report.md": "2dd5e95e1ab25feda48c977084a6fe0e1f93f030df44aacaff43dc373c1a7441",
+    "docs/skill-brief.md": "e7415d1a69a9cb6fdca1939a940e0320d401ee92db91b6fac9b0d050f2bd63d8",
+    "evals/evals.json": "f610ed09598b8dede93e981cb2b78412ba595d179d5720f8a24a34d2a9a25fae",
+    "package-lock.json": "739d7cb3cbe1016ae0f6f5626e33c9e0a82e41bfd37bbd6ae20ee71f9b9be1c3",
+    "package.json": "28f5d59bbec0005d6ff879619484d4f47089e0d397fefb45be24f6e48f4223fa"
+  }
+}

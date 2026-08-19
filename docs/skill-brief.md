@@ -1,0 +1,72 @@
+# Skill Brief
+
+Skill: git\-commit\-assistant
+Objective: Generate Conventional Commit messages from staged Git changes when Codex is asked to commit\, and run git commit only after explicit confirmation\.
+Initialized: 2026\-08\-19
+License: Apache\-2\.0
+
+<!-- scaffold-contract:skill-brief:v1 -->
+```json
+{
+  "schema_version": 1,
+  "status": "draft",
+  "conflicts": [],
+  "acceptance_criteria": [],
+  "tracks": {
+    "references": {
+      "status": "disabled",
+      "evidence": "Disabled at initialization until the Skill Brief records enabling evidence.",
+      "unblock_condition": ""
+    },
+    "scripts": {
+      "status": "disabled",
+      "evidence": "Disabled at initialization until deterministic automation is justified.",
+      "unblock_condition": ""
+    },
+    "assets": {
+      "status": "disabled",
+      "evidence": "Disabled at initialization until reusable assets are required.",
+      "unblock_condition": ""
+    },
+    "implicit-trigger": {
+      "status": "disabled",
+      "evidence": "Disabled at initialization until implicit activation is explicitly required.",
+      "unblock_condition": ""
+    },
+    "multi-agent": {
+      "status": "disabled",
+      "evidence": "Disabled at initialization until more than one Agent needs verified support.",
+      "unblock_condition": ""
+    },
+    "installer": {
+      "status": "disabled",
+      "evidence": "Disabled at initialization until managed installation is justified.",
+      "unblock_condition": ""
+    },
+    "open-source-release": {
+      "status": "disabled",
+      "evidence": "Disabled at initialization until public release is explicitly approved.",
+      "unblock_condition": ""
+    }
+  },
+  "prompt_budget": {
+    "limit_tokens": null,
+    "measured_tokens": null,
+    "evidence": ""
+  }
+}
+```
+
+Replace the empty acceptance criteria with measurable requirements before implementation begins.
+
+## Evidence References
+
+Evidence Contract v1 uses field-specific repository-relative references.
+
+- `artifact:path#sha256` means `artifact:<path>#sha256:<64 lowercase hex digest>`.
+- `path:` means `path:<path>` for delivery implementation.
+- `eval:` means `eval:<evaluation-id>[,<evaluation-id>...]` from `evals/evals.json`, such as `eval:EVAL-001,EVAL-002`.
+
+Enabled tracks, prompt budgets, evaluation results, and capability claims use `artifact:` evidence. Disabled tracks record a non-empty reason. Blocked tracks use `required:<work>;impact:<delivery-impact>` and an `unblock_condition`.
+
+Use stable IDs for conflicts and acceptance criteria. Acceptance criteria record a measurable requirement, verification method, and status. The matching requirement entry in `docs/delivery-report.md` places `path:` in `implementation` and `eval:` in `verification`; adding those fields to an acceptance criterion would violate the strict schema. The Gate checks the recorded contract but does not run an Agent or prove that a model actually produced the result.

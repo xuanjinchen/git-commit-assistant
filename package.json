@@ -1,7 +1,7 @@
 {
-  "name": "skill-development-scaffold",
+  "name": "git-commit-assistant",
   "version": "0.1.0",
-  "description": "Executable Node.js scaffold for developing mature Agent Skills.",
+  "description": "Generate Conventional Commit messages from staged Git changes when Codex is asked to commit, and run git commit only after explicit confirmation.",
   "private": true,
   "type": "module",
   "engines": {
@@ -17,20 +17,11 @@
     "gate:delivery": "node scripts/delivery-gate.js"
   },
   "files": [
-    "AGENTS.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
-    "LICENSE",
-    "README.md",
-    "SECURITY.md",
-    "docs",
-    "scripts",
-    "src",
-    "templates"
+    "SKILL.md"
   ],
   "license": "Apache-2.0",
   "scaffold": {
-    "mode": "source",
+    "mode": "initialized",
     "version": "0.1.0"
   }
 }
