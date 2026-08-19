@@ -21,8 +21,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-001.txt#sha256:c2d1642dcf8664ceb4c32eaa3f3707452c62e77591d6b1391f9b2c7c7abbcd9b"
       }
     },
     {
@@ -44,8 +44,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-002.txt#sha256:4f244bfbfa05682dee5bd4fb019a6c82f1c1ce5b63d75e9c97713e561940e06b"
       }
     },
     {
@@ -67,8 +67,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-003.txt#sha256:8f3fabf5830edce4d164711c636e9563d258b7825fe48fbc6970c020bdca4093"
       }
     },
     {
@@ -90,8 +90,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-004.txt#sha256:048dd4f2c4e5cb169ea1cd66d46ade7f3df3f3631becf462fb4d2e0de3483bab"
       }
     },
     {
@@ -113,8 +113,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-005.txt#sha256:0ad7a4babde894927ab34655ab50b4848c7cee79424fd3d9caa6eab1e80d8304"
       }
     },
     {
@@ -136,8 +136,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-006.txt#sha256:2f51642bfdf700214a604e8b919fdef08d5a1983f19913e7bd6ebcaa279369da"
       }
     },
     {
@@ -155,8 +155,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-007.txt#sha256:3bf6fb64e631c0c8a10d8cdf508e119dbbcc073cd88b25a039a1d52ad50d7896"
       }
     },
     {
@@ -178,8 +178,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-008.txt#sha256:7eedec0e8041a728cfa9dfbfeb7069c0c4544534524104c527e0cb6d71ed7208"
       }
     },
     {
@@ -201,8 +201,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-009.txt#sha256:b24685e052e728690c962dbbd19a9e1aeca9522d8645fc693256e77b09e7757a"
       }
     }
   ]

@@ -41,32 +41,32 @@ None.
 ```json
 {
   "schema_version": 1,
-  "status": "draft",
+  "status": "ready",
   "conflicts": [],
   "acceptance_criteria": [
     {
       "id": "REQ-001",
       "requirement": "A coherent staged change produces a concise Conventional Commit candidate whose type, optional scope, language, body, and footers are supported by repository evidence.",
       "verification": "EVAL-001 and EVAL-002 plus scaffold structural validation verify message derivation without invented metadata.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-002",
       "requirement": "No commit occurs before explicit confirmation, and confirmation is invalidated whenever the git write-tree identity changes.",
       "verification": "EVAL-001 and EVAL-005 verify the confirmation and staged-snapshot invariants.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-003",
       "requirement": "The Skill stops without weakening safeguards for an empty index, mixed intent, special Git state, likely sensitive material, or hook rejection.",
       "verification": "EVAL-003, EVAL-004, EVAL-006, EVAL-008, and EVAL-009 verify safe stops and unchanged protected state.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-004",
       "requirement": "The description discovers staged commit assistance without attracting adjacent Git explanation, history review, or history rewriting requests.",
       "verification": "Scaffold frontmatter validation plus EVAL-002 and EVAL-007 verify positive and adjacent-negative trigger semantics.",
-      "status": "pending"
+      "status": "pass"
     }
   ],
   "tracks": {
@@ -87,7 +87,7 @@ None.
     },
     "implicit-trigger": {
       "status": "enabled",
-      "evidence": "The user confirmed automatic Codex discovery for ordinary staged commit intent; artifact evidence is attached at delivery.",
+      "evidence": "artifact:SKILL.md#sha256:47edb03f31770ee91ebf52bf18f6740d1f738d114170c93055d9b32ca0a648b6",
       "unblock_condition": ""
     },
     "multi-agent": {
@@ -107,9 +107,9 @@ None.
     }
   },
   "prompt_budget": {
-    "limit_tokens": null,
-    "measured_tokens": null,
-    "evidence": ""
+    "limit_tokens": 1800,
+    "measured_tokens": 1315,
+    "evidence": "artifact:evals/results/prompt-budget.txt#sha256:9dfa442ccde56bd04760579435f9e4cc71e3065929801abc632fa94238fa3717"
   }
 }
 ```
