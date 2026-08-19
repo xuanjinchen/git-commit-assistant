@@ -1,27 +1,16 @@
 #!/usr/bin/env node
 
-import {
-  InitArgsError,
-  formatInitHelp,
-  parseInitArgs,
-} from '../src/cli.js';
+import { fileURLToPath } from 'node:url';
 
-try {
-  const options = parseInitArgs(process.argv.slice(2));
+import { runInitCli } from '../src/cli.js';
 
-  if (options.help) {
-    process.stdout.write(formatInitHelp());
-  } else {
-    // 帮助路径不得加载初始化器，避免只读查询依赖后续写入模块。
-    const { initializeSkill } = await import('../src/initialize.js');
-    await initializeSkill(options);
-  }
-} catch (error) {
-  if (error instanceof InitArgsError) {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = 2;
-  } else {
-    console.error(error);
-    process.exitCode = 1;
-  }
-}
+const result = await runInitCli(process.argv.slice(2), {
+  root: fileURLToPath(new URL('..', import.meta.url)),
+  streams: {
+    stdout: process.stdout,
+    stderr: process.stderr,
+  },
+  now: () => new Date(),
+});
+
+process.exitCode = result.exitCode;

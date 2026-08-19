@@ -1,8 +1,13 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
 const DEFAULT_LICENSE = 'Apache-2.0';
 const LICENSES = new Set(['Apache-2.0', 'MIT', 'UNLICENSED']);
 const NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const VALUE_OPTIONS = new Set(['--name', '--description', '--license']);
 const FLAG_OPTIONS = new Set(['--dry-run', '--help']);
+const SOURCE_ORIGIN_WARNING = 'origin still points to xuanjinchen/skill-development-scaffold; update it before publishing.';
+const execFileAsync = promisify(execFile);
 
 export class InitArgsError extends Error {
   constructor(message) {
@@ -121,4 +126,213 @@ export function formatInitHelp() {
     '  --help                    Print this help',
     '',
   ].join('\n');
+}
+
+function validateCliContext(context) {
+  if (context === null || typeof context !== 'object' || Array.isArray(context)) {
+    throw new TypeError('CLI context must be an object.');
+  }
+  if (typeof context.root !== 'string' || context.root.length === 0) {
+    throw new TypeError('CLI context.root must be a repository path.');
+  }
+  if (
+    context.streams === null
+    || typeof context.streams !== 'object'
+    || typeof context.streams.stdout?.write !== 'function'
+    || typeof context.streams.stderr?.write !== 'function'
+  ) {
+    throw new TypeError('CLI context.streams must provide stdout and stderr writers.');
+  }
+  if (typeof context.now !== 'function') {
+    throw new TypeError('CLI context.now must be a function.');
+  }
+  return context;
+}
+
+function compareOrdinal(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function formatFiles(title, files) {
+  const lines = [title];
+  if (files.length === 0) {
+    lines.push('  - (none)');
+  } else {
+    lines.push(...files.map((target) => `  - ${target}`));
+  }
+  return lines;
+}
+
+function formatInitialization(result, options, warnings) {
+  const planned = result.status === 'dry-run' ? ' (planned)' : '';
+  const targetsByKind = {
+    create: [],
+    update: [],
+    delete: [],
+  };
+  for (const file of result.files) {
+    targetsByKind[file.kind].push(file.target);
+  }
+  for (const targets of Object.values(targetsByKind)) {
+    targets.sort(compareOrdinal);
+  }
+
+  const lines = [
+    `Status: ${result.status}`,
+    `Skill: ${options.name}`,
+    `License: ${options.license}`,
+  ];
+  if (result.status === 'dry-run') {
+    lines.push('No files were changed.');
+  }
+  lines.push(
+    ...formatFiles(`Created${planned}:`, targetsByKind.create),
+    ...formatFiles(`Updated${planned}:`, targetsByKind.update),
+    ...formatFiles(`Removed${planned}:`, targetsByKind.delete),
+    'Warnings:',
+    ...(warnings.length === 0
+      ? ['  - (none)']
+      : warnings.map((warning) => `  - ${warning}`)),
+    'Next:',
+    '  npm run check',
+    '  Read docs/skill-brief.md and docs/mature-skill-development-plan.md',
+    '',
+  );
+  return lines.join('\n');
+}
+
+async function readOrigin(root) {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['config', '--get', 'remote.origin.url'],
+      { cwd: root, encoding: 'utf8', windowsHide: true },
+    );
+    return stdout.trim();
+  } catch {
+    // 缺少 Git 仓库或 origin 不应阻止初始化，远端提示保持只读且尽力而为。
+    return null;
+  }
+}
+
+function isSourceOrigin(origin) {
+  if (origin === null) {
+    return false;
+  }
+  const expectedPath = 'xuanjinchen/skill-development-scaffold';
+  const normalizePath = (value) => value
+    .replace(/^\/+|\/+$/gu, '')
+    .replace(/\.git$/iu, '')
+    .toLowerCase();
+
+  try {
+    const parsed = new URL(origin);
+    return parsed.hostname.toLowerCase() === 'github.com'
+      && normalizePath(parsed.pathname) === expectedPath;
+  } catch {
+    const scp = origin.match(/^(?:[^@\s]+@)?([^:/\s]+):(.+)$/u);
+    return scp !== null
+      && scp[1].toLowerCase() === 'github.com'
+      && normalizePath(scp[2]) === expectedPath;
+  }
+}
+
+function writeOutput(stream, content) {
+  if (content === '') {
+    return Promise.resolve();
+  }
+  if (typeof stream.once !== 'function' || typeof stream.removeListener !== 'function') {
+    stream.write(content);
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onError = (error) => {
+      stream.removeListener('error', onError);
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+    stream.once('error', onError);
+    try {
+      stream.write(content, (error) => {
+        if (error) {
+          if (!settled) {
+            // 保留一次 error 监听，消费 Writable 在失败回调后继续派发的错误事件。
+            settled = true;
+            reject(error);
+          }
+          return;
+        }
+        if (!settled) {
+          settled = true;
+          stream.removeListener('error', onError);
+          resolve();
+        }
+      });
+    } catch (error) {
+      stream.removeListener('error', onError);
+      settled = true;
+      reject(error);
+    }
+  });
+}
+
+async function deliverResult(cliContext, result) {
+  try {
+    await writeOutput(cliContext.streams.stdout, result.stdout);
+  } catch (error) {
+    const failure = `Output failed: ${error instanceof Error ? error.message : String(error)}\n`;
+    try {
+      await writeOutput(cliContext.streams.stderr, failure);
+    } catch {
+      // 返回结构仍保留失败原因；第二个流也不可写时没有可靠的额外报告通道。
+    }
+    return { exitCode: 1, stdout: '', stderr: failure };
+  }
+
+  try {
+    await writeOutput(cliContext.streams.stderr, result.stderr);
+  } catch (error) {
+    return {
+      exitCode: 1,
+      stdout: result.stdout,
+      stderr: `Output failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    };
+  }
+  return result;
+}
+
+export async function runInitCli(argv, context) {
+  const cliContext = validateCliContext(context);
+  let exitCode = 0;
+  let stdout = '';
+  let stderr = '';
+
+  try {
+    const options = parseInitArgs(argv);
+    if (options.help) {
+      stdout = formatInitHelp();
+    } else {
+      // 帮助路径不加载写入模块，保证只读查询不依赖初始化实现。
+      const { initializeSkill } = await import('./initialize.js');
+      const result = await initializeSkill(options, {
+        root: cliContext.root,
+        now: cliContext.now,
+      });
+      const warnings = [...result.warnings];
+      if (isSourceOrigin(await readOrigin(cliContext.root))) {
+        warnings.push(SOURCE_ORIGIN_WARNING);
+      }
+      stdout = formatInitialization(result, options, [...new Set(warnings)]);
+    }
+  } catch (error) {
+    exitCode = error instanceof InitArgsError ? 2 : 1;
+    const message = error instanceof Error ? error.message : String(error);
+    stderr = exitCode === 2 ? `${message}\n` : `Initialization failed: ${message}\n`;
+  }
+
+  return deliverResult(cliContext, { exitCode, stdout, stderr });
 }
