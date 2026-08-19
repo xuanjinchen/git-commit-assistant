@@ -81,6 +81,11 @@ test('accepts a clean repository and explicit public email examples', async (t) 
   );
   git(root, ['add', 'index.js']);
   git(root, ['commit', '--quiet', '-m', 'test: allow GitHub noreply identity']);
+  git(root, [
+    '-c', 'user.name=GitHub',
+    '-c', 'user.email=noreply@github.com',
+    'commit', '--quiet', '--allow-empty', '-m', 'test: allow GitHub merge identity',
+  ]);
 
   const report = await auditRepository(root);
 
@@ -284,12 +289,16 @@ test('rejects unsafe and non-whitelisted package entries deterministically', asy
   const root = await createRepository(t);
   const report = await auditRepository(root, {
     packEntries: [
+      { path: 'package/CHANGELOG.md' },
       { path: 'package/README.md' },
       { path: 'package/tests/secret.test.js' },
       { path: 'package/.scaffold/state.json' },
       { path: 'package/eval-workspaces/run/output.json' },
       { path: 'package/docs/.scaffold/state.json' },
       { path: 'package/src/eval-workspaces/output.json' },
+      { path: 'package/docs/.brief.md.00000000-0000-4000-8000-000000000000.0.stage' },
+      { path: 'package/src/.audit.js.00000000-0000-4000-8000-000000000000.backup' },
+      { path: 'package/.scaffold-init.lock.00000000-0000-4000-8000-000000000000.lock-recovery-detached' },
       { path: 'package/debug.log' },
       { path: 'package/credentials.json' },
       { path: 'package/../outside.txt' },
@@ -298,11 +307,15 @@ test('rejects unsafe and non-whitelisted package entries deterministically', asy
   });
   const keys = issueKeys(report);
 
+  assert.equal(keys.has('PACKAGE_FILE_FORBIDDEN:package:CHANGELOG.md'), false);
   assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:tests/secret.test.js'));
   assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:.scaffold/state.json'));
   assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:eval-workspaces/run/output.json'));
   assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:docs/.scaffold/state.json'));
   assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:src/eval-workspaces/output.json'));
+  assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:docs/.brief.md.00000000-0000-4000-8000-000000000000.0.stage'));
+  assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:src/.audit.js.00000000-0000-4000-8000-000000000000.backup'));
+  assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:.scaffold-init.lock.00000000-0000-4000-8000-000000000000.lock-recovery-detached'));
   assert.ok(keys.has('PACKAGE_FILE_FORBIDDEN:package:debug.log'));
   assert.ok(keys.has('SENSITIVE_FILENAME:package:credentials.json'));
   assert.ok(keys.has('PACKAGE_PATH_UNSAFE:package:<redacted>'));
