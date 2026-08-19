@@ -278,11 +278,14 @@ git commit -m "test: define commit assistant behavior contract"
 
 **Files:**
 - Modify: `SKILL.md`
+- Modify: `.scaffold/state.json`
+- Modify: `package.json`
+- Modify: `package-lock.json`
 - Use but never stage: `eval-workspaces/red-green/`
 
 **Interfaces:**
 - Consumes: Task 1 requirements and evaluation vocabulary.
-- Produces: installable `SKILL.md` plus observed RED/GREEN evidence from independent Agents consuming the Skill in an isolated Git repository.
+- Produces: installable `SKILL.md`, synchronized initialized-description metadata, and observed RED/GREEN evidence from independent Agents consuming the Skill in an isolated Git repository.
 
 - [ ] **Step 1: Create an isolated failing behavior case**
 
@@ -350,6 +353,8 @@ If Git or a hook fails, report the failure without retrying or weakening safegua
 Do not reproduce secrets or claim tests, compatibility, commits, or pushes that were not verified.
 ```
 
+Synchronize the exact frontmatter description into `.scaffold/state.json#skill.description`, `package.json#description`, and `package-lock.json#packages[""]#description`. Preserve every other state field and every `initial_files` digest. This metadata synchronization is development-only; `package.json#files` remains exactly `["SKILL.md"]`.
+
 - [ ] **Step 4: Verify GREEN with a fresh evaluator Agent**
 
 Reset a copy of the same RED fixture to its original pre-proposal state. Give a new evaluator Agent the implemented `SKILL.md` and the same frozen prompt, then repeat the staged-index mutation before approval. Verify it records the first tree identity, detects the changed second identity, invalidates the approval, and leaves HEAD unchanged. Store the exact output and Git evidence under ignored `eval-workspaces/red-green/EVAL-005/green/`.
@@ -370,7 +375,7 @@ Expected: the full scaffold check has zero failures; initialized digest drift ma
 - [ ] **Step 6: Commit the core Skill**
 
 ```powershell
-git add -- SKILL.md
+git add -- SKILL.md .scaffold/state.json package.json package-lock.json
 git diff --cached --check
 git commit -m "feat: define staged commit workflow"
 ```
