@@ -11,10 +11,15 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { initializeSkill, planInitialization } from '../src/initialize.js';
 import { readScaffoldState } from '../src/state.js';
 import { createRepositoryFixture } from './helpers/repository-fixture.js';
+
+const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const SOURCE_MODE = JSON.parse(await readFile(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).scaffold.mode;
+const sourceTest = SOURCE_MODE === 'source' ? test : test.skip;
 
 const OPTIONS = Object.freeze({
   name: 'example-skill',
@@ -70,7 +75,7 @@ async function snapshotTree(root) {
   return snapshot;
 }
 
-test('plans all outputs with explicit ownership and state last', async (t) => {
+sourceTest('plans all outputs with explicit ownership and state last', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   const sourcePackage = await readFile(path.join(root, 'package.json'));
   const plan = await planInitialization(OPTIONS, context);
@@ -107,7 +112,7 @@ test('plans all outputs with explicit ownership and state last', async (t) => {
   assert.deepEqual(plan.warnings, []);
 });
 
-test('initializes package metadata structurally and preserves source fields', async (t) => {
+sourceTest('initializes package metadata structurally and preserves source fields', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   const sourcePackage = await readJson(root, 'package.json');
   sourcePackage.repositoryFixtureField = { preserved: true };
@@ -150,7 +155,7 @@ test('initializes package metadata structurally and preserves source fields', as
   assert.deepEqual(Object.keys(state.initial_files), EXPECTED_TARGETS.slice(0, -1).sort());
 });
 
-test('rejects package-lock metadata that differs from package.json', async (t) => {
+sourceTest('rejects package-lock metadata that differs from package.json', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   const packageLock = await readJson(root, 'package-lock.json');
   packageLock.version = '9.9.9';
@@ -160,7 +165,7 @@ test('rejects package-lock metadata that differs from package.json', async (t) =
   await assert.rejects(() => planInitialization(OPTIONS, context), /package-lock|metadata|version/iu);
 });
 
-test('supports Apache-2.0, MIT, and UNLICENSED outputs', async (t) => {
+sourceTest('supports Apache-2.0, MIT, and UNLICENSED outputs', async (t) => {
   for (const license of ['Apache-2.0', 'MIT', 'UNLICENSED']) {
     await t.test(license, async (st) => {
       const { root, context } = await createRepositoryFixture(st);
@@ -184,7 +189,7 @@ test('supports Apache-2.0, MIT, and UNLICENSED outputs', async (t) => {
   }
 });
 
-test('rejects occupied outputs and invalid source ownership before transaction execution', async (t) => {
+sourceTest('rejects occupied outputs and invalid source ownership before transaction execution', async (t) => {
   const cases = [
     ['existing root SKILL.md', async (root) => writeFile(path.join(root, 'SKILL.md'), 'owned\n')],
     ['occupied docs target', async (root) => writeFile(path.join(root, 'docs/skill-brief.md'), 'owned\n')],
@@ -216,7 +221,7 @@ test('rejects occupied outputs and invalid source ownership before transaction e
   }
 });
 
-test('rejects a linked output target during preflight', async (t) => {
+sourceTest('rejects a linked output target during preflight', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   const outside = path.join(tmpdir(), `scaffold-linked-${process.pid}-${Date.now()}.md`);
   t.after(async () => rm(outside, { force: true }));
@@ -226,7 +231,7 @@ test('rejects a linked output target during preflight', async (t) => {
   await assert.rejects(() => planInitialization(OPTIONS, context), /link|symbolic/iu);
 });
 
-test('dry-run returns operation kinds without changing the repository or acquiring a lock', async (t) => {
+sourceTest('dry-run returns operation kinds without changing the repository or acquiring a lock', async (t) => {
   const { root, context } = await createRepositoryFixture(t, {
     transactionFaults: {
       stage() {
@@ -245,7 +250,7 @@ test('dry-run returns operation kinds without changing the repository or acquiri
   await assert.rejects(() => lstat(path.join(root, '.scaffold-init.lock')), { code: 'ENOENT' });
 });
 
-test('same initialization state is idempotent and preserves later Agent edits', async (t) => {
+sourceTest('same initialization state is idempotent and preserves later Agent edits', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   await initializeSkill(OPTIONS, context);
   await writeFile(path.join(root, 'SKILL.md'), 'agent-maintained\n');
@@ -260,7 +265,7 @@ test('same initialization state is idempotent and preserves later Agent edits', 
   assert.equal(await readFile(path.join(root, 'SKILL.md'), 'utf8'), 'agent-maintained\n');
 });
 
-test('UNLICENSED idempotency rejects a reintroduced license file', async (t) => {
+sourceTest('UNLICENSED idempotency rejects a reintroduced license file', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   const options = { ...OPTIONS, license: 'UNLICENSED' };
   await initializeSkill(options, context);
@@ -269,7 +274,7 @@ test('UNLICENSED idempotency rejects a reintroduced license file', async (t) => 
   await assert.rejects(() => initializeSkill(options, context), /LICENSE|UNLICENSED|conflict/iu);
 });
 
-test('initialization leaves Git remote configuration byte-identical', async (t) => {
+sourceTest('initialization leaves Git remote configuration byte-identical', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   const configPath = path.join(root, '.git', 'config');
   const before = await readFile(configPath);
@@ -279,7 +284,7 @@ test('initialization leaves Git remote configuration byte-identical', async (t) 
   assert.equal((await readFile(configPath)).equals(before), true);
 });
 
-test('rejects state whose declared outputs are missing without comparing edited digests', async (t) => {
+sourceTest('rejects state whose declared outputs are missing without comparing edited digests', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   await initializeSkill(OPTIONS, context);
   await rm(path.join(root, 'SKILL.md'));
@@ -287,7 +292,7 @@ test('rejects state whose declared outputs are missing without comparing edited 
   await assert.rejects(() => initializeSkill(OPTIONS, context), /missing|SKILL\.md/iu);
 });
 
-test('rejects different arguments after initialization without overwriting files', async (t) => {
+sourceTest('rejects different arguments after initialization without overwriting files', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   await initializeSkill(OPTIONS, context);
   const before = await snapshotTree(root);
@@ -299,14 +304,14 @@ test('rejects different arguments after initialization without overwriting files
   assert.deepEqual(await snapshotTree(root), before);
 });
 
-test('rejects outputs without state as source collisions', async (t) => {
+sourceTest('rejects outputs without state as source collisions', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   await writeFile(path.join(root, 'SKILL.md'), 'orphaned output\n');
 
   await assert.rejects(() => planInitialization(OPTIONS, context), /conflict|SKILL\.md/iu);
 });
 
-test('rebuilds ownership under the lock and cleanly rejects concurrent license changes', async (t) => {
+sourceTest('rebuilds ownership under the lock and cleanly rejects concurrent license changes', async (t) => {
   let lockObserved = false;
   let root;
   const fixture = await createRepositoryFixture(t, {
@@ -328,7 +333,7 @@ test('rebuilds ownership under the lock and cleanly rejects concurrent license c
   await assert.rejects(() => lstat(path.join(root, '.scaffold', 'state.json')), { code: 'ENOENT' });
 });
 
-test('does not reuse a plan built before source ownership changes', async (t) => {
+sourceTest('does not reuse a plan built before source ownership changes', async (t) => {
   const { root, context } = await createRepositoryFixture(t);
   await planInitialization(OPTIONS, context);
   await writeFile(path.join(root, 'README.md'), '# changed ownership\n');

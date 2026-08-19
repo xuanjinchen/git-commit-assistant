@@ -3,6 +3,7 @@ import { lstat, open, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { assertScaffoldState } from './state.js';
+import { escapeMarkdown } from './templates.js';
 
 const SOURCE_MARKER = '<!-- skill-development-scaffold:source -->';
 const SCAFFOLD_VERSION = '0.1.0';
@@ -10,8 +11,10 @@ const SOURCE_NAME = 'skill-development-scaffold';
 const SOURCE_DESCRIPTION = 'Executable Node.js scaffold for developing mature Agent Skills.';
 const SOURCE_SCRIPTS = Object.freeze({
   'init:skill': 'node scripts/init-skill.js',
+  'recover:lock': 'node scripts/recover-lock.js',
   test: 'node --test',
   validate: 'node scripts/validate.js',
+  audit: 'node scripts/audit.js',
   check: 'npm test && npm run validate',
   'gate:delivery': 'node scripts/delivery-gate.js',
 });
@@ -27,13 +30,26 @@ const SOURCE_FILES = Object.freeze([
   'templates',
 ]);
 const INITIALIZED_FILES = Object.freeze(['SKILL.md']);
-// Task 10/11 创建这些发布文件后，应将其移出阶段性可选集合。
-const OPTIONAL_SOURCE_FILES = new Set(['AGENTS.md', 'CONTRIBUTING.md', 'SECURITY.md']);
+const OPTIONAL_SOURCE_FILES = new Set();
 const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/mature-skill-development-design.md',
   'docs/mature-skill-development-plan.md',
+  'docs/scaffold-usage.md',
+  'scripts/audit.js',
+  'scripts/delivery-gate.js',
   'scripts/init-skill.js',
+  'scripts/recover-lock.js',
   'scripts/validate.js',
+  'src/audit.js',
+  'src/cli.js',
+  'src/delivery-gate.js',
+  'src/initialize.js',
+  'src/output.js',
+  'src/recover-lock.js',
+  'src/state.js',
+  'src/templates.js',
+  'src/transaction.js',
+  'src/validate.js',
   'templates/licenses/Apache-2.0.txt',
   'templates/licenses/MIT.txt',
   'templates/project/README.md.template',
@@ -827,7 +843,7 @@ export async function validateRepository(root) {
     }
 
     const readme = await readText('README.md', { missingCode: 'INITIALIZED_FILE_MISSING' });
-    if (readme !== null && state !== null && !readme.startsWith(`# ${state.skill.name}\n`)) {
+    if (readme !== null && state !== null && !readme.startsWith(`# ${escapeMarkdown(state.skill.name)}\n`)) {
       addIssue(errors, 'README_NAME_MISMATCH', 'README.md', 'README heading must match the Skill name');
     }
 

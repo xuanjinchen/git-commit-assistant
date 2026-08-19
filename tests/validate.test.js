@@ -32,8 +32,22 @@ const SOURCE_FILES = [
 const REQUIRED_SOURCE_FILES = [
   'docs/mature-skill-development-design.md',
   'docs/mature-skill-development-plan.md',
+  'docs/scaffold-usage.md',
+  'scripts/audit.js',
+  'scripts/delivery-gate.js',
   'scripts/init-skill.js',
+  'scripts/recover-lock.js',
   'scripts/validate.js',
+  'src/audit.js',
+  'src/cli.js',
+  'src/delivery-gate.js',
+  'src/initialize.js',
+  'src/output.js',
+  'src/recover-lock.js',
+  'src/state.js',
+  'src/templates.js',
+  'src/transaction.js',
+  'src/validate.js',
   'templates/licenses/Apache-2.0.txt',
   'templates/licenses/MIT.txt',
   'templates/project/README.md.template',
@@ -72,8 +86,10 @@ function packageJson(mode = 'source', skill = SKILL) {
     engines: { node: '>=22' },
     scripts: {
       'init:skill': 'node scripts/init-skill.js',
+      'recover:lock': 'node scripts/recover-lock.js',
       test: 'node --test',
       validate: 'node scripts/validate.js',
+      audit: 'node scripts/audit.js',
       check: 'npm test && npm run validate',
       'gate:delivery': 'node scripts/delivery-gate.js',
     },
@@ -139,6 +155,9 @@ async function createSourceFixture() {
     }
   }
   await writeText(root, 'src/scaffold.js', 'export const scaffold = true;\n');
+  for (const relativePath of ['AGENTS.md', 'CONTRIBUTING.md', 'SECURITY.md']) {
+    await writeText(root, relativePath, `fixture for ${relativePath}\n`);
+  }
   await writeText(root, 'LICENSE', await canonicalLicense('Apache-2.0'));
   return root;
 }
@@ -207,7 +226,8 @@ async function createInitializedFixture(overrides = {}) {
     'SKILL.md',
     `---\nname: "${skill.name}"\ndescription: "${skill.description}"\n---\n\n# ${skill.name}\n`,
   );
-  await writeText(root, 'README.md', `# ${skill.name}\n\nObjective: ${skill.description}\n`);
+  const renderedSkillName = skill.name.replaceAll('-', '\\-');
+  await writeText(root, 'README.md', `# ${renderedSkillName}\n\nObjective: ${skill.description}\n`);
   await writeText(
     root,
     'docs/skill-brief.md',
@@ -301,6 +321,21 @@ test('accepts a valid source repository', async () => {
   assert.equal(report.mode, 'source');
   assert.deepEqual(report.errors, []);
   assert.deepEqual(report.warnings, []);
+});
+
+test('requires completed governance files and executable command sources', async () => {
+  const root = await createSourceFixture();
+  await rm(path.join(root, 'AGENTS.md'));
+  await rm(path.join(root, 'scripts', 'audit.js'));
+
+  const report = await validateRepository(root);
+  const missingPaths = new Set(
+    report.errors
+      .filter(({ code }) => code === 'SOURCE_FILE_MISSING')
+      .map(({ path: issuePath }) => issuePath),
+  );
+  assert.ok(missingPaths.has('AGENTS.md'));
+  assert.ok(missingPaths.has('scripts/audit.js'));
 });
 
 test('reports source ownership, required file, lock, license, and publish issues', async () => {
@@ -632,7 +667,7 @@ test('reports state digest drift as a warning without failing validation', async
   await writeText(
     root,
     'README.md',
-    '# example-skill\n\nObjective: Create consistent example outputs\n\nMaintained later.\n',
+    '# example\\-skill\n\nObjective: Create consistent example outputs\n\nMaintained later.\n',
   );
 
   const report = await validateRepository(root);

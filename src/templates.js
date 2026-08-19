@@ -104,7 +104,7 @@ function scanTemplateSource(source, label, values) {
   return matches;
 }
 
-function escapeMarkdown(value) {
+export function escapeMarkdown(value) {
   let output = '';
   for (const character of value) {
     const codePoint = character.codePointAt(0);

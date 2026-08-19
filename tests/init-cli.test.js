@@ -10,6 +10,8 @@ import test from 'node:test';
 import { formatInitHelp, runInitCli } from '../src/cli.js';
 
 const SOURCE_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const SOURCE_MODE = JSON.parse(await readFile(path.join(SOURCE_ROOT, 'package.json'), 'utf8')).scaffold.mode;
+const sourceTest = SOURCE_MODE === 'source' ? test : test.skip;
 const FIXED_NOW = new Date('2026-08-19T12:00:00.000Z');
 const OPTIONS = [
   '--name', 'example-skill',
@@ -69,7 +71,7 @@ function context(root, output) {
   };
 }
 
-test('help exits successfully without reading or changing the repository', async () => {
+sourceTest('help exits successfully without reading or changing the repository', async () => {
   const output = createStreams();
   const result = await runInitCli(['--help'], context('Z:\\missing-repository', output));
 
@@ -81,7 +83,7 @@ test('help exits successfully without reading or changing the repository', async
   assert.deepEqual(output.read(), { stdout: formatInitHelp(), stderr: '' });
 });
 
-test('successful initialization reports stable files, warning, and next commands', async (t) => {
+sourceTest('successful initialization reports stable files, warning, and next commands', async (t) => {
   const root = await createCliFixture(t);
   const output = createStreams();
   const configPath = path.join(root, '.git', 'config');
@@ -120,7 +122,7 @@ test('successful initialization reports stable files, warning, and next commands
   assert.equal(runGit(root, ['remote', 'get-url', 'origin']), SOURCE_ORIGIN);
 });
 
-test('dry-run labels planned operations and changes no files', async (t) => {
+sourceTest('dry-run labels planned operations and changes no files', async (t) => {
   const root = await createCliFixture(t, { origin: null });
   const output = createStreams();
   const packageBefore = await readFile(path.join(root, 'package.json'));
@@ -141,7 +143,7 @@ test('dry-run labels planned operations and changes no files', async (t) => {
   await assert.rejects(() => lstat(path.join(root, '.scaffold', 'state.json')), { code: 'ENOENT' });
 });
 
-test('repeated initialization reports idempotency without rewriting Agent files', async (t) => {
+sourceTest('repeated initialization reports idempotency without rewriting Agent files', async (t) => {
   const root = await createCliFixture(t, { origin: null });
   await runInitCli(OPTIONS, context(root, createStreams()));
   await writeFile(path.join(root, 'SKILL.md'), 'agent-maintained\n');
@@ -155,7 +157,7 @@ test('repeated initialization reports idempotency without rewriting Agent files'
   assert.equal(await readFile(path.join(root, 'SKILL.md'), 'utf8'), 'agent-maintained\n');
 });
 
-test('argument errors exit with code 2 and no stack trace', async (t) => {
+sourceTest('argument errors exit with code 2 and no stack trace', async (t) => {
   const root = await createCliFixture(t);
   const output = createStreams();
 
@@ -169,7 +171,7 @@ test('argument errors exit with code 2 and no stack trace', async (t) => {
   assert.doesNotMatch(result.stderr, /InitArgsError|\n\s+at /u);
 });
 
-test('source collisions exit with code 1 without overwriting the conflicting file', async (t) => {
+sourceTest('source collisions exit with code 1 without overwriting the conflicting file', async (t) => {
   const root = await createCliFixture(t);
   await writeFile(path.join(root, 'SKILL.md'), 'existing owner\n');
   const output = createStreams();
@@ -183,7 +185,7 @@ test('source collisions exit with code 1 without overwriting the conflicting fil
   assert.equal(await readFile(path.join(root, 'SKILL.md'), 'utf8'), 'existing owner\n');
 });
 
-test('copied executable resolves its repository root and preserves origin configuration', async (t) => {
+sourceTest('copied executable resolves its repository root and preserves origin configuration', async (t) => {
   const root = await createCliFixture(t);
   const configPath = path.join(root, '.git', 'config');
   const configBefore = await readFile(configPath);
@@ -202,7 +204,7 @@ test('copied executable resolves its repository root and preserves origin config
   assert.equal(runGit(root, ['remote', 'get-url', 'origin']), SOURCE_ORIGIN);
 });
 
-test('origin warning matches GitHub host and repository path exactly', async (t) => {
+sourceTest('origin warning matches GitHub host and repository path exactly', async (t) => {
   const cases = [
     {
       origin: 'https://example.com/github.com/xuanjinchen/skill-development-scaffold.git',
@@ -221,7 +223,7 @@ test('origin warning matches GitHub host and repository path exactly', async (t)
   }
 });
 
-test('output stream failures resolve with exit code 1', async (t) => {
+sourceTest('output stream failures resolve with exit code 1', async (t) => {
   await t.test('synchronous write failure', async () => {
     const output = createStreams();
     const result = await runInitCli(['--help'], {
