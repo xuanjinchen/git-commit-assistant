@@ -1,4 +1,4 @@
-# Git Commit Assistant
+# git-commit-assistant
 
 This Skill turns already staged changes into an evidence-based Conventional Commit candidate and creates the commit only after explicit confirmation.
 
@@ -20,7 +20,7 @@ git-commit-assistant/
 Copy that whole directory into the Codex Skill root configured for your environment. For example, in PowerShell, replace the example root with your actual Skill root:
 
 ```powershell
-$skillRoot = "C:\example\Codex\skills"
+$skillRoot = Join-Path $env:USERPROFILE ".codex\skills"
 Copy-Item -Recurse -LiteralPath ".\git-commit-assistant" -Destination $skillRoot
 ```
 
