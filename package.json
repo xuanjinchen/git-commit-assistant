@@ -1,0 +1,33 @@
+{
+  "name": "skill-development-scaffold",
+  "version": "0.1.0",
+  "description": "Executable Node.js scaffold for developing mature Agent Skills.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "init:skill": "node scripts/init-skill.js",
+    "test": "node --test",
+    "validate": "node scripts/validate.js",
+    "check": "npm test && npm run validate",
+    "gate:delivery": "node scripts/delivery-gate.js"
+  },
+  "files": [
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "docs",
+    "scripts",
+    "src",
+    "templates"
+  ],
+  "license": "Apache-2.0",
+  "scaffold": {
+    "mode": "source",
+    "version": "0.1.0"
+  }
+}

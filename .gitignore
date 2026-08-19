@@ -1,0 +1,13 @@
+node_modules/
+coverage/
+.tmp/
+eval-workspaces/
+*.log
+.scaffold-init.lock
+*.scaffold-stage-*
+*.scaffold-backup-*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
