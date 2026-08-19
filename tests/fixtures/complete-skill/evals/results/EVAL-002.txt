@@ -1,0 +1,3 @@
+Evaluation: EVAL-002
+Status: pass
+Observed: Summary reported missing facts without inventing implementation details.

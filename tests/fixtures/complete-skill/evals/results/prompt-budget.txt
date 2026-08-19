@@ -1,0 +1,4 @@
+Measurement: prompt budget
+Limit tokens: 1200
+Measured tokens: 840
+Scope: committed prompts only; this artifact does not prove model execution.

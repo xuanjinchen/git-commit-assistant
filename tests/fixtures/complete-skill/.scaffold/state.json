@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "scaffold_version": "0.1.0",
+  "status": "ready",
+  "skill": {
+    "name": "structured-summary-skill",
+    "description": "Generate verified concise structured summaries",
+    "license": "UNLICENSED"
+  },
+  "initialized_at": "2026-08-19",
+  "initial_files": {
+    "README.md": "88ac901f41df6a83facef3798016246348759b6b4f314ab64dba502fd462298b",
+    "SKILL.md": "0cedc38727cb4263fe44b7c4e0efa3824311ee1e740cc98b0a3a4a5d7e7d56a5",
+    "docs/decisions.md": "ff46c52aba621ec361f228be18b53dc6a2f64e6e71cf421b6ce0cbd907527792",
+    "docs/delivery-report.md": "2dd5e95e1ab25feda48c977084a6fe0e1f93f030df44aacaff43dc373c1a7441",
+    "docs/skill-brief.md": "96c051a563a96e768a657f32d0670a0976a4ee35f9223096e990a9da9959c2d2",
+    "evals/evals.json": "5569db3bbb31531df4313c1875a5f5c72141f481f0686ef0306fb713c13693eb",
+    "package-lock.json": "e1f0bd94bf608a8640cf714b66a650c0ed47a8b9ba8ec56be7ef2a17b0336b6f",
+    "package.json": "b5d8db03ee9dd08cddfc4705e2e374ef728da58cfb0b02909f9ad40da46a5c22"
+  }
+}
