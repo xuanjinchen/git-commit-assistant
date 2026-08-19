@@ -1,4 +1,4 @@
-# git-commit-assistant
+# git\-commit\-assistant
 
 This Skill turns already staged changes into an evidence-based Conventional Commit candidate and creates the commit only after explicit confirmation.
 
