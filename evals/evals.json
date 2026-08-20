@@ -18,11 +18,15 @@
         {
           "id": "ASSERT-003",
           "text": "Exactly one commit occurs after approval."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "The resulting commit is unsigned even when local commit.gpgSign=true."
         }
       ],
       "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-001.txt#sha256:c2d1642dcf8664ceb4c32eaa3f3707452c62e77591d6b1391f9b2c7c7abbcd9b"
+        "status": "not-run",
+        "evidence": ""
       }
     },
     {
@@ -44,8 +48,8 @@
         }
       ],
       "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-002.txt#sha256:4f244bfbfa05682dee5bd4fb019a6c82f1c1ce5b63d75e9c97713e561940e06b"
+        "status": "not-run",
+        "evidence": ""
       }
     },
     {
@@ -155,8 +159,8 @@
         }
       ],
       "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-007.txt#sha256:3bf6fb64e631c0c8a10d8cdf508e119dbbcc073cd88b25a039a1d52ad50d7896"
+        "status": "not-run",
+        "evidence": ""
       }
     },
     {
@@ -198,11 +202,15 @@
         {
           "id": "ASSERT-003",
           "text": "HEAD remains unchanged."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "The sole commit attempt includes --no-gpg-sign while still invoking the rejecting hook."
         }
       ],
       "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-009.txt#sha256:b24685e052e728690c962dbbd19a9e1aeca9522d8645fc693256e77b09e7757a"
+        "status": "not-run",
+        "evidence": ""
       }
     }
   ]

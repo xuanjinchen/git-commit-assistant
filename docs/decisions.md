@@ -54,6 +54,22 @@ Record requirement interpretations and superseding decisions without rewriting h
       "decision": "Enable implicit discovery through the SKILL.md description only, with no persistent rule template.",
       "evidence": "User confirmed automatic activation for Codex commit requests.",
       "supersedes": null
+    },
+    {
+      "id": "DEC-007",
+      "status": "active",
+      "scope": "commit execution",
+      "decision": "Run git commit --no-gpg-sign to enforce unsigned commits while preserving configured hook execution.",
+      "evidence": "2026-08-20 independent review proved ordinary git commit can inherit commit.gpgSign=true.",
+      "supersedes": null
+    },
+    {
+      "id": "DEC-008",
+      "status": "active",
+      "scope": "discovery safety",
+      "decision": "Select the matching Skill from a controlled catalog before loading its body.",
+      "evidence": "2026-08-20 remediation requires catalog routing before Skill-body exposure.",
+      "supersedes": null
     }
   ]
 }

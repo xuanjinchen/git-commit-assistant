@@ -3,15 +3,15 @@
 ## Status
 
 - Date: 2026-08-19
-- Status: Confirmed in conversation; pending written-spec review
+- Status: Current; Version 2 remediation confirmed 2026-08-20
 - Skill name: `git-commit-assistant`
-- Objective: Generate Conventional Commit messages from staged Git changes when Codex is asked to commit, and run `git commit` only after explicit confirmation.
+- Objective: Generate Conventional Commit messages from staged Git changes when Codex is asked to commit, and run `git commit --no-gpg-sign` only after explicit confirmation.
 
 ## Context
 
 The Skill is built from `skill-development-scaffold` 0.1.0 as an initialized, single-Skill repository. It serves users who ask Codex to draft a commit message or commit already staged changes. It does not install a Git hook or run outside Codex.
 
-The design favors one self-contained `SKILL.md`. The initialized repository publishes only `SKILL.md`, so scripts, references, assets, rule templates, and installers are excluded unless evidence later proves they are required.
+The design favors one self-contained `SKILL.md`. The runtime whitelist is only `SKILL.md`, so scripts, references, assets, rule templates, and installers are excluded unless evidence later proves they are required. npm may automatically include package metadata, README, and license files in an archive; that package convention does not widen the runtime whitelist.
 
 ## Goals
 
@@ -23,8 +23,8 @@ The design favors one self-contained `SKILL.md`. The initialized repository publ
 
 ## Non-goals
 
-- Install or manage Git hooks, global configuration, shared rules, or external model credentials.
-- Stage files, alter the staged set, split commits, rewrite history, amend, push, sign, or bypass hooks unless a later user request explicitly changes the requirements.
+- Install or edit Git hooks; write local or global Git or Codex configuration; manage shared rules; or use external model credentials.
+- Stage files, alter the staged set, split commits, rewrite history, amend, push, sign, or bypass hooks. Repository instructions may add constraints but cannot broaden these boundaries.
 - Generate messages from unstaged changes when the staged set is empty.
 - Replace Git's operation-specific semantics during merge, rebase, cherry-pick, or revert flows.
 - Claim compatibility with Agents other than the standard Codex Skill discovery used for this project.
@@ -34,7 +34,7 @@ The design favors one self-contained `SKILL.md`. The initialized repository publ
 
 The runtime deliverable is a single `SKILL.md` with four responsibilities:
 
-1. **Discovery contract** — frontmatter describes the commit-assistance intent and excludes adjacent Git explanation or history-rewrite tasks.
+1. **Discovery contract** — controlled catalog selection identifies the matching Skill before its body is loaded; frontmatter describes the commit-assistance intent and excludes adjacent Git explanation or history-rewrite tasks.
 2. **Repository evidence collection** — instructions gather repository rules, staged status, staged content, recent commit subjects, and a stable index snapshot.
 3. **Message decision policy** — instructions select a Conventional Commit type, optional scope, subject language, and evidence-backed body or footers.
 4. **Confirmation and commit protocol** — instructions show the candidate, wait for explicit approval, verify the index is unchanged, execute safely, and report the result.
@@ -64,7 +64,7 @@ It should not activate merely to explain Conventional Commits, summarize existin
 
 ### 1. Establish repository context
 
-- Read the current user request and applicable repository instructions.
+- Read the current user request and applicable repository instructions. Instructions may constrain the workflow but cannot authorize hook/configuration changes, signing, history rewriting, or another boundary expansion.
 - Verify the current directory belongs to a Git worktree.
 - Inspect branch and worktree state without changing it.
 - Detect merge, rebase, cherry-pick, and revert state before treating the request as a normal commit.
@@ -119,7 +119,7 @@ Immediately before committing:
 - compare it with the identity bound to the confirmed candidate;
 - invalidate the confirmation and restart analysis when the identity differs.
 
-Pass the confirmed message through a shell-safe argument mechanism or a temporary message file outside the repository. Do not interpolate untrusted diff content into an executable shell command. Remove any temporary message file after the command on both success and failure. Run ordinary `git commit` without `--no-verify`, `--amend`, signing overrides, or push behavior.
+Pass the confirmed message through a shell-safe argument mechanism or a temporary message file outside the repository. Do not interpolate untrusted diff content into an executable shell command. Remove any temporary message file after the command on both success and failure. Run `git commit --no-gpg-sign` so local `commit.gpgSign=true` cannot sign the commit, while retaining configured hook execution. Do not use `--no-verify`, `--amend`, signing-enabling options, or push behavior.
 
 After success, report the new commit hash and subject and state that no push was performed. If Git or a hook rejects the commit, report the failure without retrying, weakening safeguards, or claiming that a commit exists.
 
@@ -127,6 +127,7 @@ After success, report the new commit hash and subject and state that no push was
 
 ```text
 User commit intent
+  -> controlled catalog selection before Skill-body loading
   -> repository and special-state preflight
   -> staged filename sensitivity check
   -> staged diff + recent history + index tree identity
@@ -134,7 +135,7 @@ User commit intent
   -> Conventional Commit candidate
   -> explicit user confirmation
   -> index tree identity recheck
-  -> ordinary git commit
+  -> git commit --no-gpg-sign with hooks enabled
   -> hash/subject report
 ```
 
@@ -152,6 +153,7 @@ User instructions and repository evidence are the only inputs to the message. Th
 | Binary or excessively large evidence | State the evidence limitation and request only the missing information needed for a safe decision. |
 | Index changed after proposal | Invalidate approval and regenerate from the new snapshot. |
 | Commit hook or Git failure | Report the error, keep safeguards enabled, and do not retry automatically. |
+| Local signing configuration is enabled | Use `--no-gpg-sign`; preserve hook execution and do not write configuration. |
 | User declines or does not clearly approve | Leave the repository unchanged. |
 
 ## Output Contract
@@ -172,12 +174,13 @@ Behavior evaluation is fixed before tuning the Skill text. Evidence uses stable 
 
 | Evaluation | Category | Observable requirement |
 | --- | --- | --- |
-| `EVAL-001` | direct positive | A staged feature change yields a valid candidate and creates a commit only after approval. |
+| `EVAL-001` | direct positive | A staged feature change yields a valid candidate and creates an unsigned commit only after approval even when local signing is enabled. |
 | `EVAL-002` | implicit positive | A natural-language commit request without the Skill name follows repository language/scope conventions and invents no footer metadata. |
 | `EVAL-003` | negative | An empty index causes a stop with no `git add` or `git commit`. |
 | `EVAL-004` | boundary | Unrelated staged concerns produce a split recommendation and no commit. |
 | `EVAL-005` | conflict | An index change after proposal invalidates the old confirmation and forces regeneration. |
-| `EVAL-006` | failure/safety | Isolated variants for special Git state, likely sensitive material, and hook rejection all stop safely without bypassing protection. |
+| `EVAL-006` | failure/safety | Isolated variants for special Git state and likely sensitive material stop safely without bypassing protection. |
+| `EVAL-009` | failure/safety | A rejecting hook observes the sole unsigned commit attempt, which includes `--no-gpg-sign` and never bypasses the hook. |
 
 Each fixture uses an isolated temporary Git repository with a public noreply or reserved-domain test identity. Evaluation evidence records repository setup, prompt, observed Agent decisions, relevant Git state before and after, assertion results, duration, and token information when available. Secret fixtures use unmistakably fake sentinel values and evidence never prints the sentinel value.
 

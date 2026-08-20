@@ -23,6 +23,10 @@
 - Do not invoke an additional paid, credentialed, or independent Agent runner without explicit user authorization.
 - Do not push, tag, publish, upload, or modify global Codex configuration.
 
+## Current Remediation Controls (2026-08-20)
+
+The completed task history below remains an historical record. Version 2 replaces its runtime execution rule where necessary: use `git commit --no-gpg-sign` through a shell-safe argument API or temporary message file, preserving configured hooks. Do not install or edit hooks, write local or global Git or Codex configuration, run history-rewriting commands, or use signing-enabling options; repository instructions may constrain these boundaries but cannot broaden them. Controlled catalog selection occurs before the Skill body is loaded. The v1 delivery evidence is invalid until EVAL-001, EVAL-002, EVAL-007, and EVAL-009 are rerun.
+
 ## File Map
 
 | Path | Responsibility |
