@@ -57,7 +57,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-007",
-      "status": "active",
+      "status": "superseded",
       "scope": "commit execution",
       "decision": "Run git commit --no-gpg-sign to enforce unsigned commits while preserving configured hook execution.",
       "evidence": "2026-08-20 independent review proved ordinary git commit can inherit commit.gpgSign=true.",

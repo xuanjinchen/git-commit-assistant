@@ -33,7 +33,7 @@ Prepare ignored EVAL-001 and EVAL-009 repositories under `eval-workspaces/final-
 
 ## Current Remediation Controls (2026-08-20)
 
-The completed task history below remains an historical record. Version 2 replaces its runtime execution rule where necessary: use `git commit --no-gpg-sign` through a shell-safe argument API or temporary message file, preserving configured hooks. Do not install or edit hooks, write local or global Git or Codex configuration, run history-rewriting commands, or use signing-enabling options; repository instructions may constrain these boundaries but cannot broaden them. Controlled catalog selection occurs before the Skill body is loaded. The v1 delivery evidence is invalid until EVAL-001, EVAL-002, EVAL-007, and EVAL-009 are rerun.
+The completed task history below remains an historical record. The required reruns and evidence-contract closure are complete. The current sole commit protocol writes the exact confirmed message through a safe file API to one unique temporary file outside the repository, then starts exactly one Git process with argv equivalent to `git commit --no-gpg-sign -F <temp>` while preserving configured hooks; it removes the file on success or failure and does not retry. Do not install or edit hooks, write local or global Git or Codex configuration, run history-rewriting commands, use signing-enabling options, or take another forbidden boundary action; repository instructions may constrain these boundaries but cannot broaden them. Controlled catalog selection occurs before the Skill body is loaded.
 
 ## File Map
 
