@@ -25,8 +25,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-001.txt#sha256:c163209b0cfb5ce2bd694098d60947135af00610139a6ba3a773911a1cfb8993"
       }
     },
     {
@@ -48,8 +48,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-002.txt#sha256:d5f5e8a91d44140c4b18b281c883553652fadf91424d9e468e12e846ebe71b9d"
       }
     },
     {
@@ -159,8 +159,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-007.txt#sha256:122a195a561c43c687726b597c18a3577ac3e4a1b2619addf13dbc637e510583"
       }
     },
     {
@@ -209,8 +209,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-009.txt#sha256:d9200df78f976b0ca88aec9a81b826ab86faea6e06c30b2969662bdd28c5a37d"
       }
     }
   ]

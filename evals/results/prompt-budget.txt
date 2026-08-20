@@ -1,8 +1,8 @@
 {
   "method": "ceil Unicode code points divided by 3",
-  "characters": 3943,
-  "utf8_bytes": 3943,
-  "estimated_tokens": 1315,
+  "characters": 4311,
+  "utf8_bytes": 4311,
+  "estimated_tokens": 1437,
   "limit_tokens": 1800
 }
 

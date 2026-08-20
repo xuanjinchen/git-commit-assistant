@@ -41,38 +41,38 @@ None.
 ```json
 {
   "schema_version": 1,
-  "status": "draft",
+  "status": "ready",
   "conflicts": [],
   "acceptance_criteria": [
     {
       "id": "REQ-001",
       "requirement": "A coherent staged change produces a concise Conventional Commit candidate whose type, optional scope, language, body, and footers are supported by repository evidence.",
       "verification": "EVAL-001 and EVAL-002 plus scaffold structural validation verify message derivation without invented metadata.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-002",
       "requirement": "No commit occurs before explicit confirmation, and confirmation is invalidated whenever the git write-tree identity changes.",
       "verification": "EVAL-001 and EVAL-005 verify the confirmation and staged-snapshot invariants.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-003",
       "requirement": "The Skill stops without weakening safeguards for an empty index, mixed intent, special Git state, likely sensitive material, or hook rejection.",
       "verification": "EVAL-003, EVAL-004, EVAL-006, EVAL-008, and EVAL-009 verify safe stops and unchanged protected state.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-004",
       "requirement": "The description discovers staged commit assistance without attracting adjacent Git explanation, history review, or history rewriting requests.",
       "verification": "Scaffold frontmatter validation plus EVAL-002 and EVAL-007 verify positive and adjacent-negative trigger semantics.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-005",
       "requirement": "The workflow never signs, bypasses hooks, changes hook or configuration state, or rewrites history.",
       "verification": "EVAL-001 and EVAL-009 plus scaffold structural validation verify the unsigned commit command and protected runtime boundaries.",
-      "status": "pending"
+      "status": "pass"
     }
   ],
   "tracks": {
@@ -93,7 +93,7 @@ None.
     },
     "implicit-trigger": {
       "status": "enabled",
-      "evidence": "The user-confirmed discovery scope remains enabled; replacement artifact evidence awaits a fresh EVAL-002 run.",
+      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:d5f5e8a91d44140c4b18b281c883553652fadf91424d9e468e12e846ebe71b9d",
       "unblock_condition": ""
     },
     "multi-agent": {
@@ -113,9 +113,9 @@ None.
     }
   },
   "prompt_budget": {
-    "limit_tokens": null,
-    "measured_tokens": null,
-    "evidence": ""
+    "limit_tokens": 1800,
+    "measured_tokens": 1437,
+    "evidence": "artifact:evals/results/prompt-budget.txt#sha256:c18c7a7cd374a7c0bf71ed503c05146a7bd89a51ac9a2bd90c6b38fe25710458"
   }
 }
 ```
