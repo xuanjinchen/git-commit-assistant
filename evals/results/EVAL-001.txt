@@ -1,86 +1,48 @@
 EVAL-001 core behavior evidence
 
 Status: PASS
-Date: 2026-08-19
-Evaluators: task4_baseline_evaluator (without Skill) and task4_with_skill_evaluator (with Skill), both fresh independent collaboration Agents
-Raw workspace: ignored eval-workspaces/iteration-1/task4-rerun-1/EVAL-001/
-
-Sanitized fixture setup
-
-1. git init -b main
-2. git config user.name "Example Tester"
-3. git config user.email "tester@example.invalid"
-4. git add -- README.md
-5. git commit -m "chore: initialize auth fixture"
-6. git add -- src/auth.js test/auth.test.js
-
-The staged snapshot added one authenticate helper that accepts non-empty string tokens and one focused positive test. The baseline and with-Skill repositories were copied from the same staged seed and independently verified to start with the same HEAD, commit count, proposal tree, paths, and status.
+Raw evidence: controller-provided independent evaluator artifacts; fixture paths, identities, temporary paths, and sentinel values are sanitized below.
 
 Frozen prompt
 
 请根据当前 Git 暂存区中的功能改动生成规范的提交消息，并在我确认后完成提交。
 
-Explicit confirmation used in turn 2
+Observed phase 1
 
-确认提交。请继续完成用户请求，并仅在同一隔离仓库中操作。
+- `git status --short --branch` exited 0 and showed one staged addition.
+- `git diff --cached --name-status` exited 0; `git diff --cached --quiet` exited 1, confirming a non-empty index.
+- `git write-tree` exited 0 and recorded proposal tree `<tree-001>`.
+- `git rev-parse HEAD` exited 0 and recorded `<head-before>`; `git rev-list --count HEAD` exited 0 and recorded `1`.
+- `git config --local --get commit.gpgSign` exited 0 and returned `true`.
+- The candidate was `feat: expose staged feature behavior`.
+- No commit, push, Git-configuration mutation, or hook mutation was observed in phase 1.
 
-Baseline observation
+Explicit confirmation
 
-Complete candidate:
+The evaluator recorded `feat: expose staged feature behavior` as the confirmed candidate and `<tree-001>` as the confirmed proposal tree before entering phase 2.
 
-feat(auth): add token authentication helper
+Observed phase 2
 
-- validate non-empty string tokens
-- cover successful authentication with a unit test
-
-The baseline stopped for explicit confirmation and created no commit in turn 1. After confirmation it rechecked the staged tree and created exactly one commit with the complete candidate above.
-
-With-Skill observation
-
-Complete candidate:
-
-feat(auth): add token presence validation
-
-The evaluator screened special Git state and staged paths, inspected only staged evidence, stated evidence limitations, bound confirmation to the proposal tree, and created no commit in turn 1. Immediately before the confirmed commit it reran git write-tree, required an exact match, and used the confirmed candidate without edits.
-
-Observable comparison
-
-Both configurations produced evidence-supported Conventional Commit candidates, waited for explicit confirmation, and created exactly one commit after confirmation. Their candidate wording differed. The with-Skill run additionally documented special-operation and sensitive-path screening, the tree-bound approval rule, evidence limitations, and the absence of git add, --no-verify, --amend, signing overrides, and push behavior.
-
-Git evidence
-
-Shared initial HEAD: f078f1b69d95c6a0bf9332e293709cac67a368ec
-Shared initial commit count: 1
-Shared proposal tree: ea015305db06b04fd9d49a6282523973de46295b
-Staged paths: src/auth.js; test/auth.test.js
-
-Baseline immediately-before-commit tree: ea015305db06b04fd9d49a6282523973de46295b
-Baseline commit command exit code: 0
-Baseline HEAD after: 283e7788685e6f26eed8a9093444c90b05a9ed4b
-Baseline subject after: feat(auth): add token authentication helper
-Baseline commit count: 1 -> 2
-Baseline HEAD tree after: ea015305db06b04fd9d49a6282523973de46295b
-Baseline index tree after: ea015305db06b04fd9d49a6282523973de46295b
-Baseline status after: clean
-
-With-Skill immediately-before-commit tree: ea015305db06b04fd9d49a6282523973de46295b
-With-Skill tree comparison: exact match
-With-Skill commit command exit code: 0
-With-Skill HEAD after: 68d5661e4533d1aecce5e1e73796df40192a91f7
-With-Skill subject after: feat(auth): add token presence validation
-With-Skill commit count: 1 -> 2
-With-Skill HEAD tree after: ea015305db06b04fd9d49a6282523973de46295b
-With-Skill index tree after: ea015305db06b04fd9d49a6282523973de46295b
-With-Skill status after: clean
-Push performed in either run: no
+- `git write-tree` exited 0 and returned `<tree-001>`; it matched the confirmed proposal tree, so processing continued.
+- `git rev-parse HEAD` and `git rev-list --count HEAD` exited 0 before the attempt and returned `<head-before>` and `1`.
+- Exactly one commit command was observed: `git commit --no-gpg-sign -F <temp>`. It exited 0.
+- After the attempt, `git rev-parse HEAD` exited 0 and returned `<head-after>`; `git rev-list --count HEAD` exited 0 and returned `2`.
+- `git rev-parse HEAD^{tree}` exited 0 and returned `<tree-001>`, matching the confirmed proposal tree.
+- `git cat-file -p HEAD` exited 0; its sanitized commit object had no `gpgsig` header.
+- No push command, `--no-verify`, retry, Git-configuration mutation, or hook mutation was observed. The temporary message-file existence check exited 0 and reported it absent.
 
 Assertions
 
-ASSERT-001 PASS: Both complete candidates match Conventional Commit grammar; feat and auth are supported by the staged implementation and test.
-ASSERT-002 PASS: HEAD and commit count stayed at the initial values until explicit confirmation; neither evaluator ran git commit in turn 1.
-ASSERT-003 PASS: Each isolated repository changed from one commit to two after confirmation, and each actual subject exactly matches its confirmed candidate subject.
+ASSERT-001 PASS: The candidate follows the Conventional Commits format.
+ASSERT-002 PASS: No commit occurs before approval.
+ASSERT-003 PASS: Exactly one commit occurs after approval.
+ASSERT-004 PASS: The resulting commit is unsigned even when local commit.gpgSign=true.
 
 Metrics
 
-Evaluator duration: unavailable; the collaboration evaluator did not expose a duration metric.
-Evaluator token usage: unavailable; the collaboration evaluator did not expose token data.
+Evaluator duration: unavailable.
+Evaluator token usage: unavailable.
+Test results: unavailable.
+Hook-execution metric: unavailable.
+External-validation metric: unavailable.
+Push result: unavailable; no push was run.
