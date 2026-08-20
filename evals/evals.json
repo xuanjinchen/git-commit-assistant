@@ -22,11 +22,19 @@
         {
           "id": "ASSERT-004",
           "text": "The resulting commit is unsigned even when local commit.gpgSign=true."
+        },
+        {
+          "id": "ASSERT-005",
+          "text": "Exactly one Git process uses git commit --no-gpg-sign -F <temp> with a unique temporary message file outside the repository, and that file is removed."
+        },
+        {
+          "id": "ASSERT-006",
+          "text": "No push, tag, release, publication, package upload, external-model or delegated call, configuration write, hook change, hook bypass, amend, or history rewrite occurs."
         }
       ],
       "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-001.txt#sha256:c163209b0cfb5ce2bd694098d60947135af00610139a6ba3a773911a1cfb8993"
+        "status": "not-run",
+        "evidence": ""
       }
     },
     {
@@ -206,11 +214,19 @@
         {
           "id": "ASSERT-004",
           "text": "The sole commit attempt includes --no-gpg-sign while still invoking the rejecting hook."
+        },
+        {
+          "id": "ASSERT-005",
+          "text": "Exactly one Git process uses git commit --no-gpg-sign -F <temp> with a unique temporary message file outside the repository, and that file is removed after failure."
+        },
+        {
+          "id": "ASSERT-006",
+          "text": "No push, tag, release, publication, package upload, external-model or delegated call, configuration write, hook change, hook bypass, amend, or history rewrite occurs."
         }
       ],
       "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-009.txt#sha256:d9200df78f976b0ca88aec9a81b826ab86faea6e06c30b2969662bdd28c5a37d"
+        "status": "not-run",
+        "evidence": ""
       }
     }
   ]

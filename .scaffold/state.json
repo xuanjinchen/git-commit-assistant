@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "scaffold_version": "0.1.0",
-  "status": "ready",
+  "status": "draft",
   "skill": {
     "name": "git-commit-assistant",
     "description": "Generate Conventional Commit messages from staged Git changes when Codex is asked to draft or create a commit, and commit only after explicit confirmation; not for Git explanations, history review, or history rewriting.",

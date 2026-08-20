@@ -2,7 +2,7 @@
 
 ## Requirement Version
 
-Version 2, confirmed 2026-08-20.
+Version 3, confirmed 2026-08-20.
 
 ## Objective
 
@@ -14,11 +14,11 @@ Trigger for staged-change commit or commit-message requests, including natural r
 
 ## Outputs and Side Effects
 
-Return a complete candidate and staged summary, or a safe stop reason. Only an explicitly confirmed commit request may create one unsigned `git commit --no-gpg-sign` while preserving hooks. Message-only requests have no repository side effect.
+Return a complete candidate and staged summary, or a safe stop reason. Only an explicitly confirmed commit request may create one unsigned commit using exactly `git commit --no-gpg-sign -F <temp>` with a unique external temporary message file while preserving hooks. Message-only requests have no repository side effect.
 
 ## Non-goals
 
-Do not stage, unstage, split, amend, sign, push, rewrite history, install or edit hooks, write local or global Git or Codex configuration, call an external model API, or publish a release.
+Do not stage, unstage, split, amend, sign, push, create tags or releases, publish or upload packages, rewrite history, install or edit hooks, write local or global Git or Codex configuration, or call an external model, API, or delegated agent. A combined request stops before committing and requires a commit-only scope.
 
 ## Path Mapping
 
@@ -41,38 +41,38 @@ None.
 ```json
 {
   "schema_version": 1,
-  "status": "ready",
+  "status": "draft",
   "conflicts": [],
   "acceptance_criteria": [
     {
       "id": "REQ-001",
       "requirement": "A coherent staged change produces a concise Conventional Commit candidate whose type, optional scope, language, body, and footers are supported by repository evidence.",
       "verification": "EVAL-001 and EVAL-002 plus scaffold structural validation verify message derivation without invented metadata.",
-      "status": "pass"
+      "status": "pending"
     },
     {
       "id": "REQ-002",
       "requirement": "No commit occurs before explicit confirmation, and confirmation is invalidated whenever the git write-tree identity changes.",
       "verification": "EVAL-001 and EVAL-005 verify the confirmation and staged-snapshot invariants.",
-      "status": "pass"
+      "status": "pending"
     },
     {
       "id": "REQ-003",
       "requirement": "The Skill stops without weakening safeguards for an empty index, mixed intent, special Git state, likely sensitive material, or hook rejection.",
       "verification": "EVAL-003, EVAL-004, EVAL-006, EVAL-008, and EVAL-009 verify safe stops and unchanged protected state.",
-      "status": "pass"
+      "status": "pending"
     },
     {
       "id": "REQ-004",
       "requirement": "The description discovers staged commit assistance without attracting adjacent Git explanation, history review, or history rewriting requests.",
       "verification": "Scaffold frontmatter validation plus EVAL-002 and EVAL-007 verify positive and adjacent-negative trigger semantics.",
-      "status": "pass"
+      "status": "pending"
     },
     {
       "id": "REQ-005",
-      "requirement": "The workflow never signs, bypasses hooks, changes hook or configuration state, or rewrites history.",
-      "verification": "EVAL-001 and EVAL-009 plus scaffold structural validation verify the unsigned commit command and protected runtime boundaries.",
-      "status": "pass"
+      "requirement": "The workflow creates a unique external temporary message file and starts exactly one `git commit --no-gpg-sign -F <temp>` process, removes the file after success or failure, and never signs, bypasses hooks, changes hook or configuration state, pushes, tags, releases, publishes or uploads packages, delegates externally, or rewrites history.",
+      "verification": "EVAL-001 and EVAL-009 verify the exact one-process protocol, cleanup, hooks, and forbidden-side-effect boundaries.",
+      "status": "pending"
     }
   ],
   "tracks": {
@@ -113,9 +113,9 @@ None.
     }
   },
   "prompt_budget": {
-    "limit_tokens": 1800,
-    "measured_tokens": 1437,
-    "evidence": "artifact:evals/results/prompt-budget.txt#sha256:c18c7a7cd374a7c0bf71ed503c05146a7bd89a51ac9a2bd90c6b38fe25710458"
+    "limit_tokens": null,
+    "measured_tokens": null,
+    "evidence": ""
   }
 }
 ```

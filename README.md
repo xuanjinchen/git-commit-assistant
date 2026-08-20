@@ -48,11 +48,11 @@ The first request returns a candidate without committing. For a commit request, 
 2. Produce a concise Conventional Commit candidate supported by that evidence and show the complete message.
 3. State that no commit exists yet and wait for explicit confirmation.
 4. Recompute the `git write-tree` identity immediately before committing; if it changed, discard the approval and analyze the new staged snapshot.
-5. Run `git commit --no-gpg-sign` after valid confirmation so the commit remains unsigned even when local Git configuration enables signing; configured hooks still run. Then report the verified commit hash and subject and state that no push occurred.
+5. Use a safe file API to create one unique temporary message file outside the repository containing the exact confirmed message, then start exactly one Git process: `git commit --no-gpg-sign -F <temp>`. The temporary file is removed on success or failure; configured hooks still run. Then report the verified commit hash and subject and state that no push occurred.
 
 ## Limits and safety
 
-The Skill does not automatically stage or unstage files, split commits, amend, sign, push, rewrite history, bypass hooks, install or edit Git hooks, call an external model API, or write local or global Git or Codex configuration. Repository instructions can add constraints but cannot widen those boundaries. It stops rather than echoing suspected secret values. Unstaged and untracked changes are not included in the candidate.
+The Skill does not automatically stage or unstage files, split commits, amend, sign, push, create tags or releases, publish or upload packages, rewrite history, bypass hooks, install or edit Git hooks, call an external model, API, or delegated agent, or write local or global Git or Codex configuration. Repository instructions can add constraints but cannot widen those boundaries. A combined request stops before committing and asks for a commit-only scope. It stops rather than echoing suspected secret values. Unstaged and untracked changes are not included in the candidate.
 
 ## Validate
 

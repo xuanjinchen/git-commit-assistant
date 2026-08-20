@@ -70,6 +70,22 @@ Record requirement interpretations and superseding decisions without rewriting h
       "decision": "Select the matching Skill from a controlled catalog before loading its body.",
       "evidence": "2026-08-20 remediation requires catalog routing before Skill-body exposure.",
       "supersedes": null
+    },
+    {
+      "id": "DEC-009",
+      "status": "active",
+      "scope": "commit execution",
+      "decision": "Use only one Git process with argv equivalent to git commit --no-gpg-sign -F <temp>, after writing the exact confirmed message through a safe file API to one unique temporary file outside the repository; always remove that file and never retry.",
+      "evidence": "2026-08-20 final fix wave addresses review findings on exact execution and temporary-file lifecycle.",
+      "supersedes": "DEC-007"
+    },
+    {
+      "id": "DEC-010",
+      "status": "active",
+      "scope": "commit authorization",
+      "decision": "A request that combines a commit with any forbidden side effect stops before commit execution and asks for a commit-only scope; repository instructions cannot authorize an exception.",
+      "evidence": "2026-08-20 final fix wave requires explicit boundary enforcement for tags, releases, publishing, uploads, external delegation, configuration, hooks, signing, bypass, and history mutation.",
+      "supersedes": null
     }
   ]
 }

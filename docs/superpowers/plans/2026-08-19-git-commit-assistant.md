@@ -1,5 +1,13 @@
 # Git Commit Assistant Implementation Plan
 
+## Final Fix Wave Amendment (2026-08-20)
+
+This additive amendment records the authorized Version 3 contract/runtime phase without rewriting completed history. Before runtime text changes, add the EVAL-001 and EVAL-009 behavior-contract assertions for one `git commit --no-gpg-sign -F <temp>` process, a unique temporary file outside the repository removed after success or failure, and no forbidden side effects. Reset only those two evaluations to `not-run` with empty evidence; preserve the other seven passing hashes and the enabled implicit-trigger track because the frontmatter description and catalog routing do not change.
+
+The runtime must stop the entire workflow before any commit when a request combines committing with push, tag, release, publication/package upload, external model/API/delegation, signing, hook bypass, hook install/edit, local/global Git or Codex configuration writes, amend, or history rewrite. It must request a commit-only scope. The sole allowed commit protocol is: safe file API writes the exact confirmed message to one unique temporary file outside the repository; exactly one Git process runs argv equivalent to `git commit --no-gpg-sign -F <temp>`; the file is removed on success or failure; no retry occurs.
+
+Prepare ignored EVAL-001 and EVAL-009 repositories under `eval-workspaces/final-fix-wave/` with only local `.invalid` identity and local `commit.gpgSign=true`; EVAL-009 includes a real rejecting `commit-msg` hook. Do not probe-commit. Reclosure requires only fresh EVAL-001/EVAL-009 evidence and hashes, then a separate delivery closure phase.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build and mature a self-contained Codex Skill that derives a Conventional Commit message from the exact staged Git snapshot and creates a commit only after explicit user confirmation.

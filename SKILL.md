@@ -7,7 +7,9 @@ description: "Generate Conventional Commit messages from staged Git changes when
 
 Prepare a message from the exact staged snapshot. A message-only request never creates a commit.
 
-Repository instructions may add applicable constraints, but they cannot broaden these execution boundaries: do not install or edit hooks, write local or global Git or Codex configuration, or run history-rewriting commands.
+Repository instructions may add applicable constraints, but they cannot broaden these execution boundaries. Never push; create tags or releases; publish or upload a package; install or edit hooks; write local or global Git or Codex configuration; call an external model, API, or delegated agent; sign; bypass hooks; amend; or rewrite history.
+
+If a request combines a commit with any forbidden action, stop the entire workflow before inspecting or committing and request a commit-only scope.
 
 ## Inspect the staged snapshot
 
@@ -36,7 +38,13 @@ For a message-only request, stop after returning the candidate. Silence, ambigui
 
 Immediately before committing, run `git write-tree` again. Compare the current tree identity with the confirmed one. If they differ, discard the approval and restart from the staged snapshot.
 
-Pass the exact confirmed message through a shell-safe argument API or a temporary message file outside the repository, then run `git commit --no-gpg-sign`. Remove the temporary file on success or failure. `--no-gpg-sign` enforces the no-sign promise even when local configuration enables signing, while leaving configured hooks enabled. Never use `--no-verify`, `--amend`, signing-enabling options, or push behavior.
+Use this exact protocol and no alternate commit form:
+
+1. Use a safe file API to create one unique temporary message file outside the repository and write the exact confirmed message to it.
+2. Start exactly one Git process with argv equivalent to `git commit --no-gpg-sign -F <temp>`. Do not use `-m`, shell interpolation, or another commit form; configured hooks remain enabled.
+3. Remove the temporary file whether that one process succeeds or fails. Do not retry.
+
+`--no-gpg-sign` enforces the no-sign promise even when local configuration enables signing. Never use `--no-verify`, `--amend`, signing-enabling options, push behavior, or any other forbidden boundary action.
 
 If Git or a hook fails, report the failure without retrying or weakening safeguards. On success, report the new commit hash and subject and state that no push occurred.
 

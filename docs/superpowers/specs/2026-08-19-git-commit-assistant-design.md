@@ -3,9 +3,9 @@
 ## Status
 
 - Date: 2026-08-19
-- Status: Current; Version 2 remediation confirmed 2026-08-20
+- Status: Current; Version 3 final fix wave confirmed 2026-08-20
 - Skill name: `git-commit-assistant`
-- Objective: Generate Conventional Commit messages from staged Git changes when Codex is asked to commit, and run `git commit --no-gpg-sign` only after explicit confirmation.
+- Objective: Generate Conventional Commit messages from staged Git changes when Codex is asked to commit, and run exactly one `git commit --no-gpg-sign -F <temp>` process only after explicit confirmation.
 
 ## Context
 
@@ -46,7 +46,7 @@ Development-only artifacts remain in the initialized scaffold repository:
 - `evals/evals.json` and `evals/results/` hold behavior contracts and evidence.
 - `docs/delivery-report.md` closes Evidence Contract v1.
 
-No runtime script or reference file is required. The `implicit-trigger` track remains enabled through normal Skill description discovery, but its Version 2 artifact evidence awaits a fresh implicit-positive EVAL-002 run; it does not add a persistent rule file.
+No runtime script or reference file is required. The `implicit-trigger` track remains enabled through normal Skill description discovery, and its EVAL-002 evidence remains complete because neither the description nor routing changed; it does not add a persistent rule file.
 
 ## Trigger Semantics
 
@@ -58,7 +58,7 @@ Representative positive intent includes:
 - asking for a Conventional Commit message based on the staged diff;
 - asking Codex to inspect the index and prepare a commit.
 
-It should not activate merely to explain Conventional Commits, summarize existing history, review a commit that already exists, stage files, rewrite history, or design a release workflow.
+It should not activate merely to explain Conventional Commits, summarize existing history, review a commit that already exists, stage files, rewrite history, or design a release workflow. If a commit request also asks for a forbidden side effect, it must stop before committing and ask for a commit-only scope.
 
 ## Core Workflow
 
@@ -119,7 +119,7 @@ Immediately before committing:
 - compare it with the identity bound to the confirmed candidate;
 - invalidate the confirmation and restart analysis when the identity differs.
 
-Pass the confirmed message through a shell-safe argument mechanism or a temporary message file outside the repository. Do not interpolate untrusted diff content into an executable shell command. Remove any temporary message file after the command on both success and failure. Run `git commit --no-gpg-sign` so local `commit.gpgSign=true` cannot sign the commit, while retaining configured hook execution. Do not use `--no-verify`, `--amend`, signing-enabling options, or push behavior.
+Use a safe file API to create one unique temporary message file outside the repository and write the exact confirmed message to it. Start exactly one Git process with argv equivalent to `git commit --no-gpg-sign -F <temp>`; do not use `-m`, shell interpolation, or another commit form. Remove the temporary file after that process on success or failure. This leaves configured hooks enabled and prevents local `commit.gpgSign=true` from signing the commit. Do not use `--no-verify`, `--amend`, signing-enabling options, or any push, tag, release, publication, package-upload, external-model/API/delegation, hook-edit, configuration-write, or history-rewrite behavior.
 
 After success, report the new commit hash and subject and state that no push was performed. If Git or a hook rejects the commit, report the failure without retrying, weakening safeguards, or claiming that a commit exists.
 
@@ -135,7 +135,7 @@ User commit intent
   -> Conventional Commit candidate
   -> explicit user confirmation
   -> index tree identity recheck
-  -> git commit --no-gpg-sign with hooks enabled
+  -> unique external message file -> one git commit --no-gpg-sign -F <temp> with hooks enabled -> cleanup
   -> hash/subject report
 ```
 
@@ -154,6 +154,7 @@ User instructions and repository evidence are the only inputs to the message. Th
 | Index changed after proposal | Invalidate approval and regenerate from the new snapshot. |
 | Commit hook or Git failure | Report the error, keep safeguards enabled, and do not retry automatically. |
 | Local signing configuration is enabled | Use `--no-gpg-sign`; preserve hook execution and do not write configuration. |
+| Commit request combined with a forbidden action | Stop before committing and request a commit-only scope. |
 | User declines or does not clearly approve | Leave the repository unchanged. |
 
 ## Output Contract
@@ -180,6 +181,8 @@ Behavior evaluation is fixed before tuning the Skill text. Evidence uses stable 
 | `EVAL-004` | boundary | Unrelated staged concerns produce a split recommendation and no commit. |
 | `EVAL-005` | conflict | An index change after proposal invalidates the old confirmation and forces regeneration. |
 | `EVAL-006` | failure/safety | Isolated variants for special Git state and likely sensitive material stop safely without bypassing protection. |
+| `EVAL-007` | negative | An explanation-only request remains outside the Skill scope and runs no mutating Git command. |
+| `EVAL-008` | boundary | A likely sensitive staged path stops the workflow before content disclosure or commit. |
 | `EVAL-009` | failure/safety | A rejecting hook observes the sole unsigned commit attempt, which includes `--no-gpg-sign` and never bypasses the hook. |
 
 Each fixture uses an isolated temporary Git repository with a public noreply or reserved-domain test identity. Evaluation evidence records repository setup, prompt, observed Agent decisions, relevant Git state before and after, assertion results, duration, and token information when available. Secret fixtures use unmistakably fake sentinel values and evidence never prints the sentinel value.
@@ -201,7 +204,7 @@ The delivery gate runs only after the Skill Brief, results, artifact hashes, del
 | `references` | disabled | The focused workflow fits in one `SKILL.md`. |
 | `scripts` | disabled | Agent judgment dominates and no repeated deterministic helper is justified. |
 | `assets` | disabled | No generated output depends on a reusable asset. |
-| `implicit-trigger` | enabled | The user requires automatic discovery for ordinary commit intent; a fresh implicit-positive EVAL-002 run must provide Version 2 evidence before delivery closure. |
+| `implicit-trigger` | enabled | The user requires automatic discovery for ordinary commit intent; the completed EVAL-002 evidence remains valid because description and routing did not change. |
 | `multi-agent` | disabled | No formal compatibility outside Codex is requested. |
 | `installer` | disabled | Standard Skill directory placement is sufficient. |
 | `open-source-release` | disabled | The user requested local development, not public release or publishing. |
