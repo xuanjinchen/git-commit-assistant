@@ -41,38 +41,38 @@ None.
 ```json
 {
   "schema_version": 1,
-  "status": "draft",
+  "status": "ready",
   "conflicts": [],
   "acceptance_criteria": [
     {
       "id": "REQ-001",
       "requirement": "A coherent staged change produces a concise Conventional Commit candidate whose type, optional scope, language, body, and footers are supported by repository evidence.",
       "verification": "EVAL-001 and EVAL-002 plus scaffold structural validation verify message derivation without invented metadata.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-002",
       "requirement": "No commit occurs before explicit confirmation, and confirmation is invalidated whenever the git write-tree identity changes.",
       "verification": "EVAL-001 and EVAL-005 verify the confirmation and staged-snapshot invariants.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-003",
       "requirement": "The Skill stops without weakening safeguards for an empty index, mixed intent, special Git state, likely sensitive material, or hook rejection.",
       "verification": "EVAL-003, EVAL-004, EVAL-006, EVAL-008, and EVAL-009 verify safe stops and unchanged protected state.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-004",
       "requirement": "The description discovers staged commit assistance without attracting adjacent Git explanation, history review, or history rewriting requests.",
       "verification": "Scaffold frontmatter validation plus EVAL-002 and EVAL-007 verify positive and adjacent-negative trigger semantics.",
-      "status": "pending"
+      "status": "pass"
     },
     {
       "id": "REQ-005",
       "requirement": "The workflow creates a unique external temporary message file and starts exactly one `git commit --no-gpg-sign -F <temp>` process, removes the file after success or failure, and never signs, bypasses hooks, changes hook or configuration state, pushes, tags, releases, publishes or uploads packages, delegates externally, or rewrites history.",
       "verification": "EVAL-001 and EVAL-009 verify the exact one-process protocol, cleanup, hooks, and forbidden-side-effect boundaries.",
-      "status": "pending"
+      "status": "pass"
     }
   ],
   "tracks": {
@@ -113,9 +113,9 @@ None.
     }
   },
   "prompt_budget": {
-    "limit_tokens": null,
-    "measured_tokens": null,
-    "evidence": ""
+    "limit_tokens": 1800,
+    "measured_tokens": 1614,
+    "evidence": "artifact:evals/results/prompt-budget.txt#sha256:401313a1f4b495556d652e5bdb7d5febb16f0f124a1ca892439aef84194a8d33"
   }
 }
 ```
