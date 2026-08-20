@@ -1,62 +1,62 @@
 # git\-commit\-assistant
 
-This Skill turns already staged changes into an evidence-based Conventional Commit candidate and creates the commit only after explicit confirmation.
+此 Skill 会根据已暂存的变更生成有证据支撑的 Conventional Commit 候选消息，并且只有在用户明确确认后才会创建提交。
 
-## Requirements
+## 环境要求
 
-- Codex with standard Skill discovery.
-- Git and an existing Git worktree.
-- Node.js 22 or newer only when validating this development repository; the installed Skill itself has no Node.js runtime dependency.
+- 支持标准 Skill 自动发现机制的 Codex。
+- 已安装 Git，并存在一个 Git 工作树。
+- 仅在验证本开发仓库时需要 Node.js 22 或更高版本；安装后的 Skill 本身不依赖 Node.js 运行时。
 
-## Install
+## 安装
 
-Use the installable directory named `git-commit-assistant`, which contains `SKILL.md`:
+使用名为 `git-commit-assistant` 的可安装目录，该目录包含 `SKILL.md`：
 
 ```text
 git-commit-assistant/
 └── SKILL.md
 ```
 
-Copy that whole directory into the Codex Skill root configured for your environment. For example, in PowerShell, replace the example root with your actual Skill root:
+将整个目录复制到当前环境配置的 Codex Skill 根目录中。例如，在 PowerShell 中，将示例根目录替换为实际使用的 Skill 根目录：
 
 ```powershell
 $skillRoot = Join-Path $env:USERPROFILE ".codex\skills"
 Copy-Item -Recurse -LiteralPath ".\git-commit-assistant" -Destination $skillRoot
 ```
 
-Codex loads it through normal Skill discovery. This project has no installer and does not write Codex configuration, Git configuration, hooks, or global rules.
+Codex 会通过标准 Skill 自动发现机制加载它。本项目不提供安装器，也不会写入 Codex 配置、Git 配置、Git 钩子或全局规则。
 
-## Use
+## 使用
 
-Stage exactly the files you intend to include before asking Codex for help:
+向 Codex 请求帮助前，请先只暂存本次提交确实需要包含的文件：
 
 ```powershell
 git add -- path/to/file
 ```
 
-Then make a natural request in Codex, for example:
+然后在 Codex 中使用自然语言提出请求，例如：
 
-> Draft a Conventional Commit message for my staged changes.
+> 根据我已暂存的变更起草一条 Conventional Commit 消息。
 
-> Commit the currently staged changes.
+> 提交当前已暂存的变更。
 
-The first request returns a candidate without committing. For a commit request, Codex still presents the complete candidate and waits for explicit confirmation.
+第一个请求只返回候选消息，不会创建提交。对于提交请求，Codex 仍会先展示完整的候选消息，并等待用户明确确认。
 
-## Expected behavior
+## 预期行为
 
-1. Inspect repository instructions, Git state, staged paths, the staged diff, recent commit subjects, and the staged tree identity.
-2. Produce a concise Conventional Commit candidate supported by that evidence and show the complete message.
-3. State that no commit exists yet and wait for explicit confirmation.
-4. Recompute the `git write-tree` identity immediately before committing; if it changed, discard the approval and analyze the new staged snapshot.
-5. Use a safe file API to create one unique temporary message file outside the repository containing the exact confirmed message, then start exactly one Git process: `git commit --no-gpg-sign -F <temp>`. The temporary file is removed on success or failure; configured hooks still run. Then report the verified commit hash and subject and state that no push occurred.
+1. 检查仓库指令、Git 状态、暂存路径、暂存差异、近期提交主题以及暂存树标识。
+2. 根据这些证据生成简洁的 Conventional Commit 候选消息，并展示完整消息。
+3. 明确说明尚未创建提交，并等待用户确认。
+4. 在提交前立即重新计算 `git write-tree` 标识；如果标识发生变化，则使之前的确认失效，并重新分析新的暂存快照。
+5. 使用安全的文件 API，在仓库外创建一个包含已确认消息的唯一临时文件，然后只启动一个 Git 进程：`git commit --no-gpg-sign -F <temp>`。无论成功还是失败，都会删除临时文件；已配置的钩子仍会正常执行。最后报告已验证的提交哈希和主题，并说明未执行推送。
 
-## Limits and safety
+## 限制与安全
 
-The Skill does not automatically stage or unstage files, split commits, amend, sign, push, create tags or releases, publish or upload packages, rewrite history, bypass hooks, install or edit Git hooks, call an external model, API, or delegated agent, or write local or global Git or Codex configuration. Repository instructions can add constraints but cannot widen those boundaries. A combined request stops before committing and asks for a commit-only scope. It stops rather than echoing suspected secret values. Unstaged and untracked changes are not included in the candidate.
+此 Skill 不会自动暂存或取消暂存文件、拆分提交、修订提交、签名、推送、创建标签或 Release、发布或上传软件包、改写历史、绕过钩子、安装或编辑 Git 钩子、调用外部模型或 API、委派给其他 Agent，也不会写入本地或全局 Git/Codex 配置。仓库指令可以增加约束，但不能扩大这些边界。对于包含多种操作的组合请求，Skill 会在提交前停止，并要求用户将范围限定为仅提交。发现疑似敏感信息时，Skill 会停止，而不会回显疑似秘密值。未暂存和未跟踪的变更不会包含在候选消息中。
 
-## Validate
+## 验证
 
-From this development repository, run:
+在本开发仓库中运行：
 
 ```powershell
 npm run check
@@ -64,44 +64,44 @@ npm run audit
 npm run gate:delivery
 ```
 
-`npm run check` runs the deterministic tests and structural validation. `npm run audit` inspects the delivery artifacts and evidence records. `npm run gate:delivery` is the final contract-closure gate and is expected to fail while the Brief, evidence, or scaffold state remains draft. A passing gate validates the recorded evidence contract and repository consistency; it does not independently measure model quality.
+`npm run check` 会运行确定性测试和结构验证。`npm run audit` 会检查交付产物和证据记录。`npm run gate:delivery` 是最终契约闭环门禁；当 Skill Brief、证据或脚手架状态仍为草稿时，该命令应当失败。门禁通过表示已记录的证据契约和仓库一致性验证成功，但不会独立衡量模型质量。
 
-To preview the runtime package whitelist without publishing anything, run:
+如需在不发布任何内容的情况下预览运行时软件包白名单，请运行：
 
 ```powershell
 npm pack --dry-run
 ```
 
-The runtime whitelist remains only `SKILL.md`. npm may also add its automatic package metadata, README, and license files to the preview; those package conventions do not make development resources part of the Skill runtime.
+运行时白名单仍然只包含 `SKILL.md`。npm 可能会在预览中自动加入软件包元数据、README 和许可证文件；这些 npm 约定不会使开发资源成为 Skill 运行时的一部分。
 
-## Troubleshooting
+## 故障排除
 
-| Condition | What happens | Safe next action |
+| 情况 | 处理结果 | 安全的后续操作 |
 | --- | --- | --- |
-| Nothing is staged | The Skill stops and never runs `git add`. | Stage only the intended files, then ask again. |
-| A merge, rebase, cherry-pick, or revert is active | Normal Conventional Commit generation stops so Git's operation-specific semantics are preserved. | Finish, abort, or explicitly direct the special operation before retrying. |
-| Staged changes contain independent concerns | The Skill recommends splitting and leaves the index unchanged. | Reorganize the staged set yourself, then ask again. |
-| The staged tree changes after the candidate is shown | The old approval is invalidated and no commit is created from it. | Review and confirm a candidate generated from the new snapshot. |
-| Git or a commit hook rejects the commit | The failure is reported without retrying or bypassing safeguards. | Resolve the reported cause, then start a new commit request. |
+| 没有已暂存的变更 | Skill 会停止，并且绝不会运行 `git add`。 | 只暂存本次提交需要包含的文件，然后重新提出请求。 |
+| 正在进行合并、变基、挑选提交或还原操作 | 常规 Conventional Commit 生成流程会停止，以保留当前 Git 操作的专用语义。 | 完成或中止当前操作，或者先明确指示如何处理该特殊操作，再重新尝试。 |
+| 已暂存的变更包含相互独立的事项 | Skill 会建议拆分提交，并保持暂存区不变。 | 自行重新组织暂存内容，然后再次提出请求。 |
+| 展示候选消息后暂存树发生变化 | 之前的确认会失效，不会根据该确认创建提交。 | 审查并确认根据新快照生成的候选消息。 |
+| Git 或提交钩子拒绝提交 | Skill 会报告失败，不会重试或绕过安全措施。 | 解决报告的原因，然后发起新的提交请求。 |
 
-## Remove
+## 卸载
 
-Delete only the copied `git-commit-assistant` directory from your Codex Skill root. For the PowerShell example above:
+只需从 Codex Skill 根目录中删除复制进去的 `git-commit-assistant` 目录。对于上面的 PowerShell 示例，可运行：
 
 ```powershell
 Remove-Item -Recurse -LiteralPath (Join-Path $skillRoot "git-commit-assistant")
 ```
 
-No Git hook, Git configuration, Codex global rule, or installer state needs cleanup because this project creates none of them.
+本项目不会创建 Git 钩子、Git 配置、Codex 全局规则或安装器状态，因此无需清理这些内容。
 
-## Development
+## 开发
 
-The accepted [design specification](docs/superpowers/specs/2026-08-19-git-commit-assistant-design.md) defines the behavior and safety model. The [implementation plan](docs/superpowers/plans/2026-08-19-git-commit-assistant.md) defines the development and evidence sequence.
+[已确认的设计规范](docs/superpowers/specs/2026-08-19-git-commit-assistant-design.md)定义了行为和安全模型。[实现计划](docs/superpowers/plans/2026-08-19-git-commit-assistant.md)定义了开发与证据闭环流程。
 
-## Security
+## 安全
 
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Do not include real credentials, private keys, or other secrets in reports or evaluation fixtures.
+请按照 [SECURITY.md](SECURITY.md) 中的说明私下报告安全漏洞。请勿在报告或评测样例中包含真实凭据、私钥或其他秘密信息。
 
-## License
+## 许可证
 
-Licensed under the [Apache License 2.0](LICENSE).
+本项目采用 [Apache License 2.0](LICENSE) 许可证。
