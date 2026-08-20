@@ -9,7 +9,7 @@ Frozen prompt
 
 Description-only routing decision
 
-No Skill was selected. Before reading files or using tools, the evaluator classified the prompt as a self-contained conceptual explanation rather than a request to draft or create a commit. The raw evidence records that the `git-commit-assistant` body was not received, exposed, loaded, or read.
+No Skill was selected. Before reading files or using tools, the evaluator classified the prompt as a self-contained conceptual explanation rather than a request to draft or create a commit. The evaluator's `body-exposure-attestation.txt` explicitly records that the `git-commit-assistant` body, path, and content were not provided, exposed, loaded, or read.
 
 Observed answer and state preservation
 
