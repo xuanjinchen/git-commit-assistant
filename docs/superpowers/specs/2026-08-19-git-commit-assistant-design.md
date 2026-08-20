@@ -46,7 +46,7 @@ Development-only artifacts remain in the initialized scaffold repository:
 - `evals/evals.json` and `evals/results/` hold behavior contracts and evidence.
 - `docs/delivery-report.md` closes Evidence Contract v1.
 
-No runtime script or reference file is required. The `implicit-trigger` track is enabled through normal Skill description discovery and verified by an implicit-positive evaluation; it does not add a persistent rule file.
+No runtime script or reference file is required. The `implicit-trigger` track remains enabled through normal Skill description discovery, but its Version 2 artifact evidence awaits a fresh implicit-positive EVAL-002 run; it does not add a persistent rule file.
 
 ## Trigger Semantics
 
@@ -201,7 +201,7 @@ The delivery gate runs only after the Skill Brief, results, artifact hashes, del
 | `references` | disabled | The focused workflow fits in one `SKILL.md`. |
 | `scripts` | disabled | Agent judgment dominates and no repeated deterministic helper is justified. |
 | `assets` | disabled | No generated output depends on a reusable asset. |
-| `implicit-trigger` | enabled | The user requires automatic discovery for ordinary commit intent; description plus an implicit-positive run provides evidence. |
+| `implicit-trigger` | enabled | The user requires automatic discovery for ordinary commit intent; a fresh implicit-positive EVAL-002 run must provide Version 2 evidence before delivery closure. |
 | `multi-agent` | disabled | No formal compatibility outside Codex is requested. |
 | `installer` | disabled | Standard Skill directory placement is sufficient. |
 | `open-source-release` | disabled | The user requested local development, not public release or publishing. |
