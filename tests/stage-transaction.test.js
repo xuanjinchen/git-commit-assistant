@@ -19,6 +19,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 import { inspectRepository } from '../scripts/stage-transaction.mjs';
+import * as stageTransaction from '../scripts/stage-transaction.mjs';
 
 const execFileAsync = promisify(execFile);
 const gitConfigByRepository = new Map();
@@ -33,6 +34,7 @@ async function runGit(root, args, options = {}) {
       ...process.env,
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: globalConfig,
+      GIT_OPTIONAL_LOCKS: '0',
       ...(options.env ?? {}),
     },
     maxBuffer: 16 * 1024 * 1024,
@@ -175,6 +177,62 @@ async function snapshotRepository(root) {
     worktree: await snapshotFiles(root),
     objects: await snapshotObjects(root),
   };
+}
+
+async function createTemporaryRoot(t) {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'git-commit-assistant-runtime-'));
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }));
+  return temporaryRoot;
+}
+
+async function prepareTransaction(request, runtime) {
+  return stageTransaction.prepareTransaction(request, runtime);
+}
+
+async function treeFromExternalIndex(root, indexPath, objectDirectory) {
+  const mainObjectDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+  );
+  return (await runGit(root, ['write-tree'], {
+    env: {
+      GIT_INDEX_FILE: indexPath,
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: mainObjectDirectory,
+    },
+  })).stdout.trim();
+}
+
+async function readExternalTreeFile(root, treeOid, filePath, objectDirectory) {
+  const mainObjectDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+  );
+  return (await runGit(root, ['show', `${treeOid}:${filePath}`], {
+    env: {
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: mainObjectDirectory,
+    },
+  })).stdout;
+}
+
+async function repositoryForPreparation(t) {
+  const root = await createGitRepository(t);
+  await writeFile(path.join(root, 'feature.txt'), `${numberedLines(20).join('\n')}\n`);
+  await runGit(root, ['add', '--', 'feature.txt']);
+  await runGit(root, ['commit', '-m', 'preparation baseline']);
+
+  const staged = numberedLines(20);
+  staged[15] = 'line 16 retained staged';
+  await writeFile(path.join(root, 'feature.txt'), `${staged.join('\n')}\n`);
+  await runGit(root, ['add', '--', 'feature.txt']);
+
+  const final = [...staged];
+  final[1] = 'line 2 selected task';
+  final[8] = 'line 9 unselected worktree';
+  await writeFile(path.join(root, 'feature.txt'), `${final.join('\n')}\n`);
+  await writeFile(path.join(root, 'untracked.txt'), 'unselected untracked bytes\n');
+  return root;
 }
 
 function numberedLines(count) {
@@ -460,4 +518,377 @@ test('inspect CLI rejects malformed input and extra argv without stderr', async 
   assert.equal(extraArgv.stderr, '');
   assert.equal(JSON.parse(malformed.stdout).error.code, 'PROTOCOL_ERROR');
   assert.equal(JSON.parse(extraArgv.stdout).error.code, 'PROTOCOL_ERROR');
+});
+
+test('prepare leaves the real repository unchanged and builds only the selected task tree', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree'
+    && unit.path === 'feature.txt'
+    && unit.new_range.start === 2);
+  assert.ok(selected);
+  const before = await snapshotRepository(root);
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, { temporaryRoot });
+
+  assert.equal(prepared.status, 'prepared');
+  assert.deepEqual(prepared.binding.selected_unit_ids, [selected.unit_id]);
+  assert.match(prepared.task_tree_oid, /^[0-9a-f]{40,64}$/u);
+  assert.match(prepared.ownership_token, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(await snapshotRepository(root), before);
+
+  const taskIndex = path.join(prepared.transaction_directory, 'task.index');
+  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  assert.equal(await treeFromExternalIndex(root, taskIndex, objectDirectory), prepared.task_tree_oid);
+  const taskContents = await readExternalTreeFile(
+    root,
+    prepared.task_tree_oid,
+    'feature.txt',
+    objectDirectory,
+  );
+  const expected = numberedLines(20);
+  expected[1] = 'line 2 selected task';
+  assert.equal(taskContents, `${expected.join('\n')}\n`);
+  await assert.rejects(
+    readExternalTreeFile(root, prepared.task_tree_oid, 'untracked.txt', objectDirectory),
+  );
+});
+
+test('recovery preview retains unrelated staged hunks on top of the task tree', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree'
+    && unit.path === 'feature.txt'
+    && unit.new_range.start === 2);
+  const retained = manifest.units.find((unit) =>
+    unit.view === 'head_to_index' && unit.path === 'feature.txt');
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, { temporaryRoot });
+
+  assert.deepEqual(prepared.staged_units, {
+    consumed_unit_ids: [],
+    retained_unit_ids: [retained.unit_id],
+  });
+  const recoveryIndex = path.join(prepared.transaction_directory, 'recovery.index');
+  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  assert.equal(
+    await treeFromExternalIndex(root, recoveryIndex, objectDirectory),
+    prepared.recovery_tree_oid,
+  );
+  const recoveryContents = await readExternalTreeFile(
+    root,
+    prepared.recovery_tree_oid,
+    'feature.txt',
+    objectDirectory,
+  );
+  const expected = numberedLines(20);
+  expected[1] = 'line 2 selected task';
+  expected[15] = 'line 16 retained staged';
+  assert.equal(recoveryContents, `${expected.join('\n')}\n`);
+});
+
+test('prepare stores external recovery evidence without token or patch plaintext', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree' && unit.new_range.start === 2);
+  const originalIndex = await readIndexBytes(root);
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, { temporaryRoot });
+
+  const transactionFiles = new Set(await readdir(prepared.transaction_directory));
+  assert.ok(transactionFiles.has('task.index'));
+  assert.ok(transactionFiles.has('original.index'));
+  assert.ok(transactionFiles.has('recovery.index'));
+  assert.ok(transactionFiles.has('objects'));
+  assert.ok(transactionFiles.has('snapshots'));
+  assert.equal(transactionFiles.has('message.txt'), false);
+  assert.equal(await readFile(path.join(prepared.transaction_directory, 'original.index'))
+    .then(sha256), sha256(originalIndex));
+
+  const stateText = await readFile(path.join(prepared.transaction_directory, 'state.json'), 'utf8');
+  const state = JSON.parse(stateText);
+  assert.equal(state.lifecycle, 'prepared');
+  assert.equal(state.token_sha256, sha256(Buffer.from(prepared.ownership_token)));
+  assert.equal(state.binding.task_tree_oid, prepared.task_tree_oid);
+  assert.equal(stateText.includes(prepared.ownership_token), false);
+  assert.equal(stateText.includes('line 2 selected task'), false);
+  assert.equal(prepared.message_file, path.join(prepared.transaction_directory, 'message.txt'));
+});
+
+test('prepare consumes equivalent staged content and writes selected untracked bytes externally', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected staged\nline 3\n');
+  await runGit(root, ['add', '--', 'feature.txt']);
+  await writeFile(path.join(root, 'selected untracked.txt'), 'selected untracked bytes\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const finalUnit = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const untrackedUnit = manifest.units.find((unit) => unit.view === 'untracked');
+  const stagedUnit = manifest.units.find((unit) => unit.view === 'head_to_index');
+  const before = await snapshotRepository(root);
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [finalUnit.unit_id, untrackedUnit.unit_id],
+  }, { temporaryRoot });
+
+  assert.deepEqual(prepared.staged_units, {
+    consumed_unit_ids: [stagedUnit.unit_id],
+    retained_unit_ids: [],
+  });
+  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  assert.equal(
+    await readExternalTreeFile(root, prepared.task_tree_oid, 'selected untracked.txt', objectDirectory),
+    'selected untracked bytes\n',
+  );
+  assert.equal(prepared.recovery_tree_oid, prepared.task_tree_oid);
+  assert.deepEqual(await snapshotRepository(root), before);
+});
+
+test('prepare consumes staged content whose final range shifted after an unselected insertion', async (t) => {
+  const root = await createGitRepository(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), `${numberedLines(20).join('\n')}\n`);
+  await runGit(root, ['add', '--', 'feature.txt']);
+  await runGit(root, ['commit', '-m', 'shift baseline']);
+  const staged = numberedLines(20);
+  staged[15] = 'line 16 selected staged';
+  await writeFile(path.join(root, 'feature.txt'), `${staged.join('\n')}\n`);
+  await runGit(root, ['add', '--', 'feature.txt']);
+  staged.splice(1, 0, 'unselected inserted a', 'unselected inserted b');
+  await writeFile(path.join(root, 'feature.txt'), `${staged.join('\n')}\n`);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree'
+    && unit.old_range.start === 16);
+  const stagedUnit = manifest.units.find((unit) => unit.view === 'head_to_index');
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, { temporaryRoot });
+
+  assert.deepEqual(prepared.staged_units, {
+    consumed_unit_ids: [stagedUnit.unit_id],
+    retained_unit_ids: [],
+  });
+  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  const expected = numberedLines(20);
+  expected[15] = 'line 16 selected staged';
+  assert.equal(
+    await readExternalTreeFile(root, prepared.task_tree_oid, 'feature.txt', objectDirectory),
+    `${expected.join('\n')}\n`,
+  );
+});
+
+test('prepare applies selected atomic deletion, rename, mode, and binary units', async (t) => {
+  const root = await repositoryWithManifestFixtures(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.filter((unit) =>
+    unit.view === 'head_to_worktree' && unit.atomic && unit.view !== 'untracked');
+  const before = await snapshotRepository(root);
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: selected.map(({ unit_id }) => unit_id),
+  }, { temporaryRoot });
+
+  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  await assert.rejects(
+    readExternalTreeFile(root, prepared.task_tree_oid, 'delete-me.txt', objectDirectory),
+  );
+  assert.equal(
+    await readExternalTreeFile(root, prepared.task_tree_oid, 'rename after.txt', objectDirectory),
+    'rename this file\n',
+  );
+  assert.deepEqual(
+    await readExternalTreeFile(root, prepared.task_tree_oid, 'binary.dat', objectDirectory)
+      .then((value) => Buffer.from(value, 'binary')),
+    Buffer.from([0, 9, 2, 3]),
+  );
+  const mode = (await runGit(root, ['ls-tree', prepared.task_tree_oid, '--', 'mode.sh'], {
+    env: {
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(
+        root,
+        (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+      ),
+    },
+  })).stdout.split(/\s/u)[0];
+  assert.equal(mode, '100755');
+  assert.deepEqual(await snapshotRepository(root), before);
+});
+
+test('selection rejects empty, unknown, duplicate, and non-final units without repository changes', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const valid = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree' && unit.new_range.start === 2);
+  const staged = manifest.units.find((unit) => unit.view === 'head_to_index');
+  const before = await snapshotRepository(root);
+
+  for (const [selectedUnitIds, expectedCode] of [
+    [[], 'SELECTION_INVALID'],
+    [['missing-unit'], 'SELECTION_UNKNOWN_OR_UNSELECTABLE'],
+    [[valid.unit_id, valid.unit_id], 'SELECTION_INVALID'],
+    [[staged.unit_id], 'SELECTION_UNKNOWN_OR_UNSELECTABLE'],
+  ]) {
+    await assert.rejects(
+      prepareTransaction({
+        repository_root: root,
+        manifest,
+        selected_unit_ids: selectedUnitIds,
+      }, { temporaryRoot }),
+      ({ code }) => code === expectedCode,
+    );
+    assert.deepEqual(await snapshotRepository(root), before);
+  }
+  const transactionRoot = path.join(temporaryRoot, 'git-commit-assistant');
+  assert.deepEqual(await readdir(transactionRoot).catch(() => []), []);
+});
+
+test('prepare stops on ambiguous overlap between staged and selected final content', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nstaged version\nline 3\n');
+  await runGit(root, ['add', '--', 'feature.txt']);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected final version\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const before = await snapshotRepository(root);
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, { temporaryRoot }),
+    ({ code }) => code === 'STAGED_SELECTION_AMBIGUOUS',
+  );
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
+test('prepare rejects a stale manifest and an independently inapplicable selection', async (t) => {
+  const staleRoot = await repositoryWithBaseline(t);
+  const staleTemporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(staleRoot, 'feature.txt'), 'line 1\nfirst version\nline 3\n');
+  const staleManifest = await inspectRepository({ repository_root: staleRoot });
+  const staleSelected = staleManifest.units.find((unit) => unit.view === 'head_to_worktree');
+  await writeFile(path.join(staleRoot, 'feature.txt'), 'line 1\nsecond version\nline 3\n');
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: staleRoot,
+      manifest: staleManifest,
+      selected_unit_ids: [staleSelected.unit_id],
+    }, { temporaryRoot: staleTemporaryRoot }),
+    ({ code }) => code === 'MANIFEST_CHANGED',
+  );
+
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree' && unit.new_range.start === 2);
+  const before = await snapshotRepository(root);
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        if (args[0] === 'apply') throw new Error('injected apply failure');
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+    ({ code }) => code === 'SELECTION_CANNOT_APPLY',
+  );
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
+test('recovery preview failure removes its transaction and preserves repository state', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree' && unit.new_range.start === 2);
+  const before = await snapshotRepository(root);
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        if (args[0] === 'diff' && args.includes('--check')) {
+          const error = new Error('injected recovery preview failure');
+          error.code = 2;
+          throw error;
+        }
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+    ({ code }) => code === 'RECOVERY_PREVIEW_FAILED',
+  );
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
+test('prepare CLI returns one-line transaction metadata without stderr', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree' && unit.new_range.start === 2);
+  const result = await runCli('prepare', {
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  });
+  const response = JSON.parse(result.stdout);
+  t.after(() => rm(response.transaction_directory, { recursive: true, force: true }));
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.equal(result.stdout.split('\n').length, 2);
+  assert.equal(response.status, 'prepared');
+  assert.match(response.transaction_id, /^[0-9a-f-]{36}$/u);
+  assert.match(response.ownership_token, /^[0-9a-f]{64}$/u);
+  assert.equal(response.message_file.endsWith('message.txt'), true);
 });

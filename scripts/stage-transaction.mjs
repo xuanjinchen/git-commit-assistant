@@ -1,13 +1,17 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
+  chmod,
   copyFile,
   lstat,
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rm,
+  stat,
+  writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -464,6 +468,379 @@ function compareUnits(left, right) {
   return Buffer.compare(Buffer.from(leftKey), Buffer.from(rightKey));
 }
 
+function stopped(code, message = 'The staging transaction stopped safely.') {
+  return new StageTransactionError(code, message);
+}
+
+function validateSelection(manifest, selectedIds) {
+  const units = Array.isArray(manifest?.units) ? manifest.units : [];
+  const byId = new Map(units.map((unit) => [unit.unit_id, unit]));
+  if (!Array.isArray(selectedIds) || selectedIds.length === 0
+    || new Set(selectedIds).size !== selectedIds.length) {
+    throw stopped('SELECTION_INVALID');
+  }
+  const selected = selectedIds.map((id) => byId.get(id));
+  if (selected.some((unit) => unit === undefined
+    || !['head_to_worktree', 'untracked'].includes(unit.view))) {
+    throw stopped('SELECTION_UNKNOWN_OR_UNSELECTABLE');
+  }
+  for (let left = 0; left < selected.length; left += 1) {
+    for (let right = left + 1; right < selected.length; right += 1) {
+      if (!unitsAreDisjoint(selected[left], selected[right])) {
+        throw stopped('SELECTION_OVERLAPPING');
+      }
+    }
+  }
+  return selected;
+}
+
+function unitPaths(unit) {
+  return new Set([unit.path, unit.old_path].filter((value) => typeof value === 'string'));
+}
+
+function rangesOverlap(left, right) {
+  const leftStart = left.start;
+  const rightStart = right.start;
+  const leftEnd = left.lines === 0 ? leftStart : leftStart + left.lines - 1;
+  const rightEnd = right.lines === 0 ? rightStart : rightStart + right.lines - 1;
+  return leftStart <= rightEnd && rightStart <= leftEnd;
+}
+
+function unitsAreEquivalent(left, right, contentSignatures) {
+  if (left.kind === 'text_hunk' && right.kind === 'text_hunk') {
+    return canonicalJson({
+      kind: left.kind,
+      path: left.path,
+      old_path: left.old_path,
+      old_mode: left.old_mode,
+      new_mode: left.new_mode,
+      old_range: left.old_range,
+      content_sha256: contentSignatures.get(left.unit_id),
+    }) === canonicalJson({
+      kind: right.kind,
+      path: right.path,
+      old_path: right.old_path,
+      old_mode: right.old_mode,
+      new_mode: right.new_mode,
+      old_range: right.old_range,
+      content_sha256: contentSignatures.get(right.unit_id),
+    });
+  }
+  return canonicalJson({
+    kind: left.kind,
+    path: left.path,
+    old_path: left.old_path,
+    old_mode: left.old_mode,
+    new_mode: left.new_mode,
+    old_range: left.old_range,
+    new_range: left.new_range,
+    patch_sha256: left.patch_sha256,
+  }) === canonicalJson({
+    kind: right.kind,
+    path: right.path,
+    old_path: right.old_path,
+    old_mode: right.old_mode,
+    new_mode: right.new_mode,
+    old_range: right.old_range,
+    new_range: right.new_range,
+    patch_sha256: right.patch_sha256,
+  });
+}
+
+function unitsAreDisjoint(left, right) {
+  if (![...unitPaths(left)].some((candidate) => unitPaths(right).has(candidate))) return true;
+  if (left.kind !== 'text_hunk' || right.kind !== 'text_hunk') return false;
+  return !rangesOverlap(left.old_range, right.old_range);
+}
+
+function classifyStagedUnits(manifest, selected, contentSignatures) {
+  const consumed = [];
+  const retained = [];
+  for (const staged of manifest.units.filter((unit) => unit.view === 'head_to_index')) {
+    if (selected.some((unit) => unitsAreEquivalent(staged, unit, contentSignatures))) {
+      consumed.push(staged);
+    } else if (selected.every((unit) => unitsAreDisjoint(staged, unit))) {
+      retained.push(staged);
+    } else {
+      // 同一路径相交却无法证明内容等价时，任何自动取舍都可能吞掉用户已暂存内容。
+      throw stopped('STAGED_SELECTION_AMBIGUOUS');
+    }
+  }
+  return { consumed, retained };
+}
+
+function manifestWithoutDigest({ manifest_sha256: _manifestSha256, ...body }) {
+  return body;
+}
+
+async function verifyManifest(repositoryRoot, suppliedManifest, runtime) {
+  if (suppliedManifest === null || typeof suppliedManifest !== 'object'
+    || Array.isArray(suppliedManifest)
+    || suppliedManifest.manifest_sha256 !== digest(manifestWithoutDigest(suppliedManifest))) {
+    throw stopped('MANIFEST_CHANGED');
+  }
+  const current = await inspectRepository({ repository_root: repositoryRoot }, runtime);
+  if (canonicalJson(current) !== canonicalJson(suppliedManifest)) {
+    throw stopped('MANIFEST_CHANGED');
+  }
+  return current;
+}
+
+async function assertPathHasNoLinks(candidate) {
+  const absolute = path.resolve(candidate);
+  const parsed = path.parse(absolute);
+  const relativeParts = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let current = parsed.root;
+  for (const part of relativeParts) {
+    current = path.join(current, part);
+    let metadata;
+    try {
+      metadata = await lstat(current);
+    } catch {
+      break;
+    }
+    if (metadata.isSymbolicLink()) {
+      throw stopped('UNSAFE_GIT_PATH', 'A temporary path component is a link or reparse point.');
+    }
+  }
+}
+
+async function createTransactionDirectory(repository, runtime) {
+  const requestedRoot = path.resolve(runtime.temporaryRoot ?? runtime.temporary_root ?? os.tmpdir());
+  await assertPathHasNoLinks(requestedRoot);
+  const externalRoot = await resolveExternalTemporaryRoot(repository, {
+    ...runtime,
+    temporary_root: requestedRoot,
+  });
+  const transactionRoot = path.resolve(externalRoot, 'git-commit-assistant');
+  await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
+  await assertPathHasNoLinks(transactionRoot);
+  await chmod(transactionRoot, 0o700);
+  const transactionId = randomUUID();
+  const directory = path.join(transactionRoot, transactionId);
+  await mkdir(directory, { mode: 0o700 });
+  return {
+    id: transactionId,
+    directory,
+    taskIndex: path.join(directory, 'task.index'),
+    originalIndex: path.join(directory, 'original.index'),
+    recoveryIndex: path.join(directory, 'recovery.index'),
+    objectDirectory: path.join(directory, 'objects'),
+    snapshotDirectory: path.join(directory, 'snapshots'),
+    stateFile: path.join(directory, 'state.json'),
+    messageFile: path.join(directory, 'message.txt'),
+    mainObjectDirectory: await gitPath(repository, 'objects', runtime),
+  };
+}
+
+// 所有可能写对象或 cache-tree 的 Git 命令都必须显式使用外部 index/ODB；alternate 仅只读主 ODB。
+function externalGitEnvironment(
+  transaction,
+  indexPath = transaction.taskIndex,
+  baseEnvironment = process.env,
+) {
+  return {
+    ...baseEnvironment,
+    GIT_INDEX_FILE: indexPath,
+    GIT_OBJECT_DIRECTORY: transaction.objectDirectory,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: transaction.mainObjectDirectory,
+  };
+}
+
+async function assertSafeWorktreePath(repository, gitPathValue) {
+  if (typeof gitPathValue !== 'string' || gitPathValue.length === 0
+    || gitPathValue.includes('\0') || path.isAbsolute(gitPathValue)) {
+    throw stopped('UNSAFE_WORKTREE_PATH');
+  }
+  const parts = gitPathValue.split('/');
+  if (parts.some((part) => part === '' || part === '.' || part === '..')) {
+    throw stopped('UNSAFE_WORKTREE_PATH');
+  }
+  const absolute = path.resolve(repository.root, ...parts);
+  if (!isWithin(absolute, repository.root) || absolute === repository.root) {
+    throw stopped('UNSAFE_WORKTREE_PATH');
+  }
+  let current = repository.root;
+  for (const part of parts) {
+    current = path.join(current, part);
+    try {
+      const metadata = await lstat(current);
+      if (metadata.isSymbolicLink()
+        || (current !== absolute && !metadata.isDirectory())
+        || (current === absolute && !metadata.isFile())) {
+        throw stopped('UNSAFE_WORKTREE_PATH');
+      }
+    } catch (error) {
+      if (error instanceof StageTransactionError) throw error;
+      if (current !== absolute) throw stopped('UNSAFE_WORKTREE_PATH');
+    }
+  }
+  return absolute;
+}
+
+async function snapshotWorktreeEvidence(repository, manifest, transaction) {
+  await mkdir(transaction.snapshotDirectory, { mode: 0o700 });
+  const paths = [...new Set(manifest.units.flatMap((unit) =>
+    [unit.path, unit.old_path].filter((value) => typeof value === 'string')))].sort();
+  const evidence = [];
+  for (const gitPathValue of paths) {
+    const absolute = await assertSafeWorktreePath(repository, gitPathValue);
+    try {
+      const metadata = await stat(absolute);
+      const bytes = await readFile(absolute);
+      const pathSha256 = digest(Buffer.from(gitPathValue));
+      const snapshotFile = path.join(transaction.snapshotDirectory, `${pathSha256}.bin`);
+      await writeFile(snapshotFile, bytes, { mode: 0o600, flag: 'wx' });
+      evidence.push({
+        path_sha256: pathSha256,
+        exists: true,
+        mode: metadata.mode,
+        content_sha256: digest(bytes),
+        snapshot_sha256: digest(bytes),
+      });
+    } catch (error) {
+      if (error instanceof StageTransactionError) throw error;
+      evidence.push({
+        path_sha256: digest(Buffer.from(gitPathValue)),
+        exists: false,
+        mode: null,
+        content_sha256: null,
+        snapshot_sha256: null,
+      });
+    }
+  }
+  return evidence;
+}
+
+async function rawEntriesForView(repository, view, runtime) {
+  const descriptor = DIFF_VIEWS.find((candidate) => candidate.view === view);
+  if (descriptor === undefined) return [];
+  const { stdout } = await git(repository, [
+    'diff', '--raw', '-z', '--no-ext-diff', '--no-textconv', '--no-color',
+    '--full-index', '--find-renames', ...descriptor.selector,
+  ], runtime, { encoding: 'buffer' });
+  return parseRawDiff(stdout).map((entry) => ({ descriptor, entry }));
+}
+
+async function buildTextContentSignatures(repository, units, runtime) {
+  const signatures = new Map();
+  for (const view of new Set(units.map((unit) => unit.view))) {
+    const pending = units.filter((unit) => unit.view === view && unit.kind === 'text_hunk');
+    for (const { descriptor, entry } of await rawEntriesForView(repository, view, runtime)) {
+      const matching = pending.filter((unit) => unit.path === entry.path
+        && unit.old_path === entry.old_path);
+      if (matching.length === 0) continue;
+      const patchBytes = await readEntryPatch(repository, descriptor, entry, runtime);
+      for (const hunk of parseHunks(patchBytes)) {
+        const unit = matching.find((candidate) => candidate.patch_sha256 === digest(hunk.bytes)
+          && canonicalJson(candidate.old_range) === canonicalJson(hunk.old_range)
+          && canonicalJson(candidate.new_range) === canonicalJson(hunk.new_range));
+        if (unit === undefined) continue;
+        const headerEnd = hunk.bytes.indexOf(0x0a);
+        const body = headerEnd === -1 ? Buffer.alloc(0) : hunk.bytes.subarray(headerEnd + 1);
+        // staged 与 final hunk 的新行号可能受前方未选插入影响；正文摘要才表达内容等价性。
+        signatures.set(unit.unit_id, digest(body));
+        pending.splice(pending.indexOf(unit), 1);
+      }
+    }
+    if (pending.length !== 0) throw stopped('MANIFEST_CHANGED');
+  }
+  return signatures;
+}
+
+function patchForTextUnits(patchBytes, expectedUnits) {
+  const hunks = parseHunks(patchBytes);
+  const selectedHunks = [];
+  for (const hunk of hunks) {
+    const unit = expectedUnits.find((candidate) => candidate.patch_sha256 === digest(hunk.bytes)
+      && canonicalJson(candidate.old_range) === canonicalJson(hunk.old_range)
+      && canonicalJson(candidate.new_range) === canonicalJson(hunk.new_range));
+    if (unit !== undefined) selectedHunks.push(hunk.bytes);
+  }
+  if (selectedHunks.length !== expectedUnits.length || hunks.length === 0) {
+    throw stopped('MANIFEST_CHANGED');
+  }
+  const headerEnd = patchBytes.indexOf(hunks[0].bytes);
+  return Buffer.concat([patchBytes.subarray(0, headerEnd), ...selectedHunks]);
+}
+
+async function reconstructPatches(repository, units, runtime) {
+  const patches = [];
+  for (const view of new Set(units.map((unit) => unit.view))) {
+    const pending = units.filter((unit) => unit.view === view && unit.view !== 'untracked');
+    for (const { descriptor, entry } of await rawEntriesForView(repository, view, runtime)) {
+      const matching = pending.filter((unit) => unit.path === entry.path
+        && unit.old_path === entry.old_path);
+      if (matching.length === 0) continue;
+      const patchBytes = await readEntryPatch(repository, descriptor, entry, runtime);
+      if (matching.every((unit) => unit.kind === 'text_hunk')) {
+        patches.push(patchForTextUnits(patchBytes, matching));
+      } else if (matching.length === 1
+        && matching[0].patch_sha256 === digest(patchBytes)) {
+        patches.push(patchBytes);
+      } else {
+        throw stopped('MANIFEST_CHANGED');
+      }
+      for (const unit of matching) pending.splice(pending.indexOf(unit), 1);
+    }
+    if (pending.length !== 0) throw stopped('MANIFEST_CHANGED');
+  }
+  return patches;
+}
+
+function patchWithoutIndexIdentity(patchBytes) {
+  return Buffer.from(
+    patchBytes.toString('latin1').replace(/^index [^\r\n]*(?:\r?\n)/mu, ''),
+    'latin1',
+  );
+}
+
+async function applyPatches(repository, patches, transaction, indexPath, runtime) {
+  for (let index = 0; index < patches.length; index += 1) {
+    const patchFile = path.join(transaction.directory, `apply-${index}.patch`);
+    await writeFile(patchFile, patches[index], { mode: 0o600, flag: 'wx' });
+    try {
+      await git(repository, [
+        'apply', '--cached', '--binary', '--unidiff-zero', '--whitespace=nowarn', patchFile,
+      ], runtime, { env: externalGitEnvironment(transaction, indexPath) });
+    } finally {
+      await rm(patchFile, { force: true });
+    }
+  }
+}
+
+async function addUntrackedUnits(repository, units, transaction, runtime) {
+  for (const unit of units.filter((candidate) => candidate.view === 'untracked')) {
+    const absolute = await assertSafeWorktreePath(repository, unit.path);
+    const { stdout: oid } = await git(repository, ['hash-object', '-w', '--', absolute], runtime, {
+      env: {
+        ...externalGitEnvironment(transaction),
+        GIT_LITERAL_PATHSPECS: '1',
+      },
+    });
+    await git(repository, [
+      'update-index', '--add', '--cacheinfo', `${unit.new_mode},${oid.trim()},${unit.path}`,
+    ], runtime, {
+      env: {
+        ...externalGitEnvironment(transaction),
+        GIT_LITERAL_PATHSPECS: '1',
+      },
+    });
+  }
+}
+
+async function secureTransactionFiles(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const candidate = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await chmod(candidate, 0o700);
+      await secureTransactionFiles(candidate);
+    } else {
+      await chmod(candidate, 0o600);
+    }
+  }
+}
+
 async function buildManifest(repository, indexPath, runtime) {
   const { stdout: head } = await git(repository, ['rev-parse', 'HEAD'], runtime);
   const indexBytes = await readFile(indexPath);
@@ -502,6 +879,151 @@ export async function inspectRepository({ repository_root }, runtime = {}) {
   return { ...manifest, manifest_sha256: digest(manifest) };
 }
 
+// 为选定最终单元准备一次外部 staging 事务；成功前不改写真实 HEAD、index、worktree 或主对象库。
+export async function prepareTransaction({
+  repository_root,
+  manifest,
+  selected_unit_ids,
+}, runtime = {}) {
+  const selected = validateSelection(manifest, selected_unit_ids);
+  const repository = await resolveOwnedRepository(repository_root, runtime);
+  const indexPath = await assertOrdinaryGitState(repository, runtime);
+  await verifyManifest(repository.root, manifest, runtime);
+  const stagedCandidates = manifest.units.filter((unit) => unit.view === 'head_to_index');
+  const contentSignatures = await buildTextContentSignatures(
+    repository,
+    [...selected, ...stagedCandidates],
+    runtime,
+  );
+  const staged = classifyStagedUnits(manifest, selected, contentSignatures);
+  let transaction;
+  try {
+    transaction = await createTransactionDirectory(repository, runtime);
+    await mkdir(transaction.objectDirectory, { mode: 0o700 });
+    await copyFile(indexPath, transaction.originalIndex);
+    await chmod(transaction.originalIndex, 0o600);
+    const worktreeEvidence = await snapshotWorktreeEvidence(repository, manifest, transaction);
+
+    await git(repository, ['read-tree', manifest.head_oid], runtime, {
+      env: externalGitEnvironment(transaction),
+    });
+    const selectedPatches = await reconstructPatches(repository, selected, runtime);
+    try {
+      await applyPatches(
+        repository,
+        selectedPatches,
+        transaction,
+        transaction.taskIndex,
+        runtime,
+      );
+      await addUntrackedUnits(repository, selected, transaction, runtime);
+    } catch (error) {
+      if (error instanceof StageTransactionError) throw error;
+      throw stopped('SELECTION_CANNOT_APPLY');
+    }
+    const { stdout: taskTree } = await git(repository, ['write-tree'], runtime, {
+      env: externalGitEnvironment(transaction),
+    });
+    const taskTreeOid = taskTree.trim();
+
+    await git(repository, ['read-tree', taskTreeOid], runtime, {
+      env: externalGitEnvironment(transaction, transaction.recoveryIndex),
+    });
+    try {
+      const retainedPatches = (await reconstructPatches(repository, staged.retained, runtime))
+        .map(patchWithoutIndexIdentity);
+      await applyPatches(
+        repository,
+        retainedPatches,
+        transaction,
+        transaction.recoveryIndex,
+        runtime,
+      );
+      const recoveryEnvironment = externalGitEnvironment(transaction, transaction.recoveryIndex);
+      const { stdout: temporaryCommit } = await git(repository, [
+        'commit-tree', taskTreeOid, '-p', manifest.head_oid, '-m', 'recovery preview baseline',
+      ], runtime, { env: recoveryEnvironment });
+      // 预演只比较 task tree 之后应恢复的 staged delta，不能把任务内容再次计入恢复证据。
+      await git(repository, [
+        'diff', '--cached', '--check', temporaryCommit.trim(),
+      ], runtime, { env: recoveryEnvironment });
+      const { stdout: recoveryPatch } = await git(repository, [
+        'diff', '--cached', '--binary', '--full-index', temporaryCommit.trim(),
+      ], runtime, { encoding: 'buffer', env: recoveryEnvironment });
+      const { stdout: recoveryTree } = await git(repository, ['write-tree'], runtime, {
+        env: recoveryEnvironment,
+      });
+      const recoveryTreeOid = recoveryTree.trim();
+      const ownershipToken = randomBytes(32).toString('hex');
+      const binding = {
+        repository_sha256: digest(Buffer.from(repository.root)),
+        manifest_sha256: manifest.manifest_sha256,
+        selected_unit_ids: [...selected_unit_ids],
+        head_oid: manifest.head_oid,
+        index_sha256: manifest.index_sha256,
+        index_tree_oid: manifest.index_tree_oid,
+        script_sha256: manifest.script_sha256,
+        worktree_state_sha256: manifest.worktree_state_sha256,
+        task_tree_oid: taskTreeOid,
+        recovery_tree_oid: recoveryTreeOid,
+      };
+      const state = {
+        schema_version: SCHEMA_VERSION,
+        lifecycle: 'prepared',
+        transaction_id: transaction.id,
+        repository: {
+          canonical_path: repository.root,
+          canonical_path_sha256: binding.repository_sha256,
+        },
+        binding,
+        token_sha256: digest(Buffer.from(ownershipToken)),
+        staged_units: {
+          consumed_unit_ids: staged.consumed.map(({ unit_id }) => unit_id),
+          retained_unit_ids: staged.retained.map(({ unit_id }) => unit_id),
+        },
+        files: {
+          original_index_sha256: digest(await readFile(transaction.originalIndex)),
+          task_index_sha256: digest(await readFile(transaction.taskIndex)),
+          recovery_index_sha256: digest(await readFile(transaction.recoveryIndex)),
+          recovery_patch_sha256: digest(recoveryPatch),
+          worktree: worktreeEvidence,
+        },
+        message_file_sha256: null,
+      };
+      await writeFile(transaction.stateFile, `${canonicalJson(state)}\n`, {
+        mode: 0o600,
+        flag: 'wx',
+      });
+      await secureTransactionFiles(transaction.directory);
+      return {
+        status: 'prepared',
+        transaction_id: transaction.id,
+        transaction_directory: transaction.directory,
+        ownership_token: ownershipToken,
+        task_tree_oid: taskTreeOid,
+        recovery_tree_oid: recoveryTreeOid,
+        message_file: transaction.messageFile,
+        binding,
+        staged_units: state.staged_units,
+        summary: {
+          selected_unit_count: selected.length,
+          consumed_staged_unit_count: staged.consumed.length,
+          retained_staged_unit_count: staged.retained.length,
+        },
+      };
+    } catch (error) {
+      if (error instanceof StageTransactionError) throw error;
+      throw stopped('RECOVERY_PREVIEW_FAILED');
+    }
+  } catch (error) {
+    if (transaction !== undefined) {
+      // 目录名由本进程 UUID 生成且路径已验证，只清理本次尚未转移所有权的事务。
+      await rm(transaction.directory, { recursive: true, force: true });
+    }
+    throw error;
+  }
+}
+
 async function readCliRequest() {
   const chunks = [];
   let byteLength = 0;
@@ -530,7 +1052,7 @@ function writeCliResult(value) {
 
 async function runCli() {
   const [command, ...extraArguments] = process.argv.slice(2);
-  if (command !== 'inspect' || extraArguments.length !== 0) {
+  if (!['inspect', 'prepare'].includes(command) || extraArguments.length !== 0) {
     writeCliResult({
       ok: false,
       status: 'failed',
@@ -543,8 +1065,13 @@ async function runCli() {
   }
   try {
     const request = await readCliRequest();
-    const manifest = await inspectRepository(request);
-    writeCliResult({ ok: true, status: 'inspected', ...manifest });
+    if (command === 'inspect') {
+      const manifest = await inspectRepository(request);
+      writeCliResult({ ok: true, status: 'inspected', ...manifest });
+    } else {
+      const prepared = await prepareTransaction(request);
+      writeCliResult({ ok: true, ...prepared });
+    }
   } catch (error) {
     const protocolError = error instanceof StageTransactionError && error.code === 'PROTOCOL_ERROR';
     writeCliResult({
