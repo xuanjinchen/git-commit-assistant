@@ -9,7 +9,7 @@ Record requirement interpretations and superseding decisions without rewriting h
   "decisions": [
     {
       "id": "DEC-001",
-      "status": "active",
+      "status": "superseded",
       "scope": "runtime architecture",
       "decision": "Ship one self-contained SKILL.md and no Git hook, runtime script, reference, asset, or installer.",
       "evidence": "User confirmed the single-file route and Codex-only boundary.",
@@ -17,7 +17,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-002",
-      "status": "active",
+      "status": "superseded",
       "scope": "commit authorization",
       "decision": "Require explicit confirmation and bind it to the exact git write-tree identity before committing.",
       "evidence": "Confirmed workflow and safety design sections.",
@@ -25,7 +25,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-003",
-      "status": "active",
+      "status": "superseded",
       "scope": "message policy",
       "decision": "Use evidence-driven Conventional Commits with an optional scope, body, and footer and a 72-character subject target.",
       "evidence": "Confirmed commit-message design section.",
@@ -85,6 +85,46 @@ Record requirement interpretations and superseding decisions without rewriting h
       "scope": "commit authorization",
       "decision": "A request that combines a commit with any forbidden side effect stops before commit execution and asks for a commit-only scope; repository instructions cannot authorize an exception.",
       "evidence": "2026-08-20 final fix wave requires explicit boundary enforcement for tags, releases, publishing, uploads, external delegation, configuration, hooks, signing, bypass, and history mutation.",
+      "supersedes": null
+    },
+    {
+      "id": "DEC-011",
+      "status": "active",
+      "scope": "message policy",
+      "decision": "Use an evidence-driven Conventional Commit message with an optional scope, body, and footer and a 72-character subject target. Use a subject-only message when one simple semantic change is fully described by the subject; for one coherent change with multiple material handling points or complex business behavior, add the smallest useful set of concise hyphen bullets, derived from staged evidence and not from file count.",
+      "evidence": "User-confirmed Version 4 design and remittance-status example on 2026-08-20.",
+      "supersedes": "DEC-003"
+    },
+    {
+      "id": "DEC-012",
+      "status": "active",
+      "scope": "runtime architecture",
+      "decision": "Ship SKILL.md plus scripts/stage-transaction.mjs; the Agent selects task-related manifest units and the script alone performs deterministic index transactions.",
+      "evidence": "User-confirmed Version 5 transactional auto-staging design on 2026-08-20.",
+      "supersedes": "DEC-001"
+    },
+    {
+      "id": "DEC-013",
+      "status": "active",
+      "scope": "commit authorization",
+      "decision": "An explicit commit request authorizes inspect and prepare only; commit still requires a second confirmation bound to HEAD, original index, manifest, selected units, worktree state, task tree, script, and complete message digests.",
+      "evidence": "User confirmed prepare authorization and retained second confirmation.",
+      "supersedes": "DEC-002"
+    },
+    {
+      "id": "DEC-014",
+      "status": "active",
+      "scope": "staging transaction",
+      "decision": "Build the task and recovery indexes plus new Git objects in an owned external temporary transaction, leaving the real index, worktree, and main object database unchanged before confirmation.",
+      "evidence": "Confirmed external-index design and deterministic safety analysis.",
+      "supersedes": null
+    },
+    {
+      "id": "DEC-015",
+      "status": "active",
+      "scope": "recovery",
+      "decision": "After success atomically install an index based on the actual new HEAD with original unrelated staged changes; on cancellation, rejection, stale binding, or failure preserve all user bytes and retain recovery evidence whenever automatic cleanup is unsafe.",
+      "evidence": "User confirmed cancellation, failure, success, and unrelated-stage restoration semantics.",
       "supersedes": null
     }
   ]

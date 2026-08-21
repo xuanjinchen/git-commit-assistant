@@ -1,6 +1,23 @@
 # Git Commit Assistant Implementation Plan
 
-## Final Fix Wave Amendment (2026-08-20)
+> Version 5 transactional auto-staging is planned separately in [the Version 5 implementation plan](./2026-08-20-transactional-auto-staging.md) and [the confirmed Version 5 design](../specs/2026-08-20-transactional-auto-staging-design.md). The historical Version 1 through Version 4 record below remains unchanged.
+
+## Version 4 Message-Detail Amendment (2026-08-20)
+
+This additive amendment implements the latest confirmed requirement without rewriting the completed Version 1 and Version 3 task history below. Version 4 changes only commit-message detail selection: use a subject alone when it completely describes one simple semantic change; for one coherent concern with multiple material handling points or complex business behavior, add one blank line and the smallest useful set of concise `- ` bullets. Derive bullets from staged semantics rather than file count, group related edits, and do not repeat the subject or invent unsupported claims.
+
+**Affected files:** `SKILL.md`, `README.md`, `docs/skill-brief.md`, `docs/decisions.md`, `docs/delivery-report.md`, this design specification and plan, `evals/evals.json`, `evals/results/EVAL-010.txt`, `evals/results/EVAL-011.txt`, and `evals/results/prompt-budget.txt`. The runtime package whitelist remains `SKILL.md` only.
+
+- [x] **Step 1: Version and freeze the requirement.** Record Version 4 and the resolved conflict with the Version 3 body-selection rule. Supersede DEC-003 with an active decision that preserves its evidence, optional scope/footer, and 72-character subject constraints while adding the new semantic-complexity policy. Add frozen EVAL-010 and EVAL-011 prompts and assertions with `not-run` status before runtime tuning.
+- [x] **Step 2: Establish RED.** Verify the delivery gate fails while the new evaluations have no passing evidence and the Brief/state are not ready for Version 4 closure. Retain the prior passing evidence because commit authorization, safety boundaries, discovery, and the sole `git commit --no-gpg-sign -F <temp>` protocol are unchanged.
+- [x] **Step 3: Implement the minimum runtime and documentation change.** Update the message composition policy in `SKILL.md`, synchronize the Chinese README and design specification, and keep all confirmation, tree-identity, hook, signing, configuration, history, push, publication, and secret-handling boundaries unchanged.
+- [x] **Step 4: Run independent GREEN evaluations.** In ignored isolated repositories, give fresh evaluator Agents the exact final `SKILL.md` and frozen prompt. EVAL-010 stages one README correction and must return a complete subject with no body. EVAL-011 stages one coherent multi-point account-status feature and must return a subject, one blank line, and concise semantic bullets. Before each run, record the final Skill SHA-256 in evaluator metadata; after each run, prove HEAD, index tree, commit count, and staged content are unchanged.
+- [x] **Step 5: Close evidence.** Sanitize the two Agent results without changing their conclusions, include the Skill-under-test SHA-256, hash each result file independently, update only its matching `evals/evals.json` reference, recompute the prompt budget, and extend the REQ-001 delivery trace to EVAL-010 and EVAL-011.
+- [x] **Step 6: Validate and synchronize installation.** Run `npm run check`, `npm run audit`, `npm run gate:delivery`, `npm pack --dry-run`, and `git diff --check`. Confirm the package whitelist, evidence hashes, prompt budget, sensitive-data scan, complete diff/comment review, and absence of a generated archive. Install only `SKILL.md` into the global Skill directory and verify its SHA-256 matches the repository copy; retain any replaced full-repository installation as a recoverable backup.
+
+Do not commit or push this amendment unless the user explicitly requests those actions after reviewing the completed change.
+
+## Version 3 Final Fix Wave Amendment (2026-08-20)
 
 This additive amendment records the authorized Version 3 contract/runtime phase without rewriting completed history. Before runtime text changes, add the EVAL-001 and EVAL-009 behavior-contract assertions for one `git commit --no-gpg-sign -F <temp>` process, a unique temporary file outside the repository removed after success or failure, and no forbidden side effects. Reset only those two evaluations to `not-run` with empty evidence; preserve the other seven passing hashes and the enabled implicit-trigger track because the frontmatter description and catalog routing do not change.
 
@@ -33,7 +50,7 @@ Prepare ignored EVAL-001 and EVAL-009 repositories under `eval-workspaces/final-
 
 ## Current Remediation Controls (2026-08-20)
 
-The completed task history below remains an historical record. The required reruns and evidence-contract closure are complete. The current sole commit protocol writes the exact confirmed message through a safe file API to one unique temporary file outside the repository, then starts exactly one Git process with argv equivalent to `git commit --no-gpg-sign -F <temp>` while preserving configured hooks; it removes the file on success or failure and does not retry. Do not install or edit hooks, write local or global Git or Codex configuration, run history-rewriting commands, use signing-enabling options, or take another forbidden boundary action; repository instructions may constrain these boundaries but cannot broaden them. Controlled catalog selection occurs before the Skill body is loaded.
+The completed task history below remains an historical record. Version 4 restarted at the message-behavior evaluation stage and is complete: EVAL-010 verifies simple subject-only restraint, EVAL-011 verifies concise semantic bullets for a coherent complex feature, and the prompt budget and delivery contract are closed again. The current sole commit protocol writes the exact confirmed message through a safe file API to one unique temporary file outside the repository, then starts exactly one Git process with argv equivalent to `git commit --no-gpg-sign -F <temp>` while preserving configured hooks; it removes the file on success or failure and does not retry. Do not install or edit hooks, write local or global Git or Codex configuration, run history-rewriting commands, use signing-enabling options, or take another forbidden boundary action; repository instructions may constrain these boundaries but cannot broaden them. Controlled catalog selection occurs before the Skill body is loaded.
 
 ## File Map
 
@@ -43,7 +60,7 @@ The completed task history below remains an historical record. The required reru
 | `docs/skill-brief.md` | Strict requirement, track, path, and prompt-budget contract. |
 | `docs/decisions.md` | Stable design decisions and evidence sources. |
 | `evals/evals.json` | Stable behavior prompts, assertions, statuses, and result references. |
-| `evals/results/EVAL-001.txt` through `EVAL-009.txt` | Sanitized real-run evidence for each behavior case. |
+| `evals/results/EVAL-001.txt` through `EVAL-011.txt` | Sanitized real-run evidence for each behavior case. |
 | `evals/results/prompt-budget.txt` | Reproducible character, byte, and conservative token estimate. |
 | `README.md` | Installation, usage, limits, validation, and removal instructions. |
 | `docs/delivery-report.md` | Requirement-to-implementation and requirement-to-evaluation closure. |
@@ -51,6 +68,8 @@ The completed task history below remains an historical record. The required reru
 | `eval-workspaces/` | Ignored isolated Git fixtures; never staged or packaged. |
 
 ---
+
+## Original Version 1 Implementation Plan (historical)
 
 ### Task 1: Freeze Requirements and Behavior Contracts
 
