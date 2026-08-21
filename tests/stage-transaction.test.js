@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import {
   mkdtemp,
   mkdir,
+  lstat,
   readFile,
   readdir,
   rename,
@@ -32,6 +33,7 @@ async function runGit(root, args, options = {}) {
       ...process.env,
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: globalConfig,
+      ...(options.env ?? {}),
     },
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -164,9 +166,11 @@ async function snapshotObjects(root) {
 }
 
 async function snapshotRepository(root) {
+  const configPath = (await runGit(root, ['rev-parse', '--git-path', 'config'])).stdout.trim();
   return {
     head: (await runGit(root, ['rev-parse', 'HEAD'])).stdout.trim(),
     index: await readIndexBytes(root),
+    config: await readFile(path.resolve(root, configPath)),
     status: (await runGit(root, ['status', '--porcelain=v2', '-z'], { encoding: 'buffer' })).stdout,
     worktree: await snapshotFiles(root),
     objects: await snapshotObjects(root),
@@ -296,6 +300,49 @@ test('manifest preserves tab and newline paths as JSON data', async (t) => {
   assert.deepEqual(JSON.parse(JSON.stringify(manifest)), manifest);
 });
 
+test('manifest treats Git pathspec magic paths as literal data', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'magic---.txt'), 'magic path bytes\n');
+  await writeFile(path.join(root, 'ordinary.txt'), 'ordinary baseline\n');
+  await runGit(root, ['add', '--', 'magic---.txt', 'ordinary.txt']);
+  await runGit(root, ['commit', '-m', 'pathspec baseline']);
+  await writeFile(path.join(root, 'magic---.txt'), 'completely replaced magic content\n');
+  await runGit(root, ['add', '--', 'magic---.txt']);
+  await rewriteIndexPaths(root, [['magic---.txt', ':(glob)*.txt']]);
+  await writeFile(path.join(root, 'ordinary.txt'), 'ordinary changed\n');
+  await runGit(root, ['add', '--', 'ordinary.txt']);
+
+  const manifest = await inspectRepository({ repository_root: root });
+  const magicUnits = manifest.units.filter((unit) =>
+    unit.view === 'head_to_index' && unit.path === ':(glob)*.txt');
+
+  assert.equal(magicUnits.length, 1);
+  assert.equal(magicUnits[0].kind, 'text_hunk');
+  assert.deepEqual(magicUnits[0].old_range, { start: 0, lines: 0 });
+  assert.deepEqual(magicUnits[0].new_range, { start: 1, lines: 1 });
+});
+
+test('text lines resembling binary headers remain selectable hunks', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'binary-labels.txt'), 'ordinary baseline\n');
+  await runGit(root, ['add', '--', 'binary-labels.txt']);
+  await runGit(root, ['commit', '-m', 'binary label baseline']);
+  await writeFile(path.join(root, 'binary-labels.txt'), [
+    'ordinary text',
+    'GIT binary patch',
+    'Binary files example differ',
+    '',
+  ].join('\n'));
+
+  const manifest = await inspectRepository({ repository_root: root });
+  const units = manifest.units.filter((unit) =>
+    unit.view === 'head_to_worktree' && unit.path === 'binary-labels.txt');
+
+  assert.equal(units.length, 1);
+  assert.equal(units[0].kind, 'text_hunk');
+  assert.equal(units[0].atomic, false);
+});
+
 test('inspect rejects unsafe repository states with stable codes', async (t) => {
   const unborn = await createGitRepository(t);
   await assert.rejects(
@@ -336,21 +383,61 @@ test('inspect rejects a linked Git index', async (t) => {
   );
 });
 
+test('inspect rejects linked and dangling index locks', async (t) => {
+  for (const dangling of [false, true]) {
+    const root = await repositoryWithBaseline(t);
+    const relativeIndexPath = (await runGit(root, ['rev-parse', '--git-path', 'index'])).stdout.trim();
+    const lockPath = `${path.resolve(root, relativeIndexPath)}.lock`;
+    const targetPath = `${lockPath}.target`;
+    if (!dangling) await writeFile(targetPath, 'linked lock target');
+    await symlink(path.basename(targetPath), lockPath, 'file');
+
+    await assert.rejects(
+      inspectRepository({ repository_root: root }),
+      ({ code }) => code === 'INDEX_LOCKED',
+    );
+    assert.equal((await lstat(lockPath)).isSymbolicLink(), true);
+  }
+});
+
 test('inspect delegates every Git read through the runtime runner', async (t) => {
   const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nruntime staged\nline 3\n');
+  await runGit(root, ['add', '--', 'feature.txt']);
+  const before = await snapshotRepository(root);
   const observed = [];
 
-  await inspectRepository({ repository_root: root }, {
+  const manifest = await inspectRepository({ repository_root: root }, {
     runGit: async (repositoryRoot, args, options) => {
-      observed.push(args);
+      observed.push({ args, options });
       return runGit(repositoryRoot, args, options);
     },
   });
 
-  assert.ok(observed.some((args) => args.includes('--show-toplevel')));
-  assert.ok(observed.some((args) => args.includes('--absolute-git-dir')));
-  assert.ok(observed.some((args) => args.includes('--git-common-dir')));
-  assert.ok(observed.every((args) => Array.isArray(args)));
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(manifest.schema_version, 1);
+  assert.ok(observed.some(({ args }) => args.includes('--show-toplevel')));
+  assert.ok(observed.some(({ args }) => args.includes('--absolute-git-dir')));
+  assert.ok(observed.some(({ args }) => args.includes('--git-common-dir')));
+  assert.ok(observed.every(({ args }) => Array.isArray(args)));
+  const writeTree = observed.find(({ args }) => args.includes('write-tree'));
+  assert.equal(writeTree.options.env.GIT_OPTIONAL_LOCKS, '0');
+  assert.match(writeTree.options.env.GIT_OBJECT_DIRECTORY, /git-commit-assistant-inspect-/u);
+  assert.equal(writeTree.options.env.GIT_INDEX_FILE.endsWith('index'), true);
+});
+
+test('inspect rejects temporary roots inside repository state', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const gitDir = (await runGit(root, ['rev-parse', '--absolute-git-dir'])).stdout.trim();
+  const before = await snapshotRepository(root);
+
+  for (const temporaryRoot of [root, gitDir]) {
+    await assert.rejects(
+      inspectRepository({ repository_root: root }, { temporary_root: temporaryRoot }),
+      ({ code }) => code === 'UNSAFE_GIT_PATH',
+    );
+  }
+  assert.deepEqual(await snapshotRepository(root), before);
 });
 
 test('inspect CLI emits one safe JSON line', async (t) => {

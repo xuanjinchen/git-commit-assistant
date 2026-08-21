@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  access,
+  copyFile,
   lstat,
   mkdtemp,
   mkdir,
@@ -71,7 +71,14 @@ async function defaultRunGit(repositoryRoot, args, options = {}) {
 
 async function runGitAtRoot(repositoryRoot, args, runtime, options = {}) {
   const runner = runtime.runGit ?? defaultRunGit;
-  return runner(repositoryRoot, args, options);
+  return runner(repositoryRoot, args, {
+    ...options,
+    env: {
+      // 注入 runner 也必须继承只读锁策略，不能由测试或后续调用方意外刷新真实 index。
+      GIT_OPTIONAL_LOCKS: '0',
+      ...(options.env ?? {}),
+    },
+  });
 }
 
 async function git(repository, args, runtime, options = {}) {
@@ -134,9 +141,10 @@ async function gitPath(repository, name, runtime) {
   return resolved;
 }
 
-async function exists(candidate) {
+async function directoryEntryExists(candidate) {
   try {
-    await access(candidate);
+    // dangling link 也占用 lock/marker 名称，必须检查目录项本身而不是可达目标。
+    await lstat(candidate);
     return true;
   } catch {
     return false;
@@ -164,7 +172,7 @@ async function assertOrdinaryGitState(repository, runtime) {
     'sequencer',
   ];
   for (const marker of specialMarkers) {
-    if (await exists(await gitPath(repository, marker, runtime))) {
+    if (await directoryEntryExists(await gitPath(repository, marker, runtime))) {
       throw new StageTransactionError('SPECIAL_GIT_STATE', 'A special Git operation is in progress.');
     }
   }
@@ -176,16 +184,16 @@ async function assertOrdinaryGitState(repository, runtime) {
     || (!isWithin(indexPath, repository.gitDir) && !isWithin(indexPath, repository.commonDir))) {
     throw new StageTransactionError('UNSAFE_GIT_PATH', 'The repository index resolves outside owned metadata.');
   }
-  if (await exists(indexCandidate)) {
+  if (await directoryEntryExists(indexCandidate)) {
     const candidateMetadata = await lstat(indexCandidate);
     if (!candidateMetadata.isFile() || candidateMetadata.isSymbolicLink()) {
       throw new StageTransactionError('UNSAFE_GIT_PATH', 'The repository index is not an ordinary file.');
     }
   }
-  if (await exists(`${indexPath}.lock`)) {
+  if (await directoryEntryExists(`${indexPath}.lock`)) {
     throw new StageTransactionError('INDEX_LOCKED', 'The repository index is locked.');
   }
-  if (await exists(indexPath)) {
+  if (await directoryEntryExists(indexPath)) {
     const indexMetadata = await lstat(indexPath);
     if (!indexMetadata.isFile() || indexMetadata.isSymbolicLink()) {
       throw new StageTransactionError('UNSAFE_GIT_PATH', 'The repository index is not an ordinary file.');
@@ -194,16 +202,42 @@ async function assertOrdinaryGitState(repository, runtime) {
   return indexPath;
 }
 
-async function readIndexTree(repository, indexPath, runtime) {
-  const temporaryRoot = await mkdtemp(path.join(runtime.temporary_root ?? os.tmpdir(), 'git-commit-assistant-inspect-'));
-  const objectDirectory = path.join(temporaryRoot, 'objects');
-  await mkdir(objectDirectory);
+async function resolveExternalTemporaryRoot(repository, runtime) {
+  const requested = runtime.temporary_root ?? os.tmpdir();
+  if (typeof requested !== 'string' || requested.length === 0) {
+    throw new StageTransactionError('UNSAFE_GIT_PATH', 'The temporary root is invalid.');
+  }
+  let resolved;
   try {
+    resolved = await realpath(requested);
+  } catch {
+    throw new StageTransactionError('UNSAFE_GIT_PATH', 'The temporary root does not exist.');
+  }
+  const metadata = await lstat(resolved);
+  if (!metadata.isDirectory()) {
+    throw new StageTransactionError('UNSAFE_GIT_PATH', 'The temporary root is not a directory.');
+  }
+  // 临时根可与仓库同处系统临时父目录，但其自身不能落入 worktree 或任一 Git metadata 根。
+  if ([repository.root, repository.gitDir, repository.commonDir]
+    .some((stateRoot) => isWithin(resolved, stateRoot))) {
+    throw new StageTransactionError('UNSAFE_GIT_PATH', 'The temporary root overlaps repository state.');
+  }
+  return resolved;
+}
+
+async function readIndexTree(repository, indexPath, runtime) {
+  const externalRoot = await resolveExternalTemporaryRoot(repository, runtime);
+  const temporaryRoot = await mkdtemp(path.join(externalRoot, 'git-commit-assistant-inspect-'));
+  const objectDirectory = path.join(temporaryRoot, 'objects');
+  const temporaryIndex = path.join(temporaryRoot, 'index');
+  try {
+    await mkdir(objectDirectory);
+    await copyFile(indexPath, temporaryIndex);
     const repositoryObjects = await gitPath(repository, 'objects', runtime);
-    // write-tree 需要对象写入；重定向到临时对象库后，真实对象库仍保持只读。
+    // write-tree 会更新 cache-tree；索引副本和临时对象库共同隔离全部写入。
     const { stdout } = await git(repository, ['write-tree'], runtime, {
       env: {
-        GIT_INDEX_FILE: indexPath,
+        GIT_INDEX_FILE: temporaryIndex,
         GIT_OBJECT_DIRECTORY: objectDirectory,
         GIT_ALTERNATE_OBJECT_DIRECTORIES: repositoryObjects,
       },
@@ -270,6 +304,11 @@ function parseHunks(patchBytes) {
   }));
 }
 
+function isBinaryPatch(patchBytes) {
+  // Git 的 binary 标记必须独占 patch 结构行；文本内容行始终带 `+`/`-` 前缀。
+  return /^(?:GIT binary patch|Binary files .* differ)$/mu.test(patchBytes.toString('latin1'));
+}
+
 const DIFF_COMMON_ARGS = [
   '--no-ext-diff',
   '--no-textconv',
@@ -292,7 +331,11 @@ async function readEntryPatch(repository, descriptor, entry, runtime) {
     repository,
     ['diff', ...DIFF_COMMON_ARGS, ...descriptor.selector, '--', ...paths],
     runtime,
-    { encoding: 'buffer' },
+    {
+      encoding: 'buffer',
+      // raw -z 返回的仓库路径不可信；强制 literal 后 `:(glob)` 等内容才不会扩张为 pathspec。
+      env: { GIT_LITERAL_PATHSPECS: '1' },
+    },
   );
   return stdout;
 }
@@ -339,8 +382,7 @@ async function buildDiffUnits(repository, runtime) {
         units.push(wholeFileUnit(descriptor, entry, 'deletion', patchBytes));
       } else if (entry.status === 'R' || entry.status === 'C') {
         units.push(wholeFileUnit(descriptor, entry, 'rename', patchBytes));
-      } else if (patchBytes.includes(Buffer.from('GIT binary patch\n'))
-        || patchBytes.includes(Buffer.from('Binary files '))) {
+      } else if (isBinaryPatch(patchBytes)) {
         units.push(wholeFileUnit(descriptor, entry, 'binary_file', patchBytes));
       } else if (entry.old_mode !== entry.new_mode && hunks.length === 0) {
         units.push(wholeFileUnit(descriptor, entry, 'mode_change', patchBytes));
