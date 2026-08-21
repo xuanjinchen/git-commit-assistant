@@ -15,31 +15,47 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import test from 'node:test';
 
 import { inspectRepository } from '../scripts/stage-transaction.mjs';
 import * as stageTransaction from '../scripts/stage-transaction.mjs';
 
-const execFileAsync = promisify(execFile);
 const gitConfigByRepository = new Map();
 
 async function runGit(root, args, options = {}) {
   const globalConfig = gitConfigByRepository.get(root)
     ?? path.join(path.dirname(root), 'empty-global-config');
-  const result = await execFileAsync('git', args, {
-    cwd: root,
-    encoding: options.encoding ?? 'utf8',
-    env: {
-      ...process.env,
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: globalConfig,
-      GIT_OPTIONAL_LOCKS: '0',
-      ...(options.env ?? {}),
-    },
-    maxBuffer: 16 * 1024 * 1024,
+  return new Promise((resolve, reject) => {
+    let stdinError;
+    const child = execFile('git', args, {
+      cwd: root,
+      encoding: options.encoding ?? 'utf8',
+      env: {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: globalConfig,
+        GIT_OPTIONAL_LOCKS: '0',
+        ...(options.env ?? {}),
+      },
+      maxBuffer: 16 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error !== null) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      if (stdinError !== undefined) {
+        reject(stdinError);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    child.stdin.on('error', (error) => {
+      stdinError = error;
+    });
+    child.stdin.end(options.input);
   });
-  return result;
 }
 
 async function runCli(command, input, options = {}) {
@@ -543,8 +559,9 @@ test('prepare leaves the real repository unchanged and builds only the selected 
   assert.match(prepared.ownership_token, /^[0-9a-f]{64}$/u);
   assert.deepEqual(await snapshotRepository(root), before);
 
-  const taskIndex = path.join(prepared.transaction_directory, 'task.index');
-  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  const resourceDirectory = path.dirname(prepared.message_file);
+  const taskIndex = path.join(resourceDirectory, 'task.index');
+  const objectDirectory = path.join(resourceDirectory, 'objects');
   assert.equal(await treeFromExternalIndex(root, taskIndex, objectDirectory), prepared.task_tree_oid);
   const taskContents = await readExternalTreeFile(
     root,
@@ -608,8 +625,9 @@ test('recovery preview retains unrelated staged hunks on top of the task tree', 
     consumed_unit_ids: [],
     retained_unit_ids: [retained.unit_id],
   });
-  const recoveryIndex = path.join(prepared.transaction_directory, 'recovery.index');
-  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  const resourceDirectory = path.dirname(prepared.message_file);
+  const recoveryIndex = path.join(resourceDirectory, 'recovery.index');
+  const objectDirectory = path.join(resourceDirectory, 'objects');
   assert.equal(
     await treeFromExternalIndex(root, recoveryIndex, objectDirectory),
     prepared.recovery_tree_oid,
@@ -640,24 +658,29 @@ test('prepare stores external recovery evidence without token or patch plaintext
     selected_unit_ids: [selected.unit_id],
   }, { temporaryRoot });
 
-  const transactionFiles = new Set(await readdir(prepared.transaction_directory));
+  const resourceDirectory = path.dirname(prepared.message_file);
+  const transactionFiles = new Set(await readdir(resourceDirectory));
   assert.ok(transactionFiles.has('task.index'));
   assert.ok(transactionFiles.has('original.index'));
   assert.ok(transactionFiles.has('recovery.index'));
   assert.ok(transactionFiles.has('objects'));
   assert.ok(transactionFiles.has('snapshots'));
   assert.equal(transactionFiles.has('message.txt'), false);
-  assert.equal(await readFile(path.join(prepared.transaction_directory, 'original.index'))
+  assert.equal(await readFile(path.join(resourceDirectory, 'original.index'))
     .then(sha256), sha256(originalIndex));
 
-  const stateText = await readFile(path.join(prepared.transaction_directory, 'state.json'), 'utf8');
+  const stateText = await readFile(path.join(resourceDirectory, 'state.json'), 'utf8');
   const state = JSON.parse(stateText);
   assert.equal(state.lifecycle, 'prepared');
   assert.equal(state.token_sha256, sha256(Buffer.from(prepared.ownership_token)));
   assert.equal(state.binding.task_tree_oid, prepared.task_tree_oid);
   assert.equal(stateText.includes(prepared.ownership_token), false);
   assert.equal(stateText.includes('line 2 selected task'), false);
-  assert.equal(prepared.message_file, path.join(prepared.transaction_directory, 'message.txt'));
+  assert.equal(prepared.message_file, path.join(resourceDirectory, 'message.txt'));
+  assert.match(
+    path.basename(resourceDirectory),
+    /^resources-[0-9a-f]{32}$/u,
+  );
 });
 
 test('prepare consumes equivalent staged content and writes selected untracked bytes externally', async (t) => {
@@ -682,7 +705,7 @@ test('prepare consumes equivalent staged content and writes selected untracked b
     consumed_unit_ids: [stagedUnit.unit_id],
     retained_unit_ids: [],
   });
-  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  const objectDirectory = path.join(path.dirname(prepared.message_file), 'objects');
   assert.equal(
     await readExternalTreeFile(root, prepared.task_tree_oid, 'selected untracked.txt', objectDirectory),
     'selected untracked bytes\n',
@@ -725,6 +748,84 @@ test('prepare stops when selected untracked bytes change after manifest verifica
   );
 });
 
+test('prepare hashes selected untracked bytes from the verified buffer when snapshot path changes', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'selected-untracked.txt'), 'verified untracked bytes\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'untracked');
+  let snapshotChanged = false;
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, {
+    temporaryRoot,
+    runGit: async (repositoryRoot, args, options) => {
+      if (!snapshotChanged && args[0] === 'hash-object') {
+        snapshotChanged = true;
+        const snapshotDirectory = path.join(
+          path.dirname(options.env.GIT_INDEX_FILE),
+          'snapshots',
+        );
+        const [snapshotName] = await readdir(snapshotDirectory);
+        await writeFile(path.join(snapshotDirectory, snapshotName), 'replaced snapshot bytes\n');
+      }
+      return runGit(repositoryRoot, args, options);
+    },
+  });
+
+  assert.equal(snapshotChanged, true);
+  assert.equal(
+    await readExternalTreeFile(
+      root,
+      prepared.task_tree_oid,
+      'selected-untracked.txt',
+      path.join(path.dirname(prepared.message_file), 'objects'),
+    ),
+    'verified untracked bytes\n',
+  );
+});
+
+test('prepare stops and removes owned files when transaction resource identity changes', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected change\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const before = await snapshotRepository(root);
+  let resourceReplaced = false;
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        if (!resourceReplaced && args[0] === 'read-tree' && options.env?.GIT_INDEX_FILE) {
+          resourceReplaced = true;
+          const resourceDirectory = path.dirname(options.env.GIT_INDEX_FILE);
+          await rename(resourceDirectory, `${resourceDirectory}-displaced`);
+          await mkdir(resourceDirectory, { recursive: true });
+          await mkdir(options.env.GIT_OBJECT_DIRECTORY, { recursive: true });
+        }
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+    ({ code }) => code === 'TRANSACTION_IDENTITY_CHANGED',
+  );
+
+  assert.equal(resourceReplaced, true);
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
 test('prepare consumes staged content whose final range shifted after an unselected insertion', async (t) => {
   const root = await createGitRepository(t);
   const temporaryRoot = await createTemporaryRoot(t);
@@ -753,7 +854,7 @@ test('prepare consumes staged content whose final range shifted after an unselec
     consumed_unit_ids: [stagedUnit.unit_id],
     retained_unit_ids: [],
   });
-  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  const objectDirectory = path.join(path.dirname(prepared.message_file), 'objects');
   const expected = numberedLines(20);
   expected[15] = 'line 16 selected staged';
   assert.equal(
@@ -776,7 +877,7 @@ test('prepare applies selected atomic deletion, rename, mode, and binary units',
     selected_unit_ids: selected.map(({ unit_id }) => unit_id),
   }, { temporaryRoot });
 
-  const objectDirectory = path.join(prepared.transaction_directory, 'objects');
+  const objectDirectory = path.join(path.dirname(prepared.message_file), 'objects');
   await assert.rejects(
     readExternalTreeFile(root, prepared.task_tree_oid, 'delete-me.txt', objectDirectory),
   );
@@ -831,7 +932,7 @@ test('recovery preview retains a staged binary file beside a selected text chang
       root,
       prepared.recovery_tree_oid,
       'retained.bin',
-      path.join(prepared.transaction_directory, 'objects'),
+      path.join(path.dirname(prepared.message_file), 'objects'),
     ).then((value) => Buffer.from(value, 'binary')),
     retainedBytes,
   );

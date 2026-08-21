@@ -10,15 +10,14 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
 const SCHEMA_VERSION = 1;
 
 class StageTransactionError extends Error {
@@ -60,16 +59,36 @@ function unitId(unit) {
 }
 
 async function defaultRunGit(repositoryRoot, args, options = {}) {
-  return execFileAsync('git', args, {
-    cwd: repositoryRoot,
-    encoding: options.encoding ?? 'utf8',
-    env: {
-      ...process.env,
-      // 禁止只读命令借机刷新真实索引，保持 inspect 的字节级零副作用契约。
-      GIT_OPTIONAL_LOCKS: '0',
-      ...(options.env ?? {}),
-    },
-    maxBuffer: 64 * 1024 * 1024,
+  return new Promise((resolve, reject) => {
+    let stdinError;
+    const child = execFile('git', args, {
+      cwd: repositoryRoot,
+      encoding: options.encoding ?? 'utf8',
+      env: {
+        ...process.env,
+        // 禁止只读命令借机刷新真实索引，保持 inspect 的字节级零副作用契约。
+        GIT_OPTIONAL_LOCKS: '0',
+        ...(options.env ?? {}),
+      },
+      maxBuffer: 64 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error !== null) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      if (stdinError !== undefined) {
+        reject(stdinError);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    child.stdin.on('error', (error) => {
+      stdinError = error;
+    });
+    // execFile 没有 input 选项，runner 必须显式结束 stdin 才能忠实传递 Buffer 与 EOF。
+    child.stdin.end(options.input);
   });
 }
 
@@ -605,7 +624,7 @@ async function assertPathHasNoLinks(candidate) {
   }
 }
 
-// 派生根与 UUID 目录既不能落入仓库状态，也不能反向包住仓库后再被递归清理。
+// 派生根、外层 UUID 与内层资源目录都不能落入仓库状态或反向包住仓库。
 async function assertExternalTransactionPath(repository, candidate, mustExist = false) {
   const absolute = path.resolve(candidate);
   const stateRoots = [repository.root, repository.gitDir, repository.commonDir];
@@ -622,6 +641,121 @@ async function assertExternalTransactionPath(repository, candidate, mustExist = 
     throw stopped('UNSAFE_GIT_PATH', 'A derived transaction path escaped its owned location.');
   }
   return resolved;
+}
+
+async function captureExternalDirectoryIdentity(repository, candidate) {
+  const metadataBefore = await lstat(candidate);
+  const canonical = await assertExternalTransactionPath(repository, candidate, true);
+  const metadataAfter = await lstat(candidate);
+  if (!metadataBefore.isDirectory() || metadataBefore.isSymbolicLink()
+    || !metadataAfter.isDirectory() || metadataAfter.isSymbolicLink()
+    || metadataBefore.dev !== metadataAfter.dev || metadataBefore.ino !== metadataAfter.ino) {
+    throw stopped('UNSAFE_GIT_PATH', 'A transaction directory is not an owned ordinary directory.');
+  }
+  return {
+    dev: metadataAfter.dev,
+    ino: metadataAfter.ino,
+    canonical: path.normalize(canonical),
+  };
+}
+
+function hasSameFilesystemIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function hasSameDirectoryIdentity(left, right) {
+  return hasSameFilesystemIdentity(left, right) && left.canonical === right.canonical;
+}
+
+async function assertTransactionGeometry(repository, transaction, targets = []) {
+  try {
+    const directoryIdentity = await captureExternalDirectoryIdentity(
+      repository,
+      transaction.directory,
+    );
+    const resourceIdentity = await captureExternalDirectoryIdentity(
+      repository,
+      transaction.resourceDirectory,
+    );
+    if (!hasSameDirectoryIdentity(directoryIdentity, transaction.directoryIdentity)
+      || !hasSameDirectoryIdentity(resourceIdentity, transaction.resourceIdentity)
+      || path.dirname(resourceIdentity.canonical) !== directoryIdentity.canonical) {
+      throw stopped('TRANSACTION_IDENTITY_CHANGED');
+    }
+    for (const target of targets) {
+      const absolute = path.resolve(target);
+      if (absolute === transaction.resourceDirectory
+        || !isWithin(absolute, transaction.resourceDirectory)) {
+        throw stopped('TRANSACTION_IDENTITY_CHANGED');
+      }
+      await assertPathHasNoLinks(absolute);
+      try {
+        const canonical = await realpath(absolute);
+        if (!isWithin(canonical, resourceIdentity.canonical)) {
+          throw stopped('TRANSACTION_IDENTITY_CHANGED');
+        }
+      } catch (error) {
+        if (error instanceof StageTransactionError) throw error;
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
+  } catch (error) {
+    if (error instanceof StageTransactionError
+      && error.code === 'TRANSACTION_IDENTITY_CHANGED') {
+      throw error;
+    }
+    throw stopped('TRANSACTION_IDENTITY_CHANGED');
+  }
+}
+
+// 每个可变操作前后都重验两层目录；操作报错时 identity 变化优先于底层错误返回。
+async function withTransactionMutation(repository, transaction, targets, operation) {
+  await assertTransactionGeometry(repository, transaction, targets);
+  try {
+    const result = await operation();
+    await assertTransactionGeometry(repository, transaction, targets);
+    return result;
+  } catch (error) {
+    await assertTransactionGeometry(repository, transaction, targets);
+    throw error;
+  }
+}
+
+async function mutableTransactionGit(repository, args, transaction, runtime, options) {
+  const targets = [
+    options.env?.GIT_INDEX_FILE,
+    options.env?.GIT_OBJECT_DIRECTORY,
+  ].filter((candidate) => typeof candidate === 'string');
+  return withTransactionMutation(
+    repository,
+    transaction,
+    targets,
+    () => git(repository, args, runtime, options),
+  );
+}
+
+async function removeOwnedTransaction(repository, transaction) {
+  let currentIdentity;
+  try {
+    currentIdentity = await captureExternalDirectoryIdentity(repository, transaction.directory);
+  } catch {
+    return false;
+  }
+  if (!hasSameDirectoryIdentity(currentIdentity, transaction.directoryIdentity)) return false;
+
+  const cleanupPath = `${transaction.directory}.cleanup-${randomBytes(16).toString('hex')}`;
+  try {
+    await rename(transaction.directory, cleanupPath);
+    const movedIdentity = await captureExternalDirectoryIdentity(repository, cleanupPath);
+    if (!hasSameFilesystemIdentity(movedIdentity, transaction.directoryIdentity)
+      || movedIdentity.canonical !== path.normalize(await realpath(cleanupPath))) {
+      return false;
+    }
+    await rm(cleanupPath, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function createTransactionDirectory(repository, runtime) {
@@ -641,26 +775,46 @@ async function createTransactionDirectory(repository, runtime) {
   const transactionId = randomUUID();
   const directory = path.join(transactionRoot, transactionId);
   await assertExternalTransactionPath(repository, directory);
-  let created = false;
+  let transaction;
   try {
     await mkdir(directory, { mode: 0o700 });
-    created = true;
-    // 创建后的 canonical 复核封住检查与创建之间的 link/junction 替换窗口。
-    await assertExternalTransactionPath(repository, directory, true);
-    return {
+    const directoryIdentity = await captureExternalDirectoryIdentity(repository, directory);
+    await chmod(directory, 0o700);
+    if (!hasSameDirectoryIdentity(
+      await captureExternalDirectoryIdentity(repository, directory),
+      directoryIdentity,
+    )) {
+      throw stopped('TRANSACTION_IDENTITY_CHANGED');
+    }
+    transaction = {
       id: transactionId,
       directory,
-      taskIndex: path.join(directory, 'task.index'),
-      originalIndex: path.join(directory, 'original.index'),
-      recoveryIndex: path.join(directory, 'recovery.index'),
-      objectDirectory: path.join(directory, 'objects'),
-      snapshotDirectory: path.join(directory, 'snapshots'),
-      stateFile: path.join(directory, 'state.json'),
-      messageFile: path.join(directory, 'message.txt'),
+      directoryIdentity,
       mainObjectDirectory,
     };
+    // 实际 index、ODB 与证据只放入不可预测内层，外层 UUID 保持可验证的清理锚点。
+    const resourceDirectory = path.join(
+      directory,
+      `resources-${randomBytes(16).toString('hex')}`,
+    );
+    await mkdir(resourceDirectory, { mode: 0o700 });
+    const resourceIdentity = await captureExternalDirectoryIdentity(repository, resourceDirectory);
+    transaction = {
+      ...transaction,
+      resourceDirectory,
+      resourceIdentity,
+      taskIndex: path.join(resourceDirectory, 'task.index'),
+      originalIndex: path.join(resourceDirectory, 'original.index'),
+      recoveryIndex: path.join(resourceDirectory, 'recovery.index'),
+      objectDirectory: path.join(resourceDirectory, 'objects'),
+      snapshotDirectory: path.join(resourceDirectory, 'snapshots'),
+      stateFile: path.join(resourceDirectory, 'state.json'),
+      messageFile: path.join(resourceDirectory, 'message.txt'),
+    };
+    await assertTransactionGeometry(repository, transaction);
+    return transaction;
   } catch (error) {
-    if (created) await rm(directory, { recursive: true, force: true });
+    if (transaction !== undefined) await removeOwnedTransaction(repository, transaction);
     throw error;
   }
 }
@@ -711,7 +865,12 @@ async function assertSafeWorktreePath(repository, gitPathValue) {
 }
 
 async function snapshotWorktreeEvidence(repository, manifest, transaction) {
-  await mkdir(transaction.snapshotDirectory, { mode: 0o700 });
+  await withTransactionMutation(
+    repository,
+    transaction,
+    [transaction.snapshotDirectory],
+    () => mkdir(transaction.snapshotDirectory, { mode: 0o700 }),
+  );
   const paths = [...new Set(manifest.units.flatMap((unit) =>
     [unit.path, unit.old_path].filter((value) => typeof value === 'string')))].sort();
   const evidence = [];
@@ -736,9 +895,15 @@ async function snapshotWorktreeEvidence(repository, manifest, transaction) {
       }
       const pathSha256 = digest(Buffer.from(gitPathValue));
       const snapshotFile = path.join(transaction.snapshotDirectory, `${pathSha256}.bin`);
-      await writeFile(snapshotFile, bytes, { mode: 0o600, flag: 'wx' });
+      await withTransactionMutation(
+        repository,
+        transaction,
+        [snapshotFile],
+        () => writeFile(snapshotFile, bytes, { mode: 0o600, flag: 'wx' }),
+      );
       snapshots.set(gitPathValue, {
         file: snapshotFile,
+        bytes,
         mode: metadataAfter.mode,
         content_sha256: digest(bytes),
       });
@@ -851,14 +1016,25 @@ function patchWithoutIndexIdentity(patchBytes) {
 
 async function applyPatches(repository, patches, transaction, indexPath, runtime) {
   for (let index = 0; index < patches.length; index += 1) {
-    const patchFile = path.join(transaction.directory, `apply-${index}.patch`);
-    await writeFile(patchFile, patches[index], { mode: 0o600, flag: 'wx' });
+    const patchFile = path.join(transaction.resourceDirectory, `apply-${index}.patch`);
+    await withTransactionMutation(
+      repository,
+      transaction,
+      [patchFile],
+      () => writeFile(patchFile, patches[index], { mode: 0o600, flag: 'wx' }),
+    );
     try {
-      await git(repository, [
+      const environment = externalGitEnvironment(transaction, indexPath);
+      await mutableTransactionGit(repository, [
         'apply', '--cached', '--binary', '--unidiff-zero', '--whitespace=nowarn', patchFile,
-      ], runtime, { env: externalGitEnvironment(transaction, indexPath) });
+      ], transaction, runtime, { env: environment });
     } finally {
-      await rm(patchFile, { force: true });
+      await withTransactionMutation(
+        repository,
+        transaction,
+        [patchFile],
+        () => rm(patchFile, { force: true }),
+      );
     }
   }
 }
@@ -873,16 +1049,24 @@ async function addUntrackedUnits(repository, units, snapshots, transaction, runt
       || snapshotMode !== unit.new_mode) {
       throw stopped('MANIFEST_CHANGED');
     }
-    // 后续 plumbing 只读取已校验的自有快照，绝不再次解引用可被并发替换的 worktree 路径。
-    const { stdout: oid } = await git(repository, ['hash-object', '-w', '--', snapshot.file], runtime, {
-      env: {
-        ...externalGitEnvironment(transaction),
-        GIT_LITERAL_PATHSPECS: '1',
+    // 已验证 Buffer 直接进入 stdin；落盘快照仅作恢复证据，不再参与 blob identity。
+    const hashEnvironment = {
+      ...externalGitEnvironment(transaction),
+      GIT_LITERAL_PATHSPECS: '1',
+    };
+    const { stdout: oid } = await mutableTransactionGit(
+      repository,
+      ['hash-object', '-w', '--stdin'],
+      transaction,
+      runtime,
+      {
+        input: snapshot.bytes,
+        env: hashEnvironment,
       },
-    });
-    await git(repository, [
+    );
+    await mutableTransactionGit(repository, [
       'update-index', '--add', '--cacheinfo', `${unit.new_mode},${oid.trim()},${unit.path}`,
-    ], runtime, {
+    ], transaction, runtime, {
       env: {
         ...externalGitEnvironment(transaction),
         GIT_LITERAL_PATHSPECS: '1',
@@ -891,14 +1075,24 @@ async function addUntrackedUnits(repository, units, snapshots, transaction, runt
   }
 }
 
-async function secureTransactionFiles(directory) {
+async function secureTransactionFiles(repository, transaction, directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const candidate = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      await chmod(candidate, 0o700);
-      await secureTransactionFiles(candidate);
+      await withTransactionMutation(
+        repository,
+        transaction,
+        [candidate],
+        () => chmod(candidate, 0o700),
+      );
+      await secureTransactionFiles(repository, transaction, candidate);
     } else {
-      await chmod(candidate, 0o600);
+      await withTransactionMutation(
+        repository,
+        transaction,
+        [candidate],
+        () => chmod(candidate, 0o600),
+      );
     }
   }
 }
@@ -961,18 +1155,37 @@ export async function prepareTransaction({
   let transaction;
   try {
     transaction = await createTransactionDirectory(repository, runtime);
-    await mkdir(transaction.objectDirectory, { mode: 0o700 });
-    await copyFile(indexPath, transaction.originalIndex);
-    await chmod(transaction.originalIndex, 0o600);
+    await withTransactionMutation(
+      repository,
+      transaction,
+      [transaction.objectDirectory],
+      () => mkdir(transaction.objectDirectory, { mode: 0o700 }),
+    );
+    await withTransactionMutation(
+      repository,
+      transaction,
+      [transaction.originalIndex],
+      () => copyFile(indexPath, transaction.originalIndex),
+    );
+    await withTransactionMutation(
+      repository,
+      transaction,
+      [transaction.originalIndex],
+      () => chmod(transaction.originalIndex, 0o600),
+    );
     const { evidence: worktreeEvidence, snapshots } = await snapshotWorktreeEvidence(
       repository,
       manifest,
       transaction,
     );
 
-    await git(repository, ['read-tree', manifest.head_oid], runtime, {
-      env: externalGitEnvironment(transaction),
-    });
+    await mutableTransactionGit(
+      repository,
+      ['read-tree', manifest.head_oid],
+      transaction,
+      runtime,
+      { env: externalGitEnvironment(transaction) },
+    );
     const selectedPatches = await reconstructPatches(repository, selected, runtime);
     try {
       await applyPatches(
@@ -987,14 +1200,22 @@ export async function prepareTransaction({
       if (error instanceof StageTransactionError) throw error;
       throw stopped('SELECTION_CANNOT_APPLY');
     }
-    const { stdout: taskTree } = await git(repository, ['write-tree'], runtime, {
-      env: externalGitEnvironment(transaction),
-    });
+    const { stdout: taskTree } = await mutableTransactionGit(
+      repository,
+      ['write-tree'],
+      transaction,
+      runtime,
+      { env: externalGitEnvironment(transaction) },
+    );
     const taskTreeOid = taskTree.trim();
 
-    await git(repository, ['read-tree', taskTreeOid], runtime, {
-      env: externalGitEnvironment(transaction, transaction.recoveryIndex),
-    });
+    await mutableTransactionGit(
+      repository,
+      ['read-tree', taskTreeOid],
+      transaction,
+      runtime,
+      { env: externalGitEnvironment(transaction, transaction.recoveryIndex) },
+    );
     try {
       const retainedPatches = (await reconstructPatches(repository, staged.retained, runtime))
         // 原子单元与任务路径完全分离，HEAD blob identity 仍成立；同文件文本恢复才需移除旧 blob 约束。
@@ -1010,9 +1231,13 @@ export async function prepareTransaction({
         runtime,
       );
       const recoveryEnvironment = externalGitEnvironment(transaction, transaction.recoveryIndex);
-      const { stdout: temporaryCommit } = await git(repository, [
-        'commit-tree', taskTreeOid, '-p', manifest.head_oid, '-m', 'recovery preview baseline',
-      ], runtime, { env: recoveryEnvironment });
+      const { stdout: temporaryCommit } = await mutableTransactionGit(
+        repository,
+        ['commit-tree', taskTreeOid, '-p', manifest.head_oid, '-m', 'recovery preview baseline'],
+        transaction,
+        runtime,
+        { env: recoveryEnvironment },
+      );
       // 预演只比较 task tree 之后应恢复的 staged delta，不能把任务内容再次计入恢复证据。
       await git(repository, [
         'diff', '--cached', '--check', temporaryCommit.trim(),
@@ -1020,9 +1245,13 @@ export async function prepareTransaction({
       const { stdout: recoveryPatch } = await git(repository, [
         'diff', '--cached', '--binary', '--full-index', temporaryCommit.trim(),
       ], runtime, { encoding: 'buffer', env: recoveryEnvironment });
-      const { stdout: recoveryTree } = await git(repository, ['write-tree'], runtime, {
-        env: recoveryEnvironment,
-      });
+      const { stdout: recoveryTree } = await mutableTransactionGit(
+        repository,
+        ['write-tree'],
+        transaction,
+        runtime,
+        { env: recoveryEnvironment },
+      );
       const recoveryTreeOid = recoveryTree.trim();
       const ownershipToken = randomBytes(32).toString('hex');
       const binding = {
@@ -1060,11 +1289,16 @@ export async function prepareTransaction({
         },
         message_file_sha256: null,
       };
-      await writeFile(transaction.stateFile, `${canonicalJson(state)}\n`, {
-        mode: 0o600,
-        flag: 'wx',
-      });
-      await secureTransactionFiles(transaction.directory);
+      await withTransactionMutation(
+        repository,
+        transaction,
+        [transaction.stateFile],
+        () => writeFile(transaction.stateFile, `${canonicalJson(state)}\n`, {
+          mode: 0o600,
+          flag: 'wx',
+        }),
+      );
+      await secureTransactionFiles(repository, transaction, transaction.resourceDirectory);
       return {
         status: 'prepared',
         transaction_id: transaction.id,
@@ -1087,8 +1321,8 @@ export async function prepareTransaction({
     }
   } catch (error) {
     if (transaction !== undefined) {
-      // 目录名由本进程 UUID 生成且路径已验证，只清理本次尚未转移所有权的事务。
-      await rm(transaction.directory, { recursive: true, force: true });
+      // 仅在外层 UUID 目录仍匹配创建时 identity 时清理；内层变化不会扩大到未知仓库路径。
+      await removeOwnedTransaction(repository, transaction);
     }
     throw error;
   }
