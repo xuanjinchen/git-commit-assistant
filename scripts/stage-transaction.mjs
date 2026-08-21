@@ -6,11 +6,11 @@ import {
   lstat,
   mkdtemp,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
   rm,
-  stat,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -605,6 +605,25 @@ async function assertPathHasNoLinks(candidate) {
   }
 }
 
+// 派生根与 UUID 目录既不能落入仓库状态，也不能反向包住仓库后再被递归清理。
+async function assertExternalTransactionPath(repository, candidate, mustExist = false) {
+  const absolute = path.resolve(candidate);
+  const stateRoots = [repository.root, repository.gitDir, repository.commonDir];
+  if (stateRoots.some((stateRoot) =>
+    isWithin(absolute, stateRoot) || isWithin(stateRoot, absolute))) {
+    throw stopped('UNSAFE_GIT_PATH', 'A derived transaction path overlaps repository state.');
+  }
+  await assertPathHasNoLinks(absolute);
+  if (!mustExist) return absolute;
+  const resolved = await realpath(absolute);
+  if (path.normalize(resolved) !== path.normalize(absolute)
+    || stateRoots.some((stateRoot) =>
+      isWithin(resolved, stateRoot) || isWithin(stateRoot, resolved))) {
+    throw stopped('UNSAFE_GIT_PATH', 'A derived transaction path escaped its owned location.');
+  }
+  return resolved;
+}
+
 async function createTransactionDirectory(repository, runtime) {
   const requestedRoot = path.resolve(runtime.temporaryRoot ?? runtime.temporary_root ?? os.tmpdir());
   await assertPathHasNoLinks(requestedRoot);
@@ -612,25 +631,38 @@ async function createTransactionDirectory(repository, runtime) {
     ...runtime,
     temporary_root: requestedRoot,
   });
+  // Git metadata 查询必须先于 UUID 目录创建，避免查询失败时留下尚未建立所有权的残留目录。
+  const mainObjectDirectory = await gitPath(repository, 'objects', runtime);
   const transactionRoot = path.resolve(externalRoot, 'git-commit-assistant');
+  await assertExternalTransactionPath(repository, transactionRoot);
   await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
-  await assertPathHasNoLinks(transactionRoot);
+  await assertExternalTransactionPath(repository, transactionRoot, true);
   await chmod(transactionRoot, 0o700);
   const transactionId = randomUUID();
   const directory = path.join(transactionRoot, transactionId);
-  await mkdir(directory, { mode: 0o700 });
-  return {
-    id: transactionId,
-    directory,
-    taskIndex: path.join(directory, 'task.index'),
-    originalIndex: path.join(directory, 'original.index'),
-    recoveryIndex: path.join(directory, 'recovery.index'),
-    objectDirectory: path.join(directory, 'objects'),
-    snapshotDirectory: path.join(directory, 'snapshots'),
-    stateFile: path.join(directory, 'state.json'),
-    messageFile: path.join(directory, 'message.txt'),
-    mainObjectDirectory: await gitPath(repository, 'objects', runtime),
-  };
+  await assertExternalTransactionPath(repository, directory);
+  let created = false;
+  try {
+    await mkdir(directory, { mode: 0o700 });
+    created = true;
+    // 创建后的 canonical 复核封住检查与创建之间的 link/junction 替换窗口。
+    await assertExternalTransactionPath(repository, directory, true);
+    return {
+      id: transactionId,
+      directory,
+      taskIndex: path.join(directory, 'task.index'),
+      originalIndex: path.join(directory, 'original.index'),
+      recoveryIndex: path.join(directory, 'recovery.index'),
+      objectDirectory: path.join(directory, 'objects'),
+      snapshotDirectory: path.join(directory, 'snapshots'),
+      stateFile: path.join(directory, 'state.json'),
+      messageFile: path.join(directory, 'message.txt'),
+      mainObjectDirectory,
+    };
+  } catch (error) {
+    if (created) await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 // 所有可能写对象或 cache-tree 的 Git 命令都必须显式使用外部 index/ODB；alternate 仅只读主 ODB。
@@ -683,23 +715,43 @@ async function snapshotWorktreeEvidence(repository, manifest, transaction) {
   const paths = [...new Set(manifest.units.flatMap((unit) =>
     [unit.path, unit.old_path].filter((value) => typeof value === 'string')))].sort();
   const evidence = [];
+  const snapshots = new Map();
   for (const gitPathValue of paths) {
     const absolute = await assertSafeWorktreePath(repository, gitPathValue);
+    let handle;
     try {
-      const metadata = await stat(absolute);
-      const bytes = await readFile(absolute);
+      handle = await open(absolute, 'r');
+      const metadataBefore = await handle.stat();
+      if (!metadataBefore.isFile()) throw stopped('UNSAFE_WORKTREE_PATH');
+      const bytes = await handle.readFile();
+      const metadataAfter = await handle.stat();
+      const pathMetadata = await lstat(absolute);
+      if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()
+        || metadataBefore.dev !== metadataAfter.dev || metadataBefore.ino !== metadataAfter.ino
+        || metadataBefore.size !== metadataAfter.size
+        || metadataBefore.mtimeMs !== metadataAfter.mtimeMs
+        || metadataBefore.ctimeMs !== metadataAfter.ctimeMs
+        || metadataAfter.dev !== pathMetadata.dev || metadataAfter.ino !== pathMetadata.ino) {
+        throw stopped('MANIFEST_CHANGED');
+      }
       const pathSha256 = digest(Buffer.from(gitPathValue));
       const snapshotFile = path.join(transaction.snapshotDirectory, `${pathSha256}.bin`);
       await writeFile(snapshotFile, bytes, { mode: 0o600, flag: 'wx' });
+      snapshots.set(gitPathValue, {
+        file: snapshotFile,
+        mode: metadataAfter.mode,
+        content_sha256: digest(bytes),
+      });
       evidence.push({
         path_sha256: pathSha256,
         exists: true,
-        mode: metadata.mode,
+        mode: metadataAfter.mode,
         content_sha256: digest(bytes),
         snapshot_sha256: digest(bytes),
       });
     } catch (error) {
       if (error instanceof StageTransactionError) throw error;
+      if (error?.code !== 'ENOENT') throw stopped('UNSAFE_WORKTREE_PATH');
       evidence.push({
         path_sha256: digest(Buffer.from(gitPathValue)),
         exists: false,
@@ -707,9 +759,11 @@ async function snapshotWorktreeEvidence(repository, manifest, transaction) {
         content_sha256: null,
         snapshot_sha256: null,
       });
+    } finally {
+      await handle?.close();
     }
   }
-  return evidence;
+  return { evidence, snapshots };
 }
 
 async function rawEntriesForView(repository, view, runtime) {
@@ -809,10 +863,18 @@ async function applyPatches(repository, patches, transaction, indexPath, runtime
   }
 }
 
-async function addUntrackedUnits(repository, units, transaction, runtime) {
+async function addUntrackedUnits(repository, units, snapshots, transaction, runtime) {
   for (const unit of units.filter((candidate) => candidate.view === 'untracked')) {
-    const absolute = await assertSafeWorktreePath(repository, unit.path);
-    const { stdout: oid } = await git(repository, ['hash-object', '-w', '--', absolute], runtime, {
+    const snapshot = snapshots.get(unit.path);
+    const snapshotMode = snapshot === undefined
+      ? null
+      : ((snapshot.mode & 0o111) === 0 ? '100644' : '100755');
+    if (snapshot === undefined || snapshot.content_sha256 !== unit.patch_sha256
+      || snapshotMode !== unit.new_mode) {
+      throw stopped('MANIFEST_CHANGED');
+    }
+    // 后续 plumbing 只读取已校验的自有快照，绝不再次解引用可被并发替换的 worktree 路径。
+    const { stdout: oid } = await git(repository, ['hash-object', '-w', '--', snapshot.file], runtime, {
       env: {
         ...externalGitEnvironment(transaction),
         GIT_LITERAL_PATHSPECS: '1',
@@ -902,7 +964,11 @@ export async function prepareTransaction({
     await mkdir(transaction.objectDirectory, { mode: 0o700 });
     await copyFile(indexPath, transaction.originalIndex);
     await chmod(transaction.originalIndex, 0o600);
-    const worktreeEvidence = await snapshotWorktreeEvidence(repository, manifest, transaction);
+    const { evidence: worktreeEvidence, snapshots } = await snapshotWorktreeEvidence(
+      repository,
+      manifest,
+      transaction,
+    );
 
     await git(repository, ['read-tree', manifest.head_oid], runtime, {
       env: externalGitEnvironment(transaction),
@@ -916,7 +982,7 @@ export async function prepareTransaction({
         transaction.taskIndex,
         runtime,
       );
-      await addUntrackedUnits(repository, selected, transaction, runtime);
+      await addUntrackedUnits(repository, selected, snapshots, transaction, runtime);
     } catch (error) {
       if (error instanceof StageTransactionError) throw error;
       throw stopped('SELECTION_CANNOT_APPLY');
@@ -931,7 +997,11 @@ export async function prepareTransaction({
     });
     try {
       const retainedPatches = (await reconstructPatches(repository, staged.retained, runtime))
-        .map(patchWithoutIndexIdentity);
+        // 原子单元与任务路径完全分离，HEAD blob identity 仍成立；同文件文本恢复才需移除旧 blob 约束。
+        .map((patchBytes) => staged.retained.some((unit) =>
+          unit.kind !== 'text_hunk' && unit.patch_sha256 === digest(patchBytes))
+          ? patchBytes
+          : patchWithoutIndexIdentity(patchBytes));
       await applyPatches(
         repository,
         retainedPatches,

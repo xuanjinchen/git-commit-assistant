@@ -71,9 +71,9 @@ async function runCli(command, input, options = {}) {
   };
 }
 
-async function createGitRepository(t) {
+async function createGitRepository(t, repositoryName = 'repository') {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'git-commit-assistant-test-'));
-  const root = path.join(fixtureRoot, 'repository');
+  const root = path.join(fixtureRoot, repositoryName);
   await mkdir(root);
   await writeFile(path.join(fixtureRoot, 'empty-global-config'), '');
   gitConfigByRepository.set(root, path.join(fixtureRoot, 'empty-global-config'));
@@ -560,6 +560,33 @@ test('prepare leaves the real repository unchanged and builds only the selected 
   );
 });
 
+test('prepare rejects a derived transaction directory that collides with the repository', async (t) => {
+  const root = await createGitRepository(t, 'git-commit-assistant');
+  await writeFile(path.join(root, 'feature.txt'), 'baseline\n');
+  await runGit(root, ['add', '--', 'feature.txt']);
+  await runGit(root, ['commit', '-m', 'collision baseline']);
+  await writeFile(path.join(root, 'feature.txt'), 'selected change\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const before = await snapshotRepository(root);
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, { temporaryRoot: path.dirname(root) }),
+    ({ code }) => code === 'UNSAFE_GIT_PATH',
+  );
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && /^[0-9a-f-]{36}$/u.test(entry.name)),
+    [],
+  );
+});
+
 test('recovery preview retains unrelated staged hunks on top of the task tree', async (t) => {
   const root = await repositoryForPreparation(t);
   const temporaryRoot = await createTemporaryRoot(t);
@@ -664,6 +691,40 @@ test('prepare consumes equivalent staged content and writes selected untracked b
   assert.deepEqual(await snapshotRepository(root), before);
 });
 
+test('prepare stops when selected untracked bytes change after manifest verification', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const untrackedPath = path.join(root, 'selected-untracked.txt');
+  await writeFile(untrackedPath, 'manifest bytes\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'untracked');
+  let objectPathQueries = 0;
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        if (args[0] === 'rev-parse' && args[1] === '--git-path' && args[2] === 'objects') {
+          objectPathQueries += 1;
+          if (objectPathQueries === 2) await writeFile(untrackedPath, 'swapped bytes\n');
+        }
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+    ({ code }) => code === 'MANIFEST_CHANGED',
+  );
+
+  assert.equal(await readFile(untrackedPath, 'utf8'), 'swapped bytes\n');
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
 test('prepare consumes staged content whose final range shifted after an unselected insertion', async (t) => {
   const root = await createGitRepository(t);
   const temporaryRoot = await createTemporaryRoot(t);
@@ -741,6 +802,72 @@ test('prepare applies selected atomic deletion, rename, mode, and binary units',
   assert.deepEqual(await snapshotRepository(root), before);
 });
 
+test('recovery preview retains a staged binary file beside a selected text change', async (t) => {
+  const root = await createGitRepository(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'task.txt'), 'task baseline\n');
+  await writeFile(path.join(root, 'retained.bin'), Buffer.from([0, 1, 2, 3]));
+  await runGit(root, ['add', '--', '.']);
+  await runGit(root, ['commit', '-m', 'binary recovery baseline']);
+  const retainedBytes = Buffer.from([0, 9, 2, 3]);
+  await writeFile(path.join(root, 'retained.bin'), retainedBytes);
+  await runGit(root, ['add', '--', 'retained.bin']);
+  await writeFile(path.join(root, 'task.txt'), 'selected task change\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree' && unit.path === 'task.txt');
+  const retained = manifest.units.find((unit) =>
+    unit.view === 'head_to_index' && unit.path === 'retained.bin');
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, { temporaryRoot });
+
+  assert.deepEqual(prepared.staged_units.retained_unit_ids, [retained.unit_id]);
+  assert.deepEqual(
+    await readExternalTreeFile(
+      root,
+      prepared.recovery_tree_oid,
+      'retained.bin',
+      path.join(prepared.transaction_directory, 'objects'),
+    ).then((value) => Buffer.from(value, 'binary')),
+    retainedBytes,
+  );
+});
+
+test('creation metadata failure leaves no owned transaction directory', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected change\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  let objectPathQueries = 0;
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        if (args[0] === 'rev-parse' && args[1] === '--git-path' && args[2] === 'objects') {
+          objectPathQueries += 1;
+          if (objectPathQueries === 2) throw new Error('injected object metadata failure');
+        }
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
 test('selection rejects empty, unknown, duplicate, and non-final units without repository changes', async (t) => {
   const root = await repositoryForPreparation(t);
   const temporaryRoot = await createTemporaryRoot(t);
@@ -795,22 +922,25 @@ test('prepare stops on ambiguous overlap between staged and selected final conte
   );
 });
 
-test('prepare rejects a stale manifest and an independently inapplicable selection', async (t) => {
-  const staleRoot = await repositoryWithBaseline(t);
-  const staleTemporaryRoot = await createTemporaryRoot(t);
-  await writeFile(path.join(staleRoot, 'feature.txt'), 'line 1\nfirst version\nline 3\n');
-  const staleManifest = await inspectRepository({ repository_root: staleRoot });
-  const staleSelected = staleManifest.units.find((unit) => unit.view === 'head_to_worktree');
-  await writeFile(path.join(staleRoot, 'feature.txt'), 'line 1\nsecond version\nline 3\n');
+test('prepare rejects a stale manifest', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nfirst version\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nsecond version\nline 3\n');
+
   await assert.rejects(
     prepareTransaction({
-      repository_root: staleRoot,
-      manifest: staleManifest,
-      selected_unit_ids: [staleSelected.unit_id],
-    }, { temporaryRoot: staleTemporaryRoot }),
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, { temporaryRoot }),
     ({ code }) => code === 'MANIFEST_CHANGED',
   );
+});
 
+test('prepare maps a real independently inapplicable external-index selection', async (t) => {
   const root = await repositoryForPreparation(t);
   const temporaryRoot = await createTemporaryRoot(t);
   const manifest = await inspectRepository({ repository_root: root });
@@ -825,7 +955,10 @@ test('prepare rejects a stale manifest and an independently inapplicable selecti
     }, {
       temporaryRoot,
       runGit: async (repositoryRoot, args, options) => {
-        if (args[0] === 'apply') throw new Error('injected apply failure');
+        if (args[0] === 'apply') {
+          // 真实破坏外部 index 的必要 entry，再由真实 git apply 判定该 selection 已无法独立应用。
+          await runGit(repositoryRoot, ['update-index', '--force-remove', '--', selected.path], options);
+        }
         return runGit(repositoryRoot, args, options);
       },
     }),
@@ -839,11 +972,18 @@ test('prepare rejects a stale manifest and an independently inapplicable selecti
 });
 
 test('recovery preview failure removes its transaction and preserves repository state', async (t) => {
-  const root = await repositoryForPreparation(t);
+  const root = await createGitRepository(t);
   const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'task.txt'), 'task baseline\n');
+  await writeFile(path.join(root, 'retained.txt'), 'retained baseline\n');
+  await runGit(root, ['add', '--', '.']);
+  await runGit(root, ['commit', '-m', 'recovery check baseline']);
+  await writeFile(path.join(root, 'retained.txt'), 'retained trailing whitespace \n');
+  await runGit(root, ['add', '--', 'retained.txt']);
+  await writeFile(path.join(root, 'task.txt'), 'selected task change\n');
   const manifest = await inspectRepository({ repository_root: root });
   const selected = manifest.units.find((unit) =>
-    unit.view === 'head_to_worktree' && unit.new_range.start === 2);
+    unit.view === 'head_to_worktree' && unit.path === 'task.txt');
   const before = await snapshotRepository(root);
 
   await assert.rejects(
@@ -851,17 +991,7 @@ test('recovery preview failure removes its transaction and preserves repository 
       repository_root: root,
       manifest,
       selected_unit_ids: [selected.unit_id],
-    }, {
-      temporaryRoot,
-      runGit: async (repositoryRoot, args, options) => {
-        if (args[0] === 'diff' && args.includes('--check')) {
-          const error = new Error('injected recovery preview failure');
-          error.code = 2;
-          throw error;
-        }
-        return runGit(repositoryRoot, args, options);
-      },
-    }),
+    }, { temporaryRoot }),
     ({ code }) => code === 'RECOVERY_PREVIEW_FAILED',
   );
   assert.deepEqual(await snapshotRepository(root), before);
