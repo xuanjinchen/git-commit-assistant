@@ -1330,13 +1330,18 @@ async function writeInitialOwnedState(repository, transaction, state, ownershipT
   );
 }
 
-function ownershipInvalid(retained = true, transactionId) {
+// retained 只承诺本次未授权删除；preserved 必须由完整认证闭集复验的调用方显式提升。
+function ownershipInvalid({
+  retained = true,
+  transactionPreserved = false,
+  transactionId,
+} = {}) {
   return new StageTransactionError(
     'TRANSACTION_OWNERSHIP_INVALID',
     'The staging transaction ownership could not be verified.',
     {
       retained,
-      transaction_preserved: retained,
+      transaction_preserved: transactionPreserved,
       ...(TRANSACTION_ID_PATTERN.test(transactionId ?? '')
         ? { transaction_id: transactionId }
         : {}),
@@ -2533,10 +2538,20 @@ async function deleteVerifiedCancellation(context, runtime) {
     throw ownershipInvalid();
   }
   try {
-    await rename(context.transactionDirectory, movedDirectory);
+    // 故障注入只替换 rename 系统调用边界；恢复判断仍读取并复验真实文件系统状态。
+    const renameCancellationDirectory = runtime.renameCancellationDirectory ?? rename;
+    await renameCancellationDirectory(context.transactionDirectory, movedDirectory);
   } catch {
-    const retained = await restoredCancellationIsComplete(context, movedDirectory, runtime);
-    throw ownershipInvalid(retained, context.state.transaction_id);
+    const transactionPreserved = await restoredCancellationIsComplete(
+      context,
+      movedDirectory,
+      runtime,
+    );
+    throw ownershipInvalid({
+      retained: transactionPreserved,
+      transactionPreserved,
+      transactionId: context.state.transaction_id,
+    });
   }
   try {
     const movedIdentity = await captureStableDirectory(movedDirectory, ownershipInvalid);
@@ -2581,12 +2596,20 @@ async function deleteVerifiedCancellation(context, runtime) {
       if (error?.code !== 'ENOENT') throw error;
     }
   } catch {
-    const retained = await restoredCancellationIsComplete(context, movedDirectory, runtime);
-    throw ownershipInvalid(retained, context.state.transaction_id);
+    const transactionPreserved = await restoredCancellationIsComplete(
+      context,
+      movedDirectory,
+      runtime,
+    );
+    throw ownershipInvalid({
+      retained: transactionPreserved,
+      transactionPreserved,
+      transactionId: context.state.transaction_id,
+    });
   }
 }
 
-// 删除前拒绝只表示本次未改写路径；UUID 一旦移动，完整复验是 retained 承诺的唯一依据。
+// 删除前拒绝只承诺本次未授权删除；UUID 一旦移动，只有恢复后的完整复验才能证明事务仍完整。
 export async function cancelTransaction(request, runtime = {}) {
   let context;
   try {

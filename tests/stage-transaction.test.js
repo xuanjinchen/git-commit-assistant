@@ -986,7 +986,9 @@ test('cancel preserves original user state', async (t) => {
 async function assertCancellationRetained(request, runtime) {
   await assert.rejects(
     cancelTransaction(request, runtime),
-    (error) => error.code === 'TRANSACTION_OWNERSHIP_INVALID' && error.retained === true,
+    (error) => error.code === 'TRANSACTION_OWNERSHIP_INVALID'
+      && error.retained === true
+      && error.transaction_preserved === false,
   );
 }
 
@@ -1378,6 +1380,100 @@ test('cancel does not claim retention after removal deletes an owned artifact', 
   await access(path.join(prepared.transaction_directory, resourceName, 'original.index'));
 });
 
+test('cancel verifies preservation after a real rename failure leaves the original UUID intact', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const transactionRoot = path.dirname(prepared.transaction_directory);
+  const sibling = path.join(transactionRoot, 'sibling-after-rename-failure');
+  const rootSentinel = path.join(temporaryRoot, 'root-sentinel-after-rename-failure.txt');
+  await mkdir(sibling);
+  await writeFile(path.join(sibling, 'keep.txt'), 'keep rename-failure sibling\n');
+  await writeFile(rootSentinel, 'keep rename-failure root bytes\n');
+  const before = await snapshotRepository(root);
+  let failure;
+
+  await assert.rejects(
+    cancelTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+    }, {
+      temporaryRoot,
+      renameCancellationDirectory: (source, destination) =>
+        rename(path.join(source, 'missing-source'), destination),
+    }),
+    (error) => {
+      failure = error;
+      return error.code === 'TRANSACTION_OWNERSHIP_INVALID'
+        && error.retained === true
+        && error.transaction_preserved === true
+        && error.transaction_id === prepared.transaction_id;
+    },
+  );
+
+  const publicFailure = `${failure.message}\n${failure.stack}\n${JSON.stringify(failure)}`;
+  assert.equal(publicFailure.includes(prepared.ownership_token), false);
+  assert.equal(publicFailure.includes(temporaryRoot), false);
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(rootSentinel, 'utf8'), 'keep rename-failure root bytes\n');
+  assert.equal(
+    await readFile(path.join(sibling, 'keep.txt'), 'utf8'),
+    'keep rename-failure sibling\n',
+  );
+  await access(prepared.transaction_directory);
+  assert.deepEqual(
+    (await readdir(transactionRoot)).filter((name) => name.startsWith('.cancel-')),
+    [],
+  );
+});
+
+test('cancel restores and verifies the original UUID when real rename succeeds before EIO', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const transactionRoot = path.dirname(prepared.transaction_directory);
+  const sibling = path.join(transactionRoot, 'sibling-after-rename-eio');
+  const rootSentinel = path.join(temporaryRoot, 'root-sentinel-after-rename-eio.txt');
+  await mkdir(sibling);
+  await writeFile(path.join(sibling, 'keep.txt'), 'keep rename-EIO sibling\n');
+  await writeFile(rootSentinel, 'keep rename-EIO root bytes\n');
+  const before = await snapshotRepository(root);
+  let failure;
+
+  await assert.rejects(
+    cancelTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+    }, {
+      temporaryRoot,
+      renameCancellationDirectory: async (source, destination) => {
+        await rename(source, destination);
+        throw Object.assign(new Error('Injected EIO after a real UUID rename.'), { code: 'EIO' });
+      },
+    }),
+    (error) => {
+      failure = error;
+      return error.code === 'TRANSACTION_OWNERSHIP_INVALID'
+        && error.retained === true
+        && error.transaction_preserved === true
+        && error.transaction_id === prepared.transaction_id;
+    },
+  );
+
+  const publicFailure = `${failure.message}\n${failure.stack}\n${JSON.stringify(failure)}`;
+  assert.equal(publicFailure.includes(prepared.ownership_token), false);
+  assert.equal(publicFailure.includes(temporaryRoot), false);
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(rootSentinel, 'utf8'), 'keep rename-EIO root bytes\n');
+  assert.equal(
+    await readFile(path.join(sibling, 'keep.txt'), 'utf8'),
+    'keep rename-EIO sibling\n',
+  );
+  await access(prepared.transaction_directory);
+  assert.deepEqual(
+    (await readdir(transactionRoot)).filter((name) => name.startsWith('.cancel-')),
+    [],
+  );
+});
+
 test('a second cancel is rejected without touching the repository or adjacent directory', async (t) => {
   const { root, prepared, temporaryRoot } = await preparedFixture(t);
   const adjacent = path.join(temporaryRoot, 'adjacent-after-cancel');
@@ -1471,9 +1567,10 @@ test('cancel CLI emits one safe JSON line for success and retained failures', as
   assert.equal(wrong.stdout.split('\n').length, 2);
   const wrongResult = JSON.parse(wrong.stdout);
   assert.equal(wrongResult.retained, true);
-  assert.equal(wrongResult.transaction_preserved, true);
+  assert.equal(wrongResult.transaction_preserved, false);
   assert.equal(wrongResult.transaction_id, prepared.transaction_id);
   assert.equal(wrong.stdout.includes(prepared.ownership_token), false);
+  assert.equal(wrong.stdout.includes(prepared.transaction_directory), false);
 
   const success = await runCli('cancel', request);
   assert.equal(success.status, 0);
@@ -1491,9 +1588,10 @@ test('cancel CLI emits one safe JSON line for success and retained failures', as
   assert.equal(repeated.stderr, '');
   const repeatedResult = JSON.parse(repeated.stdout);
   assert.equal(repeatedResult.retained, true);
-  assert.equal(repeatedResult.transaction_preserved, true);
+  assert.equal(repeatedResult.transaction_preserved, false);
   assert.equal(repeatedResult.transaction_id, prepared.transaction_id);
   assert.equal(repeated.stdout.includes(prepared.ownership_token), false);
+  assert.equal(repeated.stdout.includes(prepared.transaction_directory), false);
   assert.deepEqual(await snapshotRepository(root), before);
 });
 
