@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   access,
   chmod,
@@ -66,6 +67,19 @@ async function runGit(root, args, options = {}) {
       stdinError = error;
     });
     child.stdin.end(options.input);
+  });
+}
+
+function spawnRealGit(repositoryRoot, args, options) {
+  return spawn('git', args, {
+    cwd: repositoryRoot,
+    env: {
+      ...options.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: gitConfigByRepository.get(repositoryRoot),
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    shell: false,
   });
 }
 
@@ -2533,6 +2547,32 @@ async function commitPrepared(root, fixture, runtime = {}) {
   }, { temporaryRoot: fixture.temporaryRoot, ...runtime });
 }
 
+async function withShortFileHandleWrites(matches, operation) {
+  const probe = await open(process.execPath, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  const originalWrite = fileHandlePrototype.write;
+  let shortWrites = 0;
+  await probe.close();
+  fileHandlePrototype.write = async function writeShortChunk(buffer, offset, length, position) {
+    if (Buffer.isBuffer(buffer) && matches(buffer) && length > 1) {
+      shortWrites += 1;
+      return originalWrite.call(
+        this,
+        buffer,
+        offset,
+        Math.max(1, Math.floor(length / 2)),
+        position,
+      );
+    }
+    return originalWrite.call(this, buffer, offset, length, position);
+  };
+  try {
+    return { result: await operation(), shortWrites: () => shortWrites };
+  } finally {
+    fileHandlePrototype.write = originalWrite;
+  }
+}
+
 test('commits binary rename delete mode and untracked atomic units individually', async (t) => {
   for (const kind of ['binary_file', 'rename', 'deletion', 'mode_change', 'untracked_file']) {
     await t.test(kind, { skip: kind === 'mode_change' && process.platform === 'win32' }, async (subtest) => {
@@ -2726,6 +2766,100 @@ test('stale repository state and an existing index lock stop before import and p
   });
 });
 
+test('task index replacement after the final repository check stops before commit', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const message = 'feat: reject replaced task index\n';
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const taskIndex = path.join(path.dirname(prepared.message_file), 'task.index');
+  const replacementIndex = path.join(temporaryRoot, 'replacement-task.index');
+  const displacedIndex = path.join(temporaryRoot, 'displaced-task.index');
+  await writeFile(replacementIndex, await readFile(taskIndex), { flag: 'wx', mode: 0o600 });
+  const { stdout: injectedBlob } = await runGit(root, ['hash-object', '-w', '--stdin'], {
+    input: Buffer.from('unconfirmed task index bytes\n'),
+  });
+  await runGit(root, [
+    'update-index', '--add', '--cacheinfo', `100644,${injectedBlob.trim()},unconfirmed.txt`,
+  ], {
+    env: {
+      GIT_INDEX_FILE: replacementIndex,
+      GIT_OBJECT_DIRECTORY: path.join(path.dirname(prepared.message_file), 'objects'),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(
+        root,
+        (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+      ),
+    },
+  });
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  let repositoryHeadChecks = 0;
+  let replaced = false;
+
+  await assert.rejects(
+    commitTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+      message_file: prepared.message_file,
+      confirmation: {
+        ...prepared.binding,
+        message_sha256: sha256(Buffer.from(message)),
+      },
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        const result = await runGit(repositoryRoot, args, options);
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD' && args.length === 2) {
+          repositoryHeadChecks += 1;
+          if (repositoryHeadChecks === 3) {
+            // 在最后一次真实仓库复验返回后替换真实 task.index，精确覆盖旧实现的闭集空窗。
+            await rename(taskIndex, displacedIndex);
+            await rename(replacementIndex, taskIndex);
+            replaced = true;
+          }
+        }
+        return result;
+      },
+    }),
+    ({ code }) => code === 'TRANSACTION_OWNERSHIP_INVALID',
+  );
+
+  assert.equal(replaced, true);
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+});
+
+test('state and recovery index writes complete through real short file writes', async (t) => {
+  await t.test('authenticated state', async (subtest) => {
+    const root = await repositoryWithBaseline(subtest);
+    await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected short state write\nline 3\n');
+    const fixture = await prepareCommitCase(subtest, root, (units) => units.find((unit) =>
+      unit.view === 'head_to_worktree'));
+
+    const writeResult = await withShortFileHandleWrites(
+      (bytes) => bytes.includes(Buffer.from('"state_mac_sha256"')),
+      () => commitPrepared(root, fixture),
+    );
+
+    assert.equal(writeResult.result.status, 'committed');
+    assert.equal(writeResult.shortWrites() > 1, true);
+  });
+
+  await t.test('recovery index', async (subtest) => {
+    const root = await repositoryWithBaseline(subtest);
+    await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected short recovery write\nline 3\n');
+    const fixture = await prepareCommitCase(subtest, root, (units) => units.find((unit) =>
+      unit.view === 'head_to_worktree'));
+
+    const writeResult = await withShortFileHandleWrites(
+      (bytes) => bytes.subarray(0, 4).equals(Buffer.from('DIRC')),
+      () => commitPrepared(root, fixture),
+    );
+
+    assert.equal(writeResult.result.status, 'committed');
+    assert.equal(writeResult.shortWrites() > 1, true);
+    assert.equal(writeResult.result.recovery_index_sha256, sha256(await readIndexBytes(root)));
+  });
+});
+
 test('object import failure removes only its owned lock and keeps the transaction cancellable', async (t) => {
   const { root, prepared, temporaryRoot } = await preparedFixture(t);
   const message = 'feat: fail real object import safely\n';
@@ -2786,6 +2920,89 @@ test('object import failure removes only its owned lock and keeps the transactio
     transaction_id: prepared.transaction_id,
     ownership_token: prepared.ownership_token,
   }, { temporaryRoot });
+});
+
+test('final lock cleanup boundary preserves a foreign replacement', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const message = 'feat: preserve foreign cleanup lock\n';
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const blockedObjectDirectory = path.join(temporaryRoot, 'blocked-cleanup-objects');
+  await writeFile(blockedObjectDirectory, 'ordinary file blocks index-pack\n');
+  const ownedLock = path.join(temporaryRoot, 'displaced-owned-cleanup.lock');
+  const sentinel = Buffer.from('foreign cleanup lock bytes\n');
+  let replaced = false;
+
+  await assert.rejects(
+    commitTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+      message_file: prepared.message_file,
+      confirmation: {
+        ...prepared.binding,
+        message_sha256: sha256(Buffer.from(message)),
+      },
+    }, {
+      temporaryRoot,
+      spawnGit: (repositoryRoot, args, options) => spawnRealGit(repositoryRoot, args, {
+        ...options,
+        env: {
+          ...options.env,
+          ...(args[0] === 'index-pack'
+            ? { GIT_OBJECT_DIRECTORY: blockedObjectDirectory }
+            : {}),
+        },
+      }),
+      beforeOwnedIndexLockFinalOperation: async ({ operation, lockPath }) => {
+        if (operation !== 'release' || replaced) return;
+        await rename(lockPath, ownedLock);
+        await writeFile(lockPath, sentinel, { flag: 'wx' });
+        replaced = true;
+      },
+    }),
+    ({ code }) => code === 'OBJECT_IMPORT_FAILED',
+  );
+
+  const indexLock = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+  );
+  assert.equal(replaced, true);
+  assert.deepEqual(await readFile(indexLock), sentinel);
+  await access(ownedLock);
+});
+
+test('final lock install boundary cannot install a foreign replacement', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected install boundary\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const originalIndex = await readIndexBytes(root);
+  const countBefore = Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim());
+  const displacedOwnedLock = path.join(fixture.temporaryRoot, 'displaced-owned-install.lock');
+  const sentinel = Buffer.from('foreign install lock bytes\n');
+  let replaced = false;
+
+  const result = await commitPrepared(root, fixture, {
+    beforeOwnedIndexLockFinalOperation: async ({ operation, lockPath }) => {
+      if (operation !== 'install' || replaced) return;
+      await rename(lockPath, displacedOwnedLock);
+      await writeFile(lockPath, sentinel, { flag: 'wx' });
+      replaced = true;
+    },
+  });
+
+  const indexLock = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+  );
+  assert.equal(replaced, true);
+  assert.equal(result.status, 'commit_created_recovery_required');
+  assert.equal(Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim()), countBefore + 1);
+  assert.deepEqual(await readIndexBytes(root), originalIndex);
+  assert.deepEqual(await readFile(indexLock), sentinel);
+  await access(displacedOwnedLock);
 });
 
 test('rejects unsafe message files without starting commit', async (t) => {
@@ -2891,6 +3108,64 @@ test('rejects unsafe message files without starting commit', async (t) => {
   }
 });
 
+test('message replacement at commit delegation cannot create an unconfirmed commit', async (t) => {
+  for (const mutation of ['replacement', 'in-place rewrite']) {
+    await t.test(mutation, async (subtest) => {
+      const root = await repositoryWithBaseline(subtest);
+      await writeFile(path.join(root, 'feature.txt'), `line 1\nselected ${mutation}\nline 3\n`);
+      const fixture = await prepareCommitCase(subtest, root, (units) => units.find((unit) =>
+        unit.view === 'head_to_worktree'));
+      const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+      const displacedMessage = path.join(fixture.temporaryRoot, `confirmed-${mutation}.txt`);
+      let mutated = false;
+
+      await assert.rejects(
+        commitPrepared(root, fixture, {
+          spawnGit: (repositoryRoot, args, options) => {
+            if (args[0] === 'commit' && !mutated) {
+              mutated = true;
+              const mutate = mutation === 'replacement'
+                ? rename(fixture.prepared.message_file, displacedMessage).then(() =>
+                  writeFile(fixture.prepared.message_file, 'feat: unconfirmed replacement\n', {
+                    flag: 'wx',
+                    mode: 0o600,
+                  }))
+                : writeFile(fixture.prepared.message_file, 'feat: unconfirmed rewrite\n', {
+                  flag: 'r+',
+                  mode: 0o600,
+                });
+              return mutate.then(() => spawn('git', args, {
+                cwd: repositoryRoot,
+                env: {
+                  ...options.env,
+                  GIT_CONFIG_NOSYSTEM: '1',
+                  GIT_CONFIG_GLOBAL: gitConfigByRepository.get(repositoryRoot),
+                },
+                stdio: ['pipe', 'pipe', 'pipe'],
+                shell: false,
+              }));
+            }
+            return spawn('git', args, {
+              cwd: repositoryRoot,
+              env: {
+                ...options.env,
+                GIT_CONFIG_NOSYSTEM: '1',
+                GIT_CONFIG_GLOBAL: gitConfigByRepository.get(repositoryRoot),
+              },
+              stdio: ['pipe', 'pipe', 'pipe'],
+              shell: false,
+            });
+          },
+        }),
+        ({ code }) => code === 'CONFIRMATION_STALE',
+      );
+
+      assert.equal(mutated, true);
+      assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+    });
+  }
+});
+
 test('hook rejection removes the message and leaves a cancellable transaction', async (t) => {
   const root = await repositoryWithBaseline(t);
   await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected rejected task\nline 3\n');
@@ -2910,11 +3185,11 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
 
   await assert.rejects(
     commitPrepared(root, fixture, {
-      runGit: async (repositoryRoot, args, options) => {
+      spawnGit: (repositoryRoot, args, options) => {
         if (args[0] === 'commit') {
-          stateDuringCommit = JSON.parse(await readFile(statePath, 'utf8'));
+          stateDuringCommit = JSON.parse(readFileSync(statePath, 'utf8'));
         }
-        return runGit(repositoryRoot, args, options);
+        return spawnRealGit(repositoryRoot, args, options);
       },
     }),
     ({ code }) => code === 'COMMIT_FAILED',
@@ -2959,9 +3234,9 @@ test('commit-msg hook runs once and the result reports the actual commit subject
   const commitCalls = [];
 
   const result = await commitPrepared(root, fixture, {
-    runGit: async (repositoryRoot, args, options) => {
+    spawnGit: (repositoryRoot, args, options) => {
       if (args[0] === 'commit') commitCalls.push([...args]);
-      return runGit(repositoryRoot, args, options);
+      return spawnRealGit(repositoryRoot, args, options);
     },
   });
 
@@ -2969,6 +3244,105 @@ test('commit-msg hook runs once and the result reports the actual commit subject
   assert.equal(result.status, 'committed');
   assert.equal(result.subject, 'feat: hook-adjusted subject');
   assert.equal((await runGit(root, ['show', '-s', '--format=%s', 'HEAD'])).stdout.trim(), result.subject);
+});
+
+test('hook barrier preserves original hook order arguments edits exits and config', async (t) => {
+  await t.test('successful hook chain', async (subtest) => {
+    const root = await repositoryWithBaseline(subtest);
+    const gitDirectory = path.resolve(
+      root,
+      (await runGit(root, ['rev-parse', '--git-dir'])).stdout.trim(),
+    );
+    const hooksDirectory = path.join(gitDirectory, 'custom-hooks');
+    const hookLog = path.join(gitDirectory, 'hook-order.log');
+    await mkdir(hooksDirectory);
+    await runGit(root, ['config', 'core.hooksPath', hooksDirectory]);
+    for (const [hookName, lines] of [
+      ['pre-commit', [
+        '#!/bin/sh',
+        'log="$(git rev-parse --git-path hook-order.log)"',
+        'printf "pre-commit:%s\\n" "$#" >> "$log"',
+      ]],
+      ['prepare-commit-msg', [
+        '#!/bin/sh',
+        'log="$(git rev-parse --git-path hook-order.log)"',
+        'printf "prepare-commit-msg:%s:%s:%s\\n" "$#" "$(basename "$1")" "$2" >> "$log"',
+        'printf "feat: prepare hook subject\\n" > "$1"',
+      ]],
+      ['commit-msg', [
+        '#!/bin/sh',
+        'log="$(git rev-parse --git-path hook-order.log)"',
+        'printf "commit-msg:%s:%s\\n" "$#" "$(basename "$1")" >> "$log"',
+        'printf "\\nbody from commit-msg\\n" >> "$1"',
+      ]],
+      ['post-commit', [
+        '#!/bin/sh',
+        'log="$(git rev-parse --git-path hook-order.log)"',
+        'printf "post-commit:%s\\n" "$#" >> "$log"',
+      ]],
+    ]) {
+      const hookPath = path.join(hooksDirectory, hookName);
+      await writeFile(hookPath, `${lines.join('\n')}\n`, { mode: 0o755 });
+      await chmod(hookPath, 0o755);
+    }
+    await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected hook chain\nline 3\n');
+    const fixture = await prepareCommitCase(subtest, root, (units) => units.find((unit) =>
+      unit.view === 'head_to_worktree'));
+    const configPath = path.resolve(
+      root,
+      (await runGit(root, ['rev-parse', '--git-path', 'config'])).stdout.trim(),
+    );
+    const configBefore = await readFile(configPath);
+    const commitCalls = [];
+
+    const result = await commitPrepared(root, fixture, {
+      spawnGit: (repositoryRoot, args, options) => {
+        if (args[0] === 'commit') commitCalls.push([...args]);
+        return spawnRealGit(repositoryRoot, args, options);
+      },
+    });
+
+    assert.equal(result.status, 'committed');
+    assert.equal(result.subject, 'feat: prepare hook subject');
+    assert.deepEqual(commitCalls, [[
+      'commit', '--no-gpg-sign', '-F', fixture.prepared.message_file,
+    ]]);
+    assert.equal(await readFile(hookLog, 'utf8'), [
+      'pre-commit:0',
+      'prepare-commit-msg:2:COMMIT_EDITMSG:message',
+      'commit-msg:1:COMMIT_EDITMSG',
+      'post-commit:0',
+      '',
+    ].join('\n'));
+    assert.match((await runGit(root, ['show', '-s', '--format=%B', 'HEAD'])).stdout,
+      /^feat: prepare hook subject\n\nbody from commit-msg\n/u);
+    assert.deepEqual(await readFile(configPath), configBefore);
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(fixture.prepared.ownership_token), false);
+    assert.equal(serialized.includes(fixture.prepared.message_file), false);
+    assert.equal(serialized.includes(fixture.message.trim()), false);
+  });
+
+  await t.test('prepare hook exit code', async (subtest) => {
+    const root = await repositoryWithBaseline(subtest);
+    const hookPath = path.resolve(
+      root,
+      (await runGit(root, ['rev-parse', '--git-path', 'hooks/prepare-commit-msg'])).stdout.trim(),
+    );
+    await writeFile(hookPath, '#!/bin/sh\nexit 17\n');
+    await chmod(hookPath, 0o755);
+    await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected rejected prepare hook\nline 3\n');
+    const fixture = await prepareCommitCase(subtest, root, (units) => units.find((unit) =>
+      unit.view === 'head_to_worktree'));
+    const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+
+    await assert.rejects(
+      commitPrepared(root, fixture),
+      ({ code }) => code === 'COMMIT_FAILED',
+    );
+
+    assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  });
 });
 
 test('hook tree changes return commit created recovery required without rewriting history', async (t) => {
@@ -3008,6 +3382,50 @@ test('hook tree changes return commit created recovery required without rewritin
     transaction_id: fixture.prepared.transaction_id,
     ownership_token: fixture.prepared.ownership_token,
   }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('post-commit HEAD read failure reports repository changed and recovery required', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected post-commit read failure\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const headPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'HEAD'])).stdout.trim(),
+  );
+  const displacedHead = path.join(fixture.temporaryRoot, 'temporarily-displaced-HEAD');
+  const countBefore = Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim());
+  let repositoryHeadChecks = 0;
+  let injectedReadFailure = false;
+
+  const result = await commitPrepared(root, fixture, {
+    runGit: async (repositoryRoot, args, options) => {
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD' && args.length === 2) {
+        repositoryHeadChecks += 1;
+        if (repositoryHeadChecks === 4) {
+          await rename(headPath, displacedHead);
+          let readError;
+          try {
+            await runGit(repositoryRoot, args, options);
+            assert.fail('rev-parse HEAD unexpectedly succeeded without HEAD.');
+          } catch (error) {
+            readError = error;
+          } finally {
+            await rename(displacedHead, headPath);
+          }
+          injectedReadFailure = true;
+          throw readError;
+        }
+      }
+      return runGit(repositoryRoot, args, options);
+    },
+  });
+
+  assert.equal(injectedReadFailure, true);
+  assert.equal(result.status, 'commit_created_recovery_required');
+  assert.equal(result.repository_changed, true);
+  assert.equal(result.transaction_preserved, true);
+  assert.equal(Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim()), countBefore + 1);
 });
 
 test('commit CLI emits one safe JSON line and removes its message file', async (t) => {

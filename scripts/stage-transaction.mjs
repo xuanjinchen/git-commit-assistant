@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { fstatSync, lstatSync, renameSync, rmSync } from 'node:fs';
 import {
   chmod,
   copyFile,
@@ -988,9 +989,20 @@ async function writeAll(handle, bytes, start, end) {
   let offset = start;
   while (offset < end) {
     const { bytesWritten } = await handle.write(bytes, offset, end - offset, offset);
-    if (bytesWritten === 0) throw new Error('Loose object helper made no write progress.');
+    if (bytesWritten === 0) throw new Error('File write made no progress.');
     offset += bytesWritten;
   }
+}
+
+async function readExactFileHandle(handle, length) {
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const { bytesRead } = await handle.read(bytes, offset, length - offset, offset);
+    if (bytesRead === 0) throw new Error('File read ended before the expected length.');
+    offset += bytesRead;
+  }
+  return bytes;
 }
 
 async function verifyExistingLooseObject(basename, compressed) {
@@ -2725,6 +2737,7 @@ async function writeOwnedStateInPlace(context, nextState, ownershipToken) {
   nextState.state_mac_sha256 = stateMac(nextState, ownershipToken);
   const serialized = Buffer.from(`${canonicalJson(nextState)}\n`);
   let handle;
+  let writeStarted = false;
   try {
     const before = await lstat(statePath, { bigint: true });
     handle = await open(statePath, 'r+');
@@ -2737,7 +2750,8 @@ async function writeOwnedStateInPlace(context, nextState, ownershipToken) {
     }
     // cancel 认证 state 自身 inode；消息生命周期只能在同一 FileHandle 内原位更新并重新计算 HMAC。
     await handle.truncate(0);
-    await handle.write(serialized, 0, serialized.length, 0);
+    writeStarted = true;
+    await writeAll(handle, serialized, 0, serialized.length);
     await handle.sync();
     const openedAfter = await handle.stat({ bigint: true });
     const after = await lstat(statePath, { bigint: true });
@@ -2747,6 +2761,25 @@ async function writeOwnedStateInPlace(context, nextState, ownershipToken) {
       || !evidenceRecordsMatch(filesystemEvidence(after), context.stateFile.identity)) {
       throw ownershipInvalid();
     }
+  } catch (error) {
+    if (handle !== undefined && writeStarted) {
+      try {
+        // 更新失败时在仍持有的原 inode 上恢复旧认证 state，避免把短写残片冒充可取消事务。
+        await handle.truncate(0);
+        await writeAll(handle, context.stateFile.bytes, 0, context.stateFile.bytes.length);
+        await handle.truncate(context.stateFile.bytes.length);
+        await handle.sync();
+        const restored = await handle.stat({ bigint: true });
+        const restoredBytes = await readExactFileHandle(handle, context.stateFile.bytes.length);
+        if (restored.size !== BigInt(context.stateFile.bytes.length)
+          || !timingSafeHexMatches(digest(restoredBytes), context.stateFile.sha256)) {
+          throw ownershipInvalid();
+        }
+      } catch {
+        throw ownershipInvalid();
+      }
+    }
+    throw error;
   } finally {
     await handle?.close();
   }
@@ -2799,10 +2832,45 @@ async function reverifyBoundMessage(context) {
   return message;
 }
 
+async function readConfirmedTaskTree(repository, context, runtime) {
+  const externalRoot = await resolveExternalTemporaryRoot(repository, runtime);
+  const temporaryRoot = await mkdtemp(path.join(externalRoot, 'git-commit-assistant-confirm-'));
+  const temporaryIndex = path.join(temporaryRoot, 'index');
+  const temporaryObjects = path.join(temporaryRoot, 'objects');
+  try {
+    await mkdir(temporaryObjects);
+    await copyFile(path.join(context.resourceDirectory, 'task.index'), temporaryIndex);
+    const mainObjects = await gitPath(repository, 'objects', runtime);
+    const { stdout } = await git(repository, ['write-tree'], runtime, {
+      env: {
+        GIT_INDEX_FILE: temporaryIndex,
+        GIT_OBJECT_DIRECTORY: temporaryObjects,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: [
+          path.join(context.resourceDirectory, 'objects'),
+          mainObjects,
+        ].join(path.delimiter),
+      },
+    });
+    return stdout.trim();
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+async function assertTransactionStillConfirmed(repository, context, runtime) {
+  await reverifyCancellationContext(context);
+  const taskTree = await readConfirmedTaskTree(repository, context, runtime);
+  // write-tree 只读取闭集内 task.index；前后完整复验把路径读取绑定到同一份认证事务。
+  await reverifyCancellationContext(context);
+  if (!canonicalFieldMatches(taskTree, context.state.binding.task_tree_oid)) {
+    throw stopped('CONFIRMATION_STALE');
+  }
+}
+
 async function acquireIndexLock(repository, indexLockPath, transactionId, tokenSha256) {
   let handle;
   try {
-    handle = await open(indexLockPath, 'wx', 0o600);
+    handle = await open(indexLockPath, 'wx+', 0o600);
   } catch (error) {
     if (error?.code === 'EEXIST') throw stopped('INDEX_LOCKED');
     throw stopped('INDEX_LOCK_FAILED');
@@ -2824,7 +2892,7 @@ async function acquireIndexLock(repository, indexLockPath, transactionId, tokenS
       transaction_id: transactionId,
       token_sha256: tokenSha256,
     })}\n`);
-    await handle.write(metadata, 0, metadata.length, 0);
+    await writeAll(handle, metadata, 0, metadata.length);
     await handle.sync();
     return lock;
   } catch (error) {
@@ -2845,21 +2913,48 @@ async function assertIndexLockOwned(lock) {
   }
 }
 
-async function releaseOwnedIndexLock(lock) {
+function finishOwnedIndexLockOperation(lock, operation, indexPath) {
+  const opened = fstatSync(lock.handle.fd, { bigint: true });
+  const onPath = lstatSync(lock.path, { bigint: true });
+  if ([opened, onPath].some((metadata) =>
+    !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+    || !evidenceRecordsMatch(filesystemEvidence(opened), lock.identity)
+    || !evidenceRecordsMatch(filesystemEvidence(onPath), lock.identity)) return false;
+  // 同步 helper 在仍持有句柄时完成最终目录项检查和操作，不在 identity 与 unlink/rename 之间让出 JS 执行权。
+  if (operation === 'release') {
+    rmSync(lock.path, { force: false });
+    return true;
+  }
+  renameSync(lock.path, indexPath);
+  const openedAfter = fstatSync(lock.handle.fd, { bigint: true });
+  const installed = lstatSync(indexPath, { bigint: true });
+  return [openedAfter, installed].every((metadata) =>
+    metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1n
+    && evidenceRecordsMatch(filesystemEvidence(metadata), lock.identity));
+}
+
+async function releaseOwnedIndexLock(lock, runtime = {}) {
   if (lock === undefined || lock.installed) return true;
   try {
+    if (lock.closed) return false;
+    await runtime.beforeOwnedIndexLockFinalOperation?.({
+      operation: 'release',
+      lockPath: lock.path,
+    });
+    const released = finishOwnedIndexLockOperation(lock, 'release');
+    await lock.handle.close();
+    lock.closed = true;
+    return released;
+  } catch {
     if (!lock.closed) {
-      await lock.handle.close();
+      try {
+        await lock.handle.close();
+      } catch {
+        return false;
+      }
       lock.closed = true;
     }
-    const current = await lstat(lock.path, { bigint: true });
-    if (lock.identity === null
-      || !current.isFile() || current.isSymbolicLink() || current.nlink !== 1n
-      || !evidenceRecordsMatch(filesystemEvidence(current), lock.identity)) return false;
-    await rm(lock.path, { force: false });
-    return true;
-  } catch (error) {
-    return error?.code === 'ENOENT';
+    return false;
   }
 }
 
@@ -2887,6 +2982,175 @@ function waitForGitProcess(child) {
     child.once('error', reject);
     child.once('close', (status) => resolve({ status, stderr: Buffer.concat(stderr) }));
   });
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function openBoundMessageHandles(context) {
+  const messagePath = path.join(context.resourceDirectory, 'message.txt');
+  const directoryHandle = await open(context.resourceDirectory, 'r');
+  let messageHandle;
+  try {
+    messageHandle = await open(messagePath, 'r');
+    const directoryOpened = await directoryHandle.stat({ bigint: true });
+    const directoryOnPath = await lstat(context.resourceDirectory, { bigint: true });
+    const messageOpened = await messageHandle.stat({ bigint: true });
+    const messageOnPath = await lstat(messagePath, { bigint: true });
+    const messageBytes = await readExactFileHandle(messageHandle, context.message.bytes.length);
+    if ([directoryOpened, directoryOnPath].some((metadata) =>
+      !metadata.isDirectory() || metadata.isSymbolicLink())
+      || [messageOpened, messageOnPath].some((metadata) =>
+        !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+      || !evidenceRecordsMatch(filesystemEvidence(directoryOpened), context.resourceIdentity)
+      || !evidenceRecordsMatch(filesystemEvidence(directoryOnPath), context.resourceIdentity)
+      || !evidenceRecordsMatch(filesystemEvidence(messageOpened), context.message.identity)
+      || !evidenceRecordsMatch(filesystemEvidence(messageOnPath), context.message.identity)
+      || messageOpened.size !== BigInt(context.message.bytes.length)
+      || !timingSafeHexMatches(digest(messageBytes), context.message.sha256)) {
+      throw stopped('CONFIRMATION_STALE');
+    }
+    return { directoryHandle, messageHandle, messagePath };
+  } catch (error) {
+    await messageHandle?.close();
+    await directoryHandle.close();
+    throw error;
+  }
+}
+
+async function reverifyBoundMessageHandles(context, handles) {
+  const directoryOpened = await handles.directoryHandle.stat({ bigint: true });
+  const directoryOnPath = await lstat(context.resourceDirectory, { bigint: true });
+  const messageOpened = await handles.messageHandle.stat({ bigint: true });
+  const messageOnPath = await lstat(handles.messagePath, { bigint: true });
+  const messageBytes = await readExactFileHandle(handles.messageHandle, context.message.bytes.length);
+  if ([directoryOpened, directoryOnPath].some((metadata) =>
+    !metadata.isDirectory() || metadata.isSymbolicLink())
+    || [messageOpened, messageOnPath].some((metadata) =>
+      !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+    || !evidenceRecordsMatch(filesystemEvidence(directoryOpened), context.resourceIdentity)
+    || !evidenceRecordsMatch(filesystemEvidence(directoryOnPath), context.resourceIdentity)
+    || !evidenceRecordsMatch(filesystemEvidence(messageOpened), context.message.identity)
+    || !evidenceRecordsMatch(filesystemEvidence(messageOnPath), context.message.identity)
+    || messageOpened.size !== BigInt(context.message.bytes.length)
+    || !timingSafeHexMatches(digest(messageBytes), context.message.sha256)) {
+    throw stopped('CONFIRMATION_STALE');
+  }
+}
+
+async function createCommitHookBarrier(repository, context, runtime) {
+  const barrierRoot = await mkdtemp(path.join(context.temporaryRoot, 'commit-message-barrier-'));
+  const hooksDirectory = path.join(barrierRoot, 'hooks');
+  const readyPath = path.join(barrierRoot, 'message-opened');
+  const allowPath = path.join(barrierRoot, 'allow');
+  const denyPath = path.join(barrierRoot, 'deny');
+  await mkdir(hooksDirectory, { mode: 0o700 });
+  await chmod(barrierRoot, 0o700);
+  const configuredHooks = await git(repository, [
+    'config', '--path', '--get', 'core.hooksPath',
+  ], runtime, { allowFailure: true });
+  const originalHooksDirectory = (configuredHooks.status ?? 0) === 0
+    && configuredHooks.stdout.trim().length > 0
+    ? path.resolve(repository.root, configuredHooks.stdout.trim())
+    : await gitPath(repository, 'hooks', runtime);
+  for (const hookName of [
+    'pre-commit',
+    'commit-msg',
+    'post-commit',
+    'post-rewrite',
+    'post-index-change',
+  ]) {
+    const proxyPath = path.join(hooksDirectory, hookName);
+    await writeFile(proxyPath, [
+      '#!/bin/sh',
+      `original="\${GCA_ORIGINAL_HOOKS_PATH}/${hookName}"`,
+      'if test -x "$original" || { test "$GCA_HOOKS_ALLOW_REGULAR" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
+      'exit 0',
+      '',
+    ].join('\n'), { flag: 'wx', mode: 0o700 });
+    await chmod(proxyPath, 0o700);
+  }
+  const prepareHook = path.join(hooksDirectory, 'prepare-commit-msg');
+  await writeFile(prepareHook, [
+    '#!/bin/sh',
+    'printf ready > "$GCA_MESSAGE_BARRIER_READY" || exit 1',
+    'while ! test -e "$GCA_MESSAGE_BARRIER_ALLOW" && ! test -e "$GCA_MESSAGE_BARRIER_DENY"; do sleep 0.01; done',
+    'if test -e "$GCA_MESSAGE_BARRIER_DENY"; then exit 1; fi',
+    'original="${GCA_ORIGINAL_HOOKS_PATH}/prepare-commit-msg"',
+    'if test -x "$original" || { test "$GCA_HOOKS_ALLOW_REGULAR" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
+    'exit 0',
+    '',
+  ].join('\n'), { flag: 'wx', mode: 0o700 });
+  await chmod(prepareHook, 0o700);
+  return {
+    barrierRoot,
+    hooksDirectory,
+    originalHooksDirectory,
+    readyPath,
+    allowPath,
+    denyPath,
+  };
+}
+
+function withInjectedGitConfig(environment, key, value) {
+  const next = { ...environment };
+  const existingCount = Number.parseInt(next.GIT_CONFIG_COUNT ?? '0', 10);
+  const configIndex = Number.isSafeInteger(existingCount) && existingCount >= 0 ? existingCount : 0;
+  next.GIT_CONFIG_COUNT = String(configIndex + 1);
+  next[`GIT_CONFIG_KEY_${configIndex}`] = key;
+  next[`GIT_CONFIG_VALUE_${configIndex}`] = value;
+  return next;
+}
+
+async function commitWithBoundMessage(repository, context, taskIndex, messageFile, runtime) {
+  const barrier = await createCommitHookBarrier(repository, context, runtime);
+  let handles;
+  try {
+    handles = await openBoundMessageHandles(context);
+    const environment = withInjectedGitConfig(cleanGitEnvironment({
+      GIT_INDEX_FILE: taskIndex,
+      GCA_ORIGINAL_HOOKS_PATH: barrier.originalHooksDirectory,
+      GCA_HOOKS_ALLOW_REGULAR: process.platform === 'win32' ? '1' : '0',
+      GCA_MESSAGE_BARRIER_READY: barrier.readyPath,
+      GCA_MESSAGE_BARRIER_ALLOW: barrier.allowPath,
+      GCA_MESSAGE_BARRIER_DENY: barrier.denyPath,
+    }, ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']),
+    'core.hooksPath', barrier.hooksDirectory);
+    const child = await startGitProcess(repository, [
+      'commit', '--no-gpg-sign', '-F', messageFile,
+    ], { env: environment }, runtime);
+    child.stdout.on('data', () => {});
+    const childDone = waitForGitProcess(child);
+    child.stdin.end();
+    while (true) {
+      try {
+        await lstat(barrier.readyPath);
+        break;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      const progress = await Promise.race([
+        childDone.then((attempt) => ({ attempt })),
+        delay(10).then(() => null),
+      ]);
+      if (progress !== null) return progress.attempt;
+    }
+    try {
+      // prepare-commit-msg 只会在 Git 已读取 -F 并写入 COMMIT_EDITMSG 后运行；屏障在任何 commit object 前复验源句柄与目录项。
+      await reverifyBoundMessageHandles(context, handles);
+    } catch (error) {
+      await writeFile(barrier.denyPath, 'deny\n', { flag: 'wx', mode: 0o600 });
+      await childDone.catch(() => {});
+      throw error;
+    }
+    await writeFile(barrier.allowPath, 'allow\n', { flag: 'wx', mode: 0o600 });
+    return await childDone;
+  } finally {
+    await handles?.messageHandle.close();
+    await handles?.directoryHandle.close();
+    await rm(barrier.barrierRoot, { recursive: true, force: true });
+  }
 }
 
 async function pipeConfirmedObjects(repository, context, runtime, includeOid, excludeOid) {
@@ -2985,6 +3249,7 @@ async function installRecoveryIndex({
   indexPath,
   originalIndex,
   indexLock,
+  runtime,
 }) {
   const recoveryPath = path.join(context.resourceDirectory, 'recovery.index');
   const recovery = await readStableOwnedFile(
@@ -3003,23 +3268,31 @@ async function installRecoveryIndex({
   await assertIndexLockOwned(indexLock);
   // 恢复 index 先写入本事务持有的真实 lock 并 fsync；原 index 摘要复验后才原子安装。
   await indexLock.handle.truncate(0);
-  await indexLock.handle.write(recovery.bytes, 0, recovery.bytes.length, 0);
+  await writeAll(indexLock.handle, recovery.bytes, 0, recovery.bytes.length);
+  await indexLock.handle.truncate(recovery.bytes.length);
   await indexLock.handle.sync();
+  const written = await indexLock.handle.stat({ bigint: true });
+  const writtenBytes = await readExactFileHandle(indexLock.handle, recovery.bytes.length);
+  if (written.size !== BigInt(recovery.bytes.length)
+    || !timingSafeHexMatches(digest(writtenBytes), recovery.sha256)) {
+    throw stopped('INDEX_RESTORE_FAILED');
+  }
   await assertIndexLockOwned(indexLock);
   const finalOriginal = await stableIndexFile(indexPath);
   if (!evidenceRecordsMatch(finalOriginal.identity, originalIndex.identity)
     || !timingSafeHexMatches(finalOriginal.sha256, context.state.binding.index_sha256)) {
     throw stopped('CONFIRMATION_STALE');
   }
-  await indexLock.handle.close();
-  indexLock.closed = true;
-  const closedLock = await lstat(indexLock.path, { bigint: true });
-  if (!closedLock.isFile() || closedLock.isSymbolicLink() || closedLock.nlink !== 1n
-    || !evidenceRecordsMatch(filesystemEvidence(closedLock), indexLock.identity)) {
+  await runtime.beforeOwnedIndexLockFinalOperation?.({
+    operation: 'install',
+    lockPath: indexLock.path,
+  });
+  if (!finishOwnedIndexLockOperation(indexLock, 'install', indexPath)) {
     throw stopped('INDEX_LOCK_OWNERSHIP_LOST');
   }
-  await rename(indexLock.path, indexPath);
   indexLock.installed = true;
+  await indexLock.handle.close();
+  indexLock.closed = true;
   const installed = await stableIndexFile(indexPath);
   if (!timingSafeHexMatches(installed.sha256, recovery.sha256)) {
     throw stopped('INDEX_RESTORE_FAILED');
@@ -3071,6 +3344,7 @@ export async function commitTransaction({
   let retainedStateReady = false;
   let result;
   let primaryError;
+  let commitStarted = false;
   const warnings = [];
   try {
     context = await verifyCancellationContext({
@@ -3110,23 +3384,24 @@ export async function commitTransaction({
       expectedConfirmation,
       await currentBinding(repository, indexPath, runtime),
     );
-    await reverifyBoundMessage(context);
+    await assertTransactionStillConfirmed(repository, context, runtime);
     await importConfirmedObjects(repository, context, runtime);
     await assertIndexLockOwned(indexLock);
     assertRepositoryStillConfirmed(
       expectedConfirmation,
       await currentBinding(repository, indexPath, runtime),
     );
-    await reverifyBoundMessage(context);
+    await assertTransactionStillConfirmed(repository, context, runtime);
 
     const taskIndex = path.join(context.resourceDirectory, 'task.index');
-    const attempt = await git(repository, [
-      'commit', '--no-gpg-sign', '-F', message_file,
-    ], runtime, {
-      env: { GIT_INDEX_FILE: taskIndex },
-      unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
-      allowFailure: true,
-    });
+    commitStarted = true;
+    const attempt = await commitWithBoundMessage(
+      repository,
+      context,
+      taskIndex,
+      message_file,
+      runtime,
+    );
     const { stdout: actualHeadOutput } = await git(
       repository,
       ['rev-parse', 'HEAD'],
@@ -3183,6 +3458,7 @@ export async function commitTransaction({
             indexPath,
             originalIndex,
             indexLock,
+            runtime,
           });
           const { stdout: finalHeadOutput } = await git(
             repository,
@@ -3215,10 +3491,33 @@ export async function commitTransaction({
       }
     }
   } catch (error) {
-    primaryError = error;
+    if (commitStarted && context !== undefined) {
+      try {
+        const { stdout: observedHeadOutput } = await git(
+          context.repository,
+          ['rev-parse', 'HEAD'],
+          runtime,
+          { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
+        );
+        const observedHead = observedHeadOutput.trim();
+        if (observedHead !== context.state.binding.head_oid) {
+          result = recoveryRequired(observedHead, warnings, context);
+        } else {
+          error.repository_changed = false;
+          primaryError = error;
+        }
+      } catch {
+        // commit 进程启动后无法读取 HEAD 时只能保守报告可能已改变，绝不能把未知状态降格为 false。
+        error.repository_changed = true;
+        primaryError = error;
+      }
+    } else {
+      error.repository_changed = false;
+      primaryError = error;
+    }
   } finally {
     if (indexLock !== undefined && !indexLock.installed) {
-      if (!await releaseOwnedIndexLock(indexLock)) warnings.push('INDEX_LOCK_CLEANUP_FAILED');
+      if (!await releaseOwnedIndexLock(indexLock, runtime)) warnings.push('INDEX_LOCK_CLEANUP_FAILED');
     }
     if (context !== undefined && messageClaimed) {
       try {
@@ -3339,7 +3638,7 @@ async function runCli() {
           ? error.message
           : 'The request could not be completed safely.',
       },
-      repository_changed: false,
+      repository_changed: error?.repository_changed === true,
       retained: error?.retained === true,
       transaction_preserved: error?.transaction_preserved === true,
       ...(TRANSACTION_ID_PATTERN.test(error?.transaction_id ?? '')
