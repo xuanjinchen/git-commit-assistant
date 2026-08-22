@@ -1160,8 +1160,22 @@ function filesystemIdentity(metadata) {
   return { dev: String(metadata.dev), ino: String(metadata.ino) };
 }
 
+function normalizedMode(metadata) {
+  return Number(metadata.mode & (typeof metadata.mode === 'bigint' ? 0o7777n : 0o7777));
+}
+
+function filesystemEvidence(metadata) {
+  return { ...filesystemIdentity(metadata), mode: normalizedMode(metadata) };
+}
+
 function identityRecordsMatch(left, right) {
   return left?.dev === right?.dev && left?.ino === right?.ino;
+}
+
+function evidenceRecordsMatch(left, right) {
+  return identityRecordsMatch(left, right)
+    && Number.isSafeInteger(left?.mode)
+    && left.mode === right?.mode;
 }
 
 async function captureStableDirectory(candidate, failure) {
@@ -1172,11 +1186,11 @@ async function captureStableDirectory(candidate, failure) {
     const after = await lstat(absolute, { bigint: true });
     if (!before.isDirectory() || before.isSymbolicLink()
       || !after.isDirectory() || after.isSymbolicLink()
-      || !identityRecordsMatch(filesystemIdentity(before), filesystemIdentity(after))
+      || !evidenceRecordsMatch(filesystemEvidence(before), filesystemEvidence(after))
       || !pathsAreEqual(canonical, absolute)) {
       throw new Error('Directory identity changed.');
     }
-    return { ...filesystemIdentity(after), canonical: path.normalize(canonical) };
+    return { ...filesystemEvidence(after), canonical: path.normalize(canonical) };
   } catch {
     throw failure();
   }
@@ -1193,10 +1207,10 @@ async function readStableOwnedFile(candidate, parentCanonical, failure) {
     const bytes = await handle.readFile();
     const openedAfter = await handle.stat({ bigint: true });
     const after = await lstat(absolute, { bigint: true });
-    const identities = [before, openedBefore, openedAfter, after].map(filesystemIdentity);
+    const identities = [before, openedBefore, openedAfter, after].map(filesystemEvidence);
     if ([before, openedBefore, openedAfter, after].some((metadata) =>
       !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
-      || identities.some((identity) => !identityRecordsMatch(identity, identities[0]))
+      || identities.some((identity) => !evidenceRecordsMatch(identity, identities[0]))
       || !isWithin(canonical, parentCanonical)) {
       throw new Error('File identity changed.');
     }
@@ -1246,9 +1260,9 @@ async function captureTransactionArtifacts(resourceDirectory, failure) {
     if (metadata.isSymbolicLink()) throw failure();
     if (metadata.isDirectory()) {
       const before = await captureStableDirectory(candidate, failure);
-      if (!identityRecordsMatch(filesystemIdentity(metadata), before)
+      if (!evidenceRecordsMatch(filesystemEvidence(metadata), before)
         || !isWithin(before.canonical, resource.canonical)) throw failure();
-      entries.push({ path: relative, type: 'directory', ...filesystemIdentity(before) });
+      entries.push({ path: relative, type: 'directory', ...filesystemEvidence(before) });
       let names;
       try {
         names = (await readdir(candidate)).sort();
@@ -1259,7 +1273,7 @@ async function captureTransactionArtifacts(resourceDirectory, failure) {
         await visit(path.join(candidate, name), `${relative}/${name}`);
       }
       const after = await captureStableDirectory(candidate, failure);
-      if (!identityRecordsMatch(before, after)) throw failure();
+      if (!evidenceRecordsMatch(before, after)) throw failure();
       return;
     }
     if (!metadata.isFile()) throw failure();
@@ -1274,7 +1288,7 @@ async function captureTransactionArtifacts(resourceDirectory, failure) {
   }
   for (const name of artifacts) await visit(path.join(resourceDirectory, name), name);
   entries.sort((left, right) => left.path.localeCompare(right.path));
-  if (!identityRecordsMatch(
+  if (!evidenceRecordsMatch(
     resource,
     await captureStableDirectory(resourceDirectory, failure),
   )) throw failure();
@@ -1300,12 +1314,13 @@ async function writeInitialOwnedState(repository, transaction, state, ownershipT
       let handle;
       try {
         handle = await open(transaction.stateFile, 'wx', 0o600);
+        await handle.chmod(0o600);
         const opened = await handle.stat({ bigint: true });
         if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink !== 1n) {
           throw stopped('TRANSACTION_IDENTITY_CHANGED');
         }
-        // 先以独占句柄取得 state inode/file ID，再在同一 inode 内写入受 token MAC 认证的闭集。
-        state.ownership.state_file = filesystemIdentity(opened);
+        // 先取得 state 的同 inode mode/identity 再写 HMAC 闭集；不记录自身摘要以避免认证循环。
+        state.ownership.state_file = filesystemEvidence(opened);
         state.state_mac_sha256 = stateMac(state, ownershipToken);
         await handle.writeFile(`${canonicalJson(state)}\n`);
       } finally {
@@ -1315,11 +1330,17 @@ async function writeInitialOwnedState(repository, transaction, state, ownershipT
   );
 }
 
-function ownershipInvalid() {
+function ownershipInvalid(retained = true, transactionId) {
   return new StageTransactionError(
     'TRANSACTION_OWNERSHIP_INVALID',
     'The staging transaction ownership could not be verified.',
-    { retained: true },
+    {
+      retained,
+      transaction_preserved: retained,
+      ...(TRANSACTION_ID_PATTERN.test(transactionId ?? '')
+        ? { transaction_id: transactionId }
+        : {}),
+    },
   );
 }
 
@@ -2121,6 +2142,14 @@ export async function prepareTransaction({
         task_tree_oid: taskTreeOid,
         recovery_tree_oid: recoveryTreeOid,
       };
+      // 闭集 mode 必须在固定权限后采集，否则 HMAC 会认证 chmod 前的过渡状态。
+      await withTransactionMutation(
+        repository,
+        transaction,
+        [],
+        () => chmod(transaction.resourceDirectory, 0o700),
+      );
+      await secureTransactionFiles(repository, transaction, transaction.resourceDirectory);
       const artifactOwnership = await captureTransactionArtifacts(
         transaction.resourceDirectory,
         () => stopped('TRANSACTION_IDENTITY_CHANGED'),
@@ -2143,7 +2172,7 @@ export async function prepareTransaction({
           temporary_root: transaction.temporaryRootIdentity,
           transaction_root: transaction.transactionRootIdentity,
           transaction_directory: {
-            ...filesystemIdentity(await lstat(transaction.directory, { bigint: true })),
+            ...filesystemEvidence(await lstat(transaction.directory, { bigint: true })),
           },
           resource_directory: {
             name: path.basename(transaction.resourceDirectory),
@@ -2151,6 +2180,8 @@ export async function prepareTransaction({
           },
           repository: repositoryIdentity,
           tree: artifactOwnership.entries,
+          // Task 5 写入 message 后须原位更新此证据、摘要和 state MAC；token 始终只保留在调用方。
+          message_file: null,
         },
         staged_units: {
           consumed_unit_ids: staged.consumed.map(({ unit_id }) => unit_id),
@@ -2166,7 +2197,6 @@ export async function prepareTransaction({
         message_file_sha256: null,
       };
       await writeInitialOwnedState(repository, transaction, state, ownershipToken);
-      await secureTransactionFiles(repository, transaction, transaction.resourceDirectory);
       return {
         status: 'prepared',
         transaction_id: transaction.id,
@@ -2206,9 +2236,17 @@ function timingSafeHexMatches(left, right) {
 }
 
 function identityWithCanonicalMatches(expected, actual) {
-  return identityRecordsMatch(expected, actual)
+  return evidenceRecordsMatch(expected, actual)
     && typeof expected?.canonical === 'string'
     && pathsAreEqual(expected.canonical, actual.canonical);
+}
+
+function hasFilesystemEvidence(value) {
+  return typeof value?.dev === 'string'
+    && typeof value?.ino === 'string'
+    && Number.isSafeInteger(value?.mode)
+    && value.mode >= 0
+    && value.mode <= 0o7777;
 }
 
 function parseOwnedState(bytes, transactionId) {
@@ -2226,9 +2264,15 @@ function parseOwnedState(bytes, transactionId) {
     || !SHA256_PATTERN.test(state.binding?.repository_sha256)
     || !SHA256_PATTERN.test(state.token_sha256)
     || !SHA256_PATTERN.test(state.state_mac_sha256)
+    || (state.message_file_sha256 !== null
+      && !SHA256_PATTERN.test(state.message_file_sha256))
     || !Array.isArray(state.ownership?.tree)
-    || typeof state.ownership?.state_file?.dev !== 'string'
-    || typeof state.ownership?.state_file?.ino !== 'string'
+    || !hasFilesystemEvidence(state.ownership?.transaction_directory)
+    || !hasFilesystemEvidence(state.ownership?.resource_directory)
+    || !hasFilesystemEvidence(state.ownership?.state_file)
+    || (state.message_file_sha256 === null
+      ? state.ownership?.message_file !== null
+      : !hasFilesystemEvidence(state.ownership?.message_file))
     || !Array.isArray(state.files?.worktree)) {
     throw ownershipInvalid();
   }
@@ -2238,7 +2282,8 @@ function parseOwnedState(bytes, transactionId) {
 function assertStateFileEvidence(state, artifacts) {
   const byPath = new Map();
   for (const entry of artifacts.entries) {
-    if (typeof entry.path !== 'string' || byPath.has(entry.path)) throw ownershipInvalid();
+    if (typeof entry.path !== 'string' || byPath.has(entry.path)
+      || !hasFilesystemEvidence(entry)) throw ownershipInvalid();
     byPath.set(entry.path, entry);
   }
   for (const [fileName, digestName] of [
@@ -2286,9 +2331,11 @@ async function readOptionalMessage(resourceDirectory, resourceCanonical, state) 
   const messagePath = path.join(resourceDirectory, 'message.txt');
   try {
     const message = await readStableOwnedFile(messagePath, resourceCanonical, ownershipInvalid);
-    if (state.message_file_sha256 !== null
-      && (!SHA256_PATTERN.test(state.message_file_sha256)
-        || !timingSafeHexMatches(message.sha256, state.message_file_sha256))) {
+    const expected = state.ownership.message_file;
+    if (state.message_file_sha256 === null) {
+      if (expected !== null) throw ownershipInvalid();
+    } else if (!timingSafeHexMatches(message.sha256, state.message_file_sha256)
+      || !evidenceRecordsMatch(expected, message.identity)) {
       throw ownershipInvalid();
     }
     return message;
@@ -2296,7 +2343,9 @@ async function readOptionalMessage(resourceDirectory, resourceCanonical, state) 
     try {
       await lstat(messagePath);
     } catch (missing) {
-      if (missing?.code === 'ENOENT') return null;
+      // 只有未经认证的 null 摘要允许消息尚未生成；非 null 摘要已经把其存在性绑定进 state MAC。
+      if (missing?.code === 'ENOENT' && state.message_file_sha256 === null
+        && state.ownership.message_file === null) return null;
     }
     if (error instanceof StageTransactionError) throw error;
     throw ownershipInvalid();
@@ -2373,11 +2422,11 @@ async function verifyCancellationContext({
     || state.binding.repository_sha256 !== repositoryDigest
     || !identityWithCanonicalMatches(state.ownership?.temporary_root, temporaryRootIdentity)
     || !identityWithCanonicalMatches(state.ownership?.transaction_root, transactionRootIdentity)
-    || !identityRecordsMatch(state.ownership?.transaction_directory, transactionIdentity)
+    || !evidenceRecordsMatch(state.ownership?.transaction_directory, transactionIdentity)
     || state.ownership?.resource_directory?.name !== resourceName
     || !identityWithCanonicalMatches(state.ownership?.resource_directory, resourceIdentity)
     || !identityWithCanonicalMatches(state.ownership?.repository, repositoryIdentity)
-    || !identityRecordsMatch(state.ownership?.state_file, stateFile.identity)) {
+    || !evidenceRecordsMatch(state.ownership?.state_file, stateFile.identity)) {
     throw ownershipInvalid();
   }
 
@@ -2407,6 +2456,8 @@ async function verifyCancellationContext({
     state,
     stateFile,
     message,
+    // token 仅在当前调用内用于失败恢复后的完整 HMAC 复验，不进入 state、错误或 CLI 输出。
+    ownershipToken: ownership_token,
   };
 }
 
@@ -2432,19 +2483,46 @@ async function reverifyCancellationContext(context) {
     resource.canonical,
     context.state,
   );
-  if (!identityRecordsMatch(context.stateFile.identity, stateFile.identity)
+  if (!evidenceRecordsMatch(context.stateFile.identity, stateFile.identity)
     || context.stateFile.sha256 !== stateFile.sha256
     || canonicalJson(artifacts.entries) !== canonicalJson(context.state.ownership.tree)
     || (context.message === null) !== (message === null)
-    || (message !== null && (!identityRecordsMatch(context.message.identity, message.identity)
+    || (message !== null && (!evidenceRecordsMatch(context.message.identity, message.identity)
       || context.message.sha256 !== message.sha256))) {
     throw ownershipInvalid();
   }
   assertStateFileEvidence(context.state, artifacts);
 }
 
+async function restoredCancellationIsComplete(context, movedDirectory, runtime) {
+  const request = {
+    repository_root: context.repository.root,
+    transaction_id: context.state.transaction_id,
+    ownership_token: context.ownershipToken,
+  };
+  try {
+    await verifyCancellationContext(request, runtime);
+    return true;
+  } catch {
+    // 原路径不能通过完整复验时，才尝试把精确 moved UUID 恢复；绝不覆盖后来出现的路径。
+  }
+  try {
+    await lstat(context.transactionDirectory);
+    return false;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return false;
+  }
+  try {
+    await rename(movedDirectory, context.transactionDirectory);
+    await verifyCancellationContext(request, runtime);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 递归删除只接收已完成两轮所有权复核并原子移入同一固定根的 UUID 目录。
-async function deleteVerifiedCancellation(context) {
+async function deleteVerifiedCancellation(context, runtime) {
   await reverifyCancellationContext(context);
   const movedDirectory = path.join(
     context.transactionRoot,
@@ -2457,56 +2535,69 @@ async function deleteVerifiedCancellation(context) {
   try {
     await rename(context.transactionDirectory, movedDirectory);
   } catch {
-    throw ownershipInvalid();
-  }
-  const movedIdentity = await captureStableDirectory(movedDirectory, ownershipInvalid);
-  const movedResource = path.join(movedDirectory, context.resourceName);
-  const movedResourceIdentity = await captureStableDirectory(movedResource, ownershipInvalid);
-  const movedState = await readStableOwnedFile(
-    path.join(movedResource, 'state.json'),
-    movedResourceIdentity.canonical,
-    ownershipInvalid,
-  );
-  const movedArtifacts = await captureTransactionArtifacts(movedResource, ownershipInvalid);
-  const movedMessage = await readOptionalMessage(
-    movedResource,
-    movedResourceIdentity.canonical,
-    context.state,
-  );
-  const rootAfterMove = await captureStableDirectory(context.transactionRoot, ownershipInvalid);
-  if (!identityRecordsMatch(context.transactionIdentity, movedIdentity)
-    || !identityRecordsMatch(context.resourceIdentity, movedResourceIdentity)
-    || !identityRecordsMatch(context.stateFile.identity, movedState.identity)
-    || context.stateFile.sha256 !== movedState.sha256
-    || canonicalJson(movedArtifacts.entries) !== canonicalJson(context.state.ownership.tree)
-    || !identityWithCanonicalMatches(context.transactionRootIdentity, rootAfterMove)
-    || (context.message === null) !== (movedMessage === null)
-    || (movedMessage !== null && (!identityRecordsMatch(context.message.identity, movedMessage.identity)
-      || context.message.sha256 !== movedMessage.sha256))) {
-    throw ownershipInvalid();
-  }
-  assertStateFileEvidence(context.state, movedArtifacts);
-  // 删除目标在 Node 的同一 path 语义中再次证明位于固定根内，绝不把 root 或相邻目录交给 rm。
-  if (!isWithin(path.resolve(movedDirectory), path.resolve(context.transactionRoot))
-    || pathsAreEqual(movedDirectory, context.transactionRoot)) {
-    throw ownershipInvalid();
+    const retained = await restoredCancellationIsComplete(context, movedDirectory, runtime);
+    throw ownershipInvalid(retained, context.state.transaction_id);
   }
   try {
-    await rm(movedDirectory, { recursive: true, force: false });
+    const movedIdentity = await captureStableDirectory(movedDirectory, ownershipInvalid);
+    const movedResource = path.join(movedDirectory, context.resourceName);
+    const movedResourceIdentity = await captureStableDirectory(movedResource, ownershipInvalid);
+    const movedState = await readStableOwnedFile(
+      path.join(movedResource, 'state.json'),
+      movedResourceIdentity.canonical,
+      ownershipInvalid,
+    );
+    const movedArtifacts = await captureTransactionArtifacts(movedResource, ownershipInvalid);
+    const movedMessage = await readOptionalMessage(
+      movedResource,
+      movedResourceIdentity.canonical,
+      context.state,
+    );
+    const rootAfterMove = await captureStableDirectory(context.transactionRoot, ownershipInvalid);
+    if (!evidenceRecordsMatch(context.transactionIdentity, movedIdentity)
+      || !evidenceRecordsMatch(context.resourceIdentity, movedResourceIdentity)
+      || !evidenceRecordsMatch(context.stateFile.identity, movedState.identity)
+      || context.stateFile.sha256 !== movedState.sha256
+      || canonicalJson(movedArtifacts.entries) !== canonicalJson(context.state.ownership.tree)
+      || !identityWithCanonicalMatches(context.transactionRootIdentity, rootAfterMove)
+      || (context.message === null) !== (movedMessage === null)
+      || (movedMessage !== null && (!evidenceRecordsMatch(context.message.identity, movedMessage.identity)
+        || context.message.sha256 !== movedMessage.sha256))) {
+      throw ownershipInvalid();
+    }
+    assertStateFileEvidence(context.state, movedArtifacts);
+    // 删除目标在 Node 的同一 path 语义中再次证明位于固定根内，绝不把 root 或相邻目录交给 rm。
+    if (!isWithin(path.resolve(movedDirectory), path.resolve(context.transactionRoot))
+      || pathsAreEqual(movedDirectory, context.transactionRoot)) {
+      throw ownershipInvalid();
+    }
+    // 内部故障注入与默认实现都只接收已验证的 moved UUID；测试替身仍须委托真实 FS 变更。
+    const removeCancellationDirectory = runtime.removeCancellationDirectory ?? rm;
+    await removeCancellationDirectory(movedDirectory, { recursive: true, force: false });
+    try {
+      await lstat(movedDirectory);
+      throw new Error('Cancellation directory was not removed.');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
   } catch {
-    throw ownershipInvalid();
+    const retained = await restoredCancellationIsComplete(context, movedDirectory, runtime);
+    throw ownershipInvalid(retained, context.state.transaction_id);
   }
 }
 
-// ownership token 只在内存中参与 timing-safe 摘要/MAC 比较，任何失败都保留外部事务。
+// 删除前拒绝只表示本次未改写路径；UUID 一旦移动，完整复验是 retained 承诺的唯一依据。
 export async function cancelTransaction(request, runtime = {}) {
   let context;
   try {
     context = await verifyCancellationContext(request, runtime);
-    await deleteVerifiedCancellation(context);
+    await deleteVerifiedCancellation(context, runtime);
   } catch (error) {
     if (error instanceof StageTransactionError
       && error.code === 'TRANSACTION_OWNERSHIP_INVALID') {
+      if (TRANSACTION_ID_PATTERN.test(request?.transaction_id ?? '')) {
+        error.transaction_id ??= request.transaction_id;
+      }
       throw error;
     }
     throw ownershipInvalid();
@@ -2583,7 +2674,10 @@ async function runCli() {
       },
       repository_changed: false,
       retained: error?.retained === true,
-      transaction_preserved: error?.retained === true,
+      transaction_preserved: error?.transaction_preserved === true,
+      ...(TRANSACTION_ID_PATTERN.test(error?.transaction_id ?? '')
+        ? { transaction_id: error.transaction_id }
+        : {}),
     });
     process.exitCode = protocolError ? 2 : 1;
   }

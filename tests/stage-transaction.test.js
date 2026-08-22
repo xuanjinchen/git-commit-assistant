@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import {
   access,
+  chmod,
   link,
   mkdtemp,
   mkdir,
   lstat,
+  open,
   readFile,
   readlink,
   readdir,
@@ -125,6 +127,58 @@ async function readIndexBytes(root) {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function normalizedMode(metadata) {
+  return Number(metadata.mode & (typeof metadata.mode === 'bigint' ? 0o7777n : 0o7777));
+}
+
+async function rewriteAuthenticatedState(statePath, ownershipToken, update) {
+  const before = await lstat(statePath, { bigint: true });
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  update(state);
+  delete state.state_mac_sha256;
+  state.state_mac_sha256 = createHmac('sha256', Buffer.from(ownershipToken, 'utf8'))
+    .update(canonicalJson(state))
+    .digest('hex');
+
+  // 模拟 Task 5 的跨阶段契约：state 必须保留 inode，并以调用方持有的 token 原位重算 HMAC。
+  const handle = await open(statePath, 'r+');
+  try {
+    const opened = await handle.stat({ bigint: true });
+    assert.equal(String(opened.dev), String(before.dev));
+    assert.equal(String(opened.ino), String(before.ino));
+    await handle.truncate(0);
+    await handle.writeFile(`${canonicalJson(state)}\n`);
+  } finally {
+    await handle.close();
+  }
+  const after = await lstat(statePath, { bigint: true });
+  assert.equal(String(after.dev), String(before.dev));
+  assert.equal(String(after.ino), String(before.ino));
+}
+
+async function changeToDifferentObservableMode(t, candidate) {
+  const before = normalizedMode(await lstat(candidate, { bigint: true }));
+  const requestedModes = [before & ~0o222, before ^ 0o200, 0o400, 0o500];
+  for (const requested of requestedModes) {
+    await chmod(candidate, requested);
+    const after = normalizedMode(await lstat(candidate, { bigint: true }));
+    if (after === before) continue;
+    if (process.platform !== 'win32') assert.equal(after, requested & 0o7777);
+    return { before, after };
+  }
+  t.skip('This platform did not expose a mode-bit change through stat.');
+  return null;
 }
 
 async function rewriteIndexPaths(root, replacements) {
@@ -855,6 +909,42 @@ test('prepare stores external recovery evidence without token or patch plaintext
   assert.equal(state.binding.task_tree_oid, prepared.task_tree_oid);
   assert.equal(stateText.includes(prepared.ownership_token), false);
   assert.equal(stateText.includes('line 2 selected task'), false);
+  assert.equal(
+    state.ownership.transaction_directory.mode,
+    normalizedMode(await lstat(prepared.transaction_directory, { bigint: true })),
+  );
+  assert.equal(
+    state.ownership.resource_directory.mode,
+    normalizedMode(await lstat(resourceDirectory, { bigint: true })),
+  );
+  assert.equal(
+    state.ownership.state_file.mode,
+    normalizedMode(await lstat(path.join(resourceDirectory, 'state.json'), { bigint: true })),
+  );
+  const ownershipByPath = new Map(state.ownership.tree.map((entry) => [entry.path, entry]));
+  for (const entry of state.ownership.tree) {
+    const candidate = path.join(resourceDirectory, ...entry.path.split('/'));
+    assert.equal(entry.mode, normalizedMode(await lstat(candidate, { bigint: true })));
+    if (process.platform !== 'win32') {
+      assert.equal(entry.mode, entry.type === 'directory' ? 0o700 : 0o600);
+    }
+  }
+  for (const indexName of ['original.index', 'recovery.index', 'task.index']) {
+    assert.equal(ownershipByPath.get(indexName)?.type, 'file');
+  }
+  assert.equal(ownershipByPath.get('objects')?.type, 'directory');
+  assert.equal(ownershipByPath.get('snapshots')?.type, 'directory');
+  assert.equal(
+    state.ownership.tree.some((entry) =>
+      entry.type === 'file' && entry.path.startsWith('objects/')),
+    true,
+  );
+  assert.equal(
+    state.ownership.tree.some((entry) =>
+      entry.type === 'file' && entry.path.startsWith('snapshots/')),
+    true,
+  );
+  assert.equal(state.ownership.message_file, null);
   assert.equal(prepared.message_file, path.join(resourceDirectory, 'message.txt'));
   assert.match(
     path.basename(resourceDirectory),
@@ -1136,6 +1226,158 @@ test('cancel rejects transaction artifact inode and digest changes', async (t) =
   });
 });
 
+test('cancel rejects authenticated closure mode changes', async (t) => {
+  await t.test('state file mode', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const statePath = path.join(path.dirname(prepared.message_file), 'state.json');
+    const changed = await changeToDifferentObservableMode(subtest, statePath);
+    if (changed === null) return;
+    const before = await snapshotRepository(root);
+
+    try {
+      await assertCancellationRetained({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+      }, { temporaryRoot });
+      assert.deepEqual(await snapshotRepository(root), before);
+      await access(prepared.transaction_directory);
+    } finally {
+      await chmod(statePath, changed.before).catch(() => {});
+    }
+  });
+
+  await t.test('snapshot directory mode', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const snapshots = path.join(path.dirname(prepared.message_file), 'snapshots');
+    const changed = await changeToDifferentObservableMode(subtest, snapshots);
+    if (changed === null) return;
+    const before = await snapshotRepository(root);
+
+    try {
+      await assertCancellationRetained({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+      }, { temporaryRoot });
+      assert.deepEqual(await snapshotRepository(root), before);
+      await access(prepared.transaction_directory);
+    } finally {
+      await chmod(snapshots, changed.before).catch(() => {});
+    }
+  });
+
+  await t.test('authenticated message mode', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const statePath = path.join(path.dirname(prepared.message_file), 'state.json');
+    const messageBytes = Buffer.from('mode-bound candidate\n');
+    await writeFile(prepared.message_file, messageBytes, { flag: 'wx', mode: 0o600 });
+    await chmod(prepared.message_file, 0o600);
+    const metadata = await lstat(prepared.message_file, { bigint: true });
+    await rewriteAuthenticatedState(statePath, prepared.ownership_token, (state) => {
+      state.message_file_sha256 = sha256(messageBytes);
+      state.ownership.message_file = {
+        dev: String(metadata.dev),
+        ino: String(metadata.ino),
+        mode: normalizedMode(metadata),
+      };
+    });
+    const changed = await changeToDifferentObservableMode(subtest, prepared.message_file);
+    if (changed === null) return;
+    const before = await snapshotRepository(root);
+
+    try {
+      await assertCancellationRetained({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+      }, { temporaryRoot });
+      assert.deepEqual(await snapshotRepository(root), before);
+      await access(prepared.transaction_directory);
+    } finally {
+      await chmod(prepared.message_file, changed.before).catch(() => {});
+    }
+  });
+});
+
+test('cancel reports retained only after a failed removal restores the complete closure', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const transactionRoot = path.dirname(prepared.transaction_directory);
+  const sibling = path.join(transactionRoot, 'sibling-before-remove-failure');
+  const rootSentinel = path.join(temporaryRoot, 'root-sentinel-before-remove-failure.txt');
+  await mkdir(sibling);
+  await writeFile(path.join(sibling, 'keep.txt'), 'keep sibling bytes\n');
+  await writeFile(rootSentinel, 'keep temporary-root bytes\n');
+  const before = await snapshotRepository(root);
+
+  await assert.rejects(
+    cancelTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+    }, {
+      temporaryRoot,
+      removeCancellationDirectory: (candidate) =>
+        rm(candidate, { recursive: false, force: false }),
+    }),
+    (error) => error.code === 'TRANSACTION_OWNERSHIP_INVALID'
+      && error.retained === true
+      && error.transaction_preserved === true
+      && error.transaction_id === prepared.transaction_id,
+  );
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(rootSentinel, 'utf8'), 'keep temporary-root bytes\n');
+  assert.equal(await readFile(path.join(sibling, 'keep.txt'), 'utf8'), 'keep sibling bytes\n');
+  await access(prepared.transaction_directory);
+  assert.deepEqual(
+    (await readdir(transactionRoot)).filter((name) => name.startsWith('.cancel-')),
+    [],
+  );
+});
+
+test('cancel does not claim retention after removal deletes an owned artifact', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const transactionRoot = path.dirname(prepared.transaction_directory);
+  const resourceName = path.basename(path.dirname(prepared.message_file));
+  const sibling = path.join(transactionRoot, 'sibling-after-partial-remove');
+  const rootSentinel = path.join(temporaryRoot, 'root-sentinel-after-partial-remove.txt');
+  await mkdir(sibling);
+  await writeFile(path.join(sibling, 'keep.txt'), 'preserve this sibling\n');
+  await writeFile(rootSentinel, 'preserve temporary-root bytes\n');
+  const before = await snapshotRepository(root);
+
+  await assert.rejects(
+    cancelTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+    }, {
+      temporaryRoot,
+      removeCancellationDirectory: async (candidate) => {
+        await rm(path.join(candidate, resourceName, 'task.index'), { force: false });
+        throw Object.assign(new Error('Injected failure after a real partial removal.'), {
+          code: 'EIO',
+        });
+      },
+    }),
+    (error) => error.code === 'TRANSACTION_OWNERSHIP_INVALID'
+      && error.retained === false
+      && error.transaction_preserved === false
+      && error.transaction_id === prepared.transaction_id,
+  );
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(rootSentinel, 'utf8'), 'preserve temporary-root bytes\n');
+  assert.equal(await readFile(path.join(sibling, 'keep.txt'), 'utf8'), 'preserve this sibling\n');
+  await access(prepared.transaction_directory);
+  await assert.rejects(
+    access(path.join(prepared.transaction_directory, resourceName, 'task.index')),
+    { code: 'ENOENT' },
+  );
+  await access(path.join(prepared.transaction_directory, resourceName, 'original.index'));
+});
+
 test('a second cancel is rejected without touching the repository or adjacent directory', async (t) => {
   const { root, prepared, temporaryRoot } = await preparedFixture(t);
   const adjacent = path.join(temporaryRoot, 'adjacent-after-cancel');
@@ -1177,6 +1419,34 @@ test('cancel permits a message only at the exact retained path', async (t) => {
   await assert.rejects(access(prepared.transaction_directory), { code: 'ENOENT' });
 });
 
+test('cancel retains a transaction when an authenticated message is missing', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const statePath = path.join(path.dirname(prepared.message_file), 'state.json');
+  const messageBytes = Buffer.from('authenticated candidate commit message\n');
+  await writeFile(prepared.message_file, messageBytes, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const messageMetadata = await lstat(prepared.message_file, { bigint: true });
+  await rewriteAuthenticatedState(statePath, prepared.ownership_token, (state) => {
+    state.message_file_sha256 = sha256(messageBytes);
+    state.ownership.message_file = {
+      dev: String(messageMetadata.dev),
+      ino: String(messageMetadata.ino),
+      mode: normalizedMode(messageMetadata),
+    };
+  });
+  await rm(prepared.message_file);
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  await access(prepared.transaction_directory);
+});
+
 test('cancel CLI emits one safe JSON line for success and retained failures', async (t) => {
   const root = await repositoryWithBaseline(t);
   await writeFile(path.join(root, 'feature.txt'), 'line 1\nCLI cancellation\nline 3\n');
@@ -1199,7 +1469,10 @@ test('cancel CLI emits one safe JSON line for success and retained failures', as
   assert.equal(wrong.status, 1);
   assert.equal(wrong.stderr, '');
   assert.equal(wrong.stdout.split('\n').length, 2);
-  assert.equal(JSON.parse(wrong.stdout).retained, true);
+  const wrongResult = JSON.parse(wrong.stdout);
+  assert.equal(wrongResult.retained, true);
+  assert.equal(wrongResult.transaction_preserved, true);
+  assert.equal(wrongResult.transaction_id, prepared.transaction_id);
   assert.equal(wrong.stdout.includes(prepared.ownership_token), false);
 
   const success = await runCli('cancel', request);
@@ -1216,7 +1489,10 @@ test('cancel CLI emits one safe JSON line for success and retained failures', as
   const repeated = await runCli('cancel', request);
   assert.equal(repeated.status, 1);
   assert.equal(repeated.stderr, '');
-  assert.equal(JSON.parse(repeated.stdout).retained, true);
+  const repeatedResult = JSON.parse(repeated.stdout);
+  assert.equal(repeatedResult.retained, true);
+  assert.equal(repeatedResult.transaction_preserved, true);
+  assert.equal(repeatedResult.transaction_id, prepared.transaction_id);
   assert.equal(repeated.stdout.includes(prepared.ownership_token), false);
   assert.deepEqual(await snapshotRepository(root), before);
 });
