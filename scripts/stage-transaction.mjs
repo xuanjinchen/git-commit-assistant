@@ -17,6 +17,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { deflateSync } from 'node:zlib';
 
 const SCHEMA_VERSION = 1;
 
@@ -734,6 +735,66 @@ async function mutableTransactionGit(repository, args, transaction, runtime, opt
   );
 }
 
+async function materializeLooseObject(repository, transaction, oid, objectBytes) {
+  const objectDirectory = path.join(transaction.objectDirectory, oid.slice(0, 2));
+  const objectFile = path.join(objectDirectory, oid.slice(2));
+  const compressed = deflateSync(objectBytes);
+  await withTransactionMutation(
+    repository,
+    transaction,
+    [objectDirectory],
+    async () => {
+      try {
+        await mkdir(objectDirectory, { mode: 0o700 });
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        const metadata = await lstat(objectDirectory);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+          throw stopped('TRANSACTION_IDENTITY_CHANGED');
+        }
+      }
+    },
+  );
+  await withTransactionMutation(
+    repository,
+    transaction,
+    [objectFile],
+    async () => {
+      try {
+        await writeFile(objectFile, compressed, { mode: 0o600, flag: 'wx' });
+      } catch (error) {
+        if (error?.code !== 'EEXIST'
+          || !compressed.equals(await readFile(objectFile))) {
+          throw stopped('TRANSACTION_IDENTITY_CHANGED');
+        }
+      }
+      await chmod(objectFile, 0o600);
+    },
+  );
+}
+
+// Git 只负责按仓库 object format 计算 OID；identity post-check 通过后才由受控本地写入物化 loose object。
+async function hashAndMaterializeObject(repository, type, bytes, transaction, runtime) {
+  const { stdout } = await mutableTransactionGit(
+    repository,
+    ['hash-object', '-t', type, '--stdin'],
+    transaction,
+    runtime,
+    { input: bytes, env: externalGitEnvironment(transaction) },
+  );
+  const oid = stdout.trim();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid)) {
+    throw new StageTransactionError('GIT_OUTPUT_INVALID', 'Git returned an invalid object ID.');
+  }
+  const objectBytes = Buffer.concat([Buffer.from(`${type} ${bytes.length}\0`), bytes]);
+  const algorithm = oid.length === 40 ? 'sha1' : 'sha256';
+  if (createHash(algorithm).update(objectBytes).digest('hex') !== oid) {
+    throw new StageTransactionError('GIT_OUTPUT_INVALID', 'Git returned an inconsistent object ID.');
+  }
+  await materializeLooseObject(repository, transaction, oid, objectBytes);
+  return oid;
+}
+
 async function removeOwnedTransaction(repository, transaction) {
   let currentIdentity;
   try {
@@ -993,10 +1054,10 @@ async function reconstructPatches(repository, units, runtime) {
       if (matching.length === 0) continue;
       const patchBytes = await readEntryPatch(repository, descriptor, entry, runtime);
       if (matching.every((unit) => unit.kind === 'text_hunk')) {
-        patches.push(patchForTextUnits(patchBytes, matching));
+        patches.push({ bytes: patchForTextUnits(patchBytes, matching), units: [...matching] });
       } else if (matching.length === 1
         && matching[0].patch_sha256 === digest(patchBytes)) {
-        patches.push(patchBytes);
+        patches.push({ bytes: patchBytes, units: [...matching] });
       } else {
         throw stopped('MANIFEST_CHANGED');
       }
@@ -1014,26 +1075,193 @@ function patchWithoutIndexIdentity(patchBytes) {
   );
 }
 
+function transactionPathForGitPath(transactionRoot, gitPathValue) {
+  if (typeof gitPathValue !== 'string' || gitPathValue.length === 0
+    || gitPathValue.includes('\0')
+    || (path.sep === '\\' && gitPathValue.includes('\\'))) {
+    throw stopped('UNSAFE_WORKTREE_PATH');
+  }
+  const candidate = path.resolve(transactionRoot, ...gitPathValue.split('/'));
+  if (candidate === transactionRoot || !isWithin(candidate, transactionRoot)) {
+    throw stopped('UNSAFE_WORKTREE_PATH');
+  }
+  return candidate;
+}
+
+function parseExternalIndexEntry(stdout, expectedPath) {
+  const records = splitNull(stdout).filter((record) => record.length !== 0);
+  if (records.length === 0) return null;
+  if (records.length !== 1) throw stopped('SELECTION_CANNOT_APPLY');
+  const separator = records[0].indexOf(0x09);
+  const header = separator === -1 ? '' : records[0].subarray(0, separator).toString('ascii');
+  const match = /^(\d{6}) ([0-9a-f]{40}|[0-9a-f]{64}) 0$/u.exec(header);
+  if (match === null
+    || records[0].subarray(separator + 1).toString('utf8') !== expectedPath) {
+    throw stopped('SELECTION_CANNOT_APPLY');
+  }
+  return { mode: match[1], oid: match[2] };
+}
+
+async function externalIndexEntry(repository, gitPathValue, transaction, indexPath, runtime) {
+  const { stdout } = await mutableTransactionGit(
+    repository,
+    ['ls-files', '--stage', '-z', '--', gitPathValue],
+    transaction,
+    runtime,
+    {
+      encoding: 'buffer',
+      env: {
+        ...externalGitEnvironment(transaction, indexPath),
+        GIT_LITERAL_PATHSPECS: '1',
+      },
+    },
+  );
+  return parseExternalIndexEntry(stdout, gitPathValue);
+}
+
+async function writePatchBase(repository, patch, applyDirectory, transaction, indexPath, runtime) {
+  const representative = patch.units[0];
+  if (patch.units.some((unit) => unit.path !== representative.path
+    || unit.old_path !== representative.old_path
+    || unit.old_mode !== representative.old_mode
+    || unit.new_mode !== representative.new_mode)) {
+    throw stopped('SELECTION_CANNOT_APPLY');
+  }
+  const oldPath = representative.old_path ?? representative.path;
+  const entry = await externalIndexEntry(repository, oldPath, transaction, indexPath, runtime);
+  if (representative.old_mode === null) {
+    if (entry !== null) throw stopped('SELECTION_CANNOT_APPLY');
+    return { oldPath, newPath: representative.path, newMode: representative.new_mode };
+  }
+  if (entry === null || entry.mode !== representative.old_mode
+    || !['100644', '100755'].includes(entry.mode)) {
+    throw stopped('SELECTION_CANNOT_APPLY');
+  }
+  const environment = externalGitEnvironment(transaction, indexPath);
+  const { stdout: bytes } = await mutableTransactionGit(
+    repository,
+    ['cat-file', 'blob', entry.oid],
+    transaction,
+    runtime,
+    { encoding: 'buffer', env: environment },
+  );
+  const baseFile = transactionPathForGitPath(applyDirectory, oldPath);
+  await withTransactionMutation(
+    repository,
+    transaction,
+    [path.dirname(baseFile), baseFile],
+    async () => {
+      await mkdir(path.dirname(baseFile), { recursive: true, mode: 0o700 });
+      await writeFile(baseFile, bytes, { mode: entry.mode === '100755' ? 0o700 : 0o600, flag: 'wx' });
+    },
+  );
+  return { oldPath, newPath: representative.path, newMode: representative.new_mode };
+}
+
+async function updateIndexFromAppliedPatch(
+  repository,
+  applied,
+  applyDirectory,
+  transaction,
+  indexPath,
+  runtime,
+) {
+  const environment = {
+    ...externalGitEnvironment(transaction, indexPath),
+    GIT_LITERAL_PATHSPECS: '1',
+  };
+  if (applied.oldPath !== applied.newPath || applied.newMode === null) {
+    await mutableTransactionGit(
+      repository,
+      ['update-index', '--force-remove', '--', applied.oldPath],
+      transaction,
+      runtime,
+      { env: environment },
+    );
+  }
+  if (applied.newMode === null) return;
+  const resultFile = transactionPathForGitPath(applyDirectory, applied.newPath);
+  const bytes = await withTransactionMutation(
+    repository,
+    transaction,
+    [resultFile],
+    async () => {
+      const metadataBefore = await lstat(resultFile);
+      const result = await readFile(resultFile);
+      const metadataAfter = await lstat(resultFile);
+      if (!metadataBefore.isFile() || metadataBefore.isSymbolicLink()
+        || !metadataAfter.isFile() || metadataAfter.isSymbolicLink()
+        || !hasSameFilesystemIdentity(metadataBefore, metadataAfter)
+        || metadataBefore.size !== metadataAfter.size
+        || metadataBefore.mtimeMs !== metadataAfter.mtimeMs
+        || metadataBefore.ctimeMs !== metadataAfter.ctimeMs) {
+        throw stopped('TRANSACTION_IDENTITY_CHANGED');
+      }
+      return result;
+    },
+  );
+  const oid = await hashAndMaterializeObject(repository, 'blob', bytes, transaction, runtime);
+  await mutableTransactionGit(
+    repository,
+    [
+      'update-index', '--add', '--info-only', '--cacheinfo',
+      `${applied.newMode},${oid},${applied.newPath}`,
+    ],
+    transaction,
+    runtime,
+    { env: environment },
+  );
+}
+
 async function applyPatches(repository, patches, transaction, indexPath, runtime) {
   for (let index = 0; index < patches.length; index += 1) {
     const patchFile = path.join(transaction.resourceDirectory, `apply-${index}.patch`);
+    const applyDirectory = path.join(transaction.resourceDirectory, `apply-${index}`);
     await withTransactionMutation(
       repository,
       transaction,
-      [patchFile],
-      () => writeFile(patchFile, patches[index], { mode: 0o600, flag: 'wx' }),
+      [patchFile, applyDirectory],
+      async () => {
+        await writeFile(patchFile, patches[index].bytes, { mode: 0o600, flag: 'wx' });
+        await mkdir(applyDirectory, { mode: 0o700 });
+      },
     );
     try {
-      const environment = externalGitEnvironment(transaction, indexPath);
-      await mutableTransactionGit(repository, [
-        'apply', '--cached', '--binary', '--unidiff-zero', '--whitespace=nowarn', patchFile,
-      ], transaction, runtime, { env: environment });
+      const applied = await writePatchBase(
+        repository,
+        patches[index],
+        applyDirectory,
+        transaction,
+        indexPath,
+        runtime,
+      );
+      // 非 cached apply 只改事务自有 scratch worktree，ODB 内容随后由已验证 bytes 本地物化。
+      await withTransactionMutation(
+        repository,
+        transaction,
+        [patchFile, applyDirectory],
+        () => runGitAtRoot(applyDirectory, [
+          '-c', 'core.autocrlf=false',
+          'apply', '--binary', '--unidiff-zero', '--whitespace=nowarn', patchFile,
+        ], runtime),
+      );
+      await updateIndexFromAppliedPatch(
+        repository,
+        applied,
+        applyDirectory,
+        transaction,
+        indexPath,
+        runtime,
+      );
     } finally {
       await withTransactionMutation(
         repository,
         transaction,
-        [patchFile],
-        () => rm(patchFile, { force: true }),
+        [patchFile, applyDirectory],
+        async () => {
+          await rm(patchFile, { force: true });
+          await rm(applyDirectory, { recursive: true, force: true });
+        },
       );
     }
   }
@@ -1049,23 +1277,16 @@ async function addUntrackedUnits(repository, units, snapshots, transaction, runt
       || snapshotMode !== unit.new_mode) {
       throw stopped('MANIFEST_CHANGED');
     }
-    // 已验证 Buffer 直接进入 stdin；落盘快照仅作恢复证据，不再参与 blob identity。
-    const hashEnvironment = {
-      ...externalGitEnvironment(transaction),
-      GIT_LITERAL_PATHSPECS: '1',
-    };
-    const { stdout: oid } = await mutableTransactionGit(
+    // 已验证 Buffer 直接参与纯 OID 计算和本地物化；落盘快照仅作恢复证据。
+    const oid = await hashAndMaterializeObject(
       repository,
-      ['hash-object', '-w', '--stdin'],
+      'blob',
+      snapshot.bytes,
       transaction,
       runtime,
-      {
-        input: snapshot.bytes,
-        env: hashEnvironment,
-      },
     );
     await mutableTransactionGit(repository, [
-      'update-index', '--add', '--cacheinfo', `${unit.new_mode},${oid.trim()},${unit.path}`,
+      'update-index', '--add', '--info-only', '--cacheinfo', `${unit.new_mode},${oid},${unit.path}`,
     ], transaction, runtime, {
       env: {
         ...externalGitEnvironment(transaction),
@@ -1073,6 +1294,110 @@ async function addUntrackedUnits(repository, units, snapshots, transaction, runt
       },
     });
   }
+}
+
+function parseExternalIndexEntries(stdout) {
+  return splitNull(stdout).filter((record) => record.length !== 0).map((record) => {
+    const separator = record.indexOf(0x09);
+    const header = separator === -1 ? '' : record.subarray(0, separator).toString('ascii');
+    const match = /^(\d{6}) ([0-9a-f]{40}|[0-9a-f]{64}) 0$/u.exec(header);
+    const pathBytes = separator === -1 ? Buffer.alloc(0) : record.subarray(separator + 1);
+    if (match === null || pathBytes.length === 0) {
+      throw new StageTransactionError('GIT_OUTPUT_INVALID', 'Git returned invalid index entries.');
+    }
+    return { mode: match[1], oid: match[2], pathBytes };
+  });
+}
+
+function splitGitPathBytes(pathBytes) {
+  const segments = [];
+  let start = 0;
+  for (let index = 0; index <= pathBytes.length; index += 1) {
+    if (index !== pathBytes.length && pathBytes[index] !== 0x2f) continue;
+    const segment = pathBytes.subarray(start, index);
+    if (segment.length === 0 || segment.equals(Buffer.from('.'))
+      || segment.equals(Buffer.from('..'))) {
+      throw new StageTransactionError('GIT_OUTPUT_INVALID', 'Git returned an unsafe index path.');
+    }
+    segments.push(segment);
+    start = index + 1;
+  }
+  return segments;
+}
+
+function addIndexEntryToTree(root, entry) {
+  const segments = splitGitPathBytes(entry.pathBytes);
+  let current = root;
+  for (const segment of segments.slice(0, -1)) {
+    const key = segment.toString('hex');
+    if (current.files.has(key)) {
+      throw new StageTransactionError('GIT_OUTPUT_INVALID', 'Git returned colliding index paths.');
+    }
+    let child = current.directories.get(key);
+    if (child === undefined) {
+      child = { name: segment, files: new Map(), directories: new Map() };
+      current.directories.set(key, child);
+    }
+    current = child;
+  }
+  const name = segments.at(-1);
+  const key = name.toString('hex');
+  if (current.files.has(key) || current.directories.has(key)) {
+    throw new StageTransactionError('GIT_OUTPUT_INVALID', 'Git returned duplicate index paths.');
+  }
+  current.files.set(key, { ...entry, name });
+}
+
+function compareTreeEntries(left, right) {
+  // Git tree 排序把目录名的虚拟终止字节视为 `/`，不能直接使用 locale 或普通 Buffer 排序。
+  const commonLength = Math.min(left.name.length, right.name.length);
+  for (let index = 0; index < commonLength; index += 1) {
+    if (left.name[index] !== right.name[index]) return left.name[index] - right.name[index];
+  }
+  const leftTerminator = left.name.length === commonLength && left.tree ? 0x2f : 0;
+  const rightTerminator = right.name.length === commonLength && right.tree ? 0x2f : 0;
+  const leftNext = left.name.length === commonLength ? leftTerminator : left.name[commonLength];
+  const rightNext = right.name.length === commonLength ? rightTerminator : right.name[commonLength];
+  return leftNext - rightNext;
+}
+
+async function materializeTreeNode(repository, node, transaction, runtime) {
+  const entries = [...node.files.values()].map((entry) => ({
+    name: entry.name,
+    mode: entry.mode,
+    oid: entry.oid,
+    tree: false,
+  }));
+  for (const child of node.directories.values()) {
+    entries.push({
+      name: child.name,
+      mode: '40000',
+      oid: await materializeTreeNode(repository, child, transaction, runtime),
+      tree: true,
+    });
+  }
+  entries.sort(compareTreeEntries);
+  // tree entry 是 mode、原始路径 bytes、NUL 和 raw OID；不得经文本路径重编码。
+  const bytes = Buffer.concat(entries.flatMap((entry) => [
+    Buffer.from(`${entry.mode} `),
+    entry.name,
+    Buffer.from([0]),
+    Buffer.from(entry.oid, 'hex'),
+  ]));
+  return hashAndMaterializeObject(repository, 'tree', bytes, transaction, runtime);
+}
+
+async function writeExternalIndexTree(repository, transaction, indexPath, runtime) {
+  const { stdout } = await mutableTransactionGit(
+    repository,
+    ['ls-files', '--stage', '-z'],
+    transaction,
+    runtime,
+    { encoding: 'buffer', env: externalGitEnvironment(transaction, indexPath) },
+  );
+  const root = { files: new Map(), directories: new Map() };
+  for (const entry of parseExternalIndexEntries(stdout)) addIndexEntryToTree(root, entry);
+  return materializeTreeNode(repository, root, transaction, runtime);
 }
 
 async function secureTransactionFiles(repository, transaction, directory) {
@@ -1200,14 +1525,12 @@ export async function prepareTransaction({
       if (error instanceof StageTransactionError) throw error;
       throw stopped('SELECTION_CANNOT_APPLY');
     }
-    const { stdout: taskTree } = await mutableTransactionGit(
+    const taskTreeOid = await writeExternalIndexTree(
       repository,
-      ['write-tree'],
       transaction,
+      transaction.taskIndex,
       runtime,
-      { env: externalGitEnvironment(transaction) },
     );
-    const taskTreeOid = taskTree.trim();
 
     await mutableTransactionGit(
       repository,
@@ -1219,10 +1542,13 @@ export async function prepareTransaction({
     try {
       const retainedPatches = (await reconstructPatches(repository, staged.retained, runtime))
         // 原子单元与任务路径完全分离，HEAD blob identity 仍成立；同文件文本恢复才需移除旧 blob 约束。
-        .map((patchBytes) => staged.retained.some((unit) =>
-          unit.kind !== 'text_hunk' && unit.patch_sha256 === digest(patchBytes))
-          ? patchBytes
-          : patchWithoutIndexIdentity(patchBytes));
+        .map((patch) => ({
+          ...patch,
+          bytes: patch.units.some((unit) =>
+            unit.kind !== 'text_hunk' && unit.patch_sha256 === digest(patch.bytes))
+            ? patch.bytes
+            : patchWithoutIndexIdentity(patch.bytes),
+        }));
       await applyPatches(
         repository,
         retainedPatches,
@@ -1231,28 +1557,19 @@ export async function prepareTransaction({
         runtime,
       );
       const recoveryEnvironment = externalGitEnvironment(transaction, transaction.recoveryIndex);
-      const { stdout: temporaryCommit } = await mutableTransactionGit(
-        repository,
-        ['commit-tree', taskTreeOid, '-p', manifest.head_oid, '-m', 'recovery preview baseline'],
-        transaction,
-        runtime,
-        { env: recoveryEnvironment },
-      );
       // 预演只比较 task tree 之后应恢复的 staged delta，不能把任务内容再次计入恢复证据。
-      await git(repository, [
-        'diff', '--cached', '--check', temporaryCommit.trim(),
-      ], runtime, { env: recoveryEnvironment });
-      const { stdout: recoveryPatch } = await git(repository, [
-        'diff', '--cached', '--binary', '--full-index', temporaryCommit.trim(),
-      ], runtime, { encoding: 'buffer', env: recoveryEnvironment });
-      const { stdout: recoveryTree } = await mutableTransactionGit(
+      await mutableTransactionGit(repository, [
+        'diff', '--cached', '--check', taskTreeOid,
+      ], transaction, runtime, { env: recoveryEnvironment });
+      const { stdout: recoveryPatch } = await mutableTransactionGit(repository, [
+        'diff', '--cached', '--binary', '--full-index', taskTreeOid,
+      ], transaction, runtime, { encoding: 'buffer', env: recoveryEnvironment });
+      const recoveryTreeOid = await writeExternalIndexTree(
         repository,
-        ['write-tree'],
         transaction,
+        transaction.recoveryIndex,
         runtime,
-        { env: recoveryEnvironment },
       );
-      const recoveryTreeOid = recoveryTree.trim();
       const ownershipToken = randomBytes(32).toString('hex');
       const binding = {
         repository_sha256: digest(Buffer.from(repository.root)),

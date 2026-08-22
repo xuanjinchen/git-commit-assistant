@@ -201,6 +201,90 @@ async function createTemporaryRoot(t) {
   return temporaryRoot;
 }
 
+async function redirectExternalObjectDirectory(repositoryRoot, options) {
+  const externalObjectDirectory = options.env?.GIT_OBJECT_DIRECTORY;
+  assert.equal(typeof externalObjectDirectory, 'string');
+  const mainObjectDirectory = path.resolve(
+    repositoryRoot,
+    (await runGit(repositoryRoot, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+  );
+  const displacedObjectDirectory = `${externalObjectDirectory}-displaced`;
+  await rename(externalObjectDirectory, displacedObjectDirectory);
+  // 保留被换走的只读对象作为 alternate，让真实 Git 能走完并暴露主库写入副作用。
+  options.env.GIT_ALTERNATE_OBJECT_DIRECTORIES = [
+    displacedObjectDirectory,
+    options.env.GIT_ALTERNATE_OBJECT_DIRECTORIES,
+  ].filter(Boolean).join(path.delimiter);
+  await symlink(
+    mainObjectDirectory,
+    externalObjectDirectory,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+}
+
+async function findTransactionObjectDirectory(temporaryRoot) {
+  const transactionRoot = path.join(temporaryRoot, 'git-commit-assistant');
+  const [transactionName] = await readdir(transactionRoot);
+  const transactionDirectory = path.join(transactionRoot, transactionName);
+  const [resourceName] = (await readdir(transactionDirectory))
+    .filter((name) => name.startsWith('resources-'));
+  return path.join(transactionDirectory, resourceName, 'objects');
+}
+
+async function assertMainOdbPreservedAtGitWriter(t, command) {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected writer change\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const before = await snapshotRepository(root);
+  let objectDirectoryReplaced = false;
+  let commitTreeCalled = false;
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        const transactionRoot = path.join(temporaryRoot, 'git-commit-assistant');
+        if (args[0] === 'commit-tree') commitTreeCalled = true;
+        const phaseMatches = (command === 'apply' && args.includes('apply'))
+          || (command === 'write-tree' && args[0] === 'hash-object'
+            && args[args.indexOf('-t') + 1] === 'tree')
+          || (command === 'commit-tree' && args[0] === 'diff' && args.includes('--check'));
+        let externalObjectDirectory = options.env?.GIT_OBJECT_DIRECTORY;
+        if (!objectDirectoryReplaced && phaseMatches) {
+          externalObjectDirectory ??= await findTransactionObjectDirectory(temporaryRoot);
+          assert.equal(externalObjectDirectory.startsWith(`${transactionRoot}${path.sep}`), true);
+          objectDirectoryReplaced = true;
+          const redirectionOptions = typeof options.env?.GIT_OBJECT_DIRECTORY === 'string'
+            ? options
+            : {
+              env: {
+                ...options.env,
+                GIT_OBJECT_DIRECTORY: externalObjectDirectory,
+              },
+            };
+          await redirectExternalObjectDirectory(root, redirectionOptions);
+        }
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+    ({ code }) => code === 'TRANSACTION_IDENTITY_CHANGED',
+  );
+
+  assert.equal(objectDirectoryReplaced, true);
+  if (command === 'commit-tree') assert.equal(commitTreeCalled, false);
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+}
+
 async function prepareTransaction(request, runtime) {
   return stageTransaction.prepareTransaction(request, runtime);
 }
@@ -788,6 +872,70 @@ test('prepare hashes selected untracked bytes from the verified buffer when snap
   );
 });
 
+test('prepare preserves the main ODB when its external ODB identity changes at untracked hashing', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const untrackedBytes = Buffer.from('identity redirected untracked bytes\n');
+  await writeFile(path.join(root, 'selected-untracked.txt'), untrackedBytes);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'untracked');
+  const blobOid = (await runGit(root, ['hash-object', '--stdin'], {
+    input: untrackedBytes,
+  })).stdout.trim();
+  await assert.rejects(runGit(root, ['cat-file', '-e', blobOid]));
+  const before = await snapshotRepository(root);
+  let objectDirectoryReplaced = false;
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        if (!objectDirectoryReplaced && args[0] === 'hash-object' && args.includes('--stdin')) {
+          objectDirectoryReplaced = true;
+          const externalObjectDirectory = options.env.GIT_OBJECT_DIRECTORY;
+          const mainObjectDirectory = path.resolve(
+            repositoryRoot,
+            (await runGit(repositoryRoot, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+          );
+          await rename(externalObjectDirectory, `${externalObjectDirectory}-displaced`);
+          // 在真实 Git 启动入口把 ODB 改指主库；纯哈希必须在 post-check 前保持零写入。
+          await symlink(
+            mainObjectDirectory,
+            externalObjectDirectory,
+            process.platform === 'win32' ? 'junction' : 'dir',
+          );
+        }
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+    ({ code }) => code === 'TRANSACTION_IDENTITY_CHANGED',
+  );
+
+  assert.equal(objectDirectoryReplaced, true);
+  assert.deepEqual(await snapshotRepository(root), before);
+  await assert.rejects(runGit(root, ['cat-file', '-e', blobOid]));
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
+test('prepare preserves the main ODB when its external ODB identity changes at apply', async (t) => {
+  await assertMainOdbPreservedAtGitWriter(t, 'apply');
+});
+
+test('prepare preserves the main ODB when its external ODB identity changes at write-tree', async (t) => {
+  await assertMainOdbPreservedAtGitWriter(t, 'write-tree');
+});
+
+test('prepare preserves the main ODB when its external ODB identity changes at commit-tree', async (t) => {
+  await assertMainOdbPreservedAtGitWriter(t, 'commit-tree');
+});
+
 test('prepare stops and removes owned files when transaction resource identity changes', async (t) => {
   const root = await repositoryWithBaseline(t);
   const temporaryRoot = await createTemporaryRoot(t);
@@ -1041,7 +1189,7 @@ test('prepare rejects a stale manifest', async (t) => {
   );
 });
 
-test('prepare maps a real independently inapplicable external-index selection', async (t) => {
+test('prepare maps a real independently inapplicable scratch selection', async (t) => {
   const root = await repositoryForPreparation(t);
   const temporaryRoot = await createTemporaryRoot(t);
   const manifest = await inspectRepository({ repository_root: root });
@@ -1056,9 +1204,9 @@ test('prepare maps a real independently inapplicable external-index selection', 
     }, {
       temporaryRoot,
       runGit: async (repositoryRoot, args, options) => {
-        if (args[0] === 'apply') {
-          // 真实破坏外部 index 的必要 entry，再由真实 git apply 判定该 selection 已无法独立应用。
-          await runGit(repositoryRoot, ['update-index', '--force-remove', '--', selected.path], options);
+        if (args.includes('apply')) {
+          // 真实破坏 scratch preimage，再由真实 git apply 判定该 selection 已无法独立应用。
+          await writeFile(path.join(repositoryRoot, selected.path), 'injected incompatible bytes\n');
         }
         return runGit(repositoryRoot, args, options);
       },
