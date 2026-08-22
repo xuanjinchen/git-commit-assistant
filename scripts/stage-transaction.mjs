@@ -64,18 +64,24 @@ function unitId(unit) {
 async function defaultRunGit(repositoryRoot, args, options = {}) {
   return new Promise((resolve, reject) => {
     let stdinError;
+    const childEnvironment = {
+      ...process.env,
+      // 禁止只读命令借机刷新真实索引，保持 inspect 的字节级零副作用契约。
+      GIT_OPTIONAL_LOCKS: '0',
+      ...(options.env ?? {}),
+    };
+    for (const name of options.unsetEnv ?? []) delete childEnvironment[name];
     const child = execFile('git', args, {
       cwd: repositoryRoot,
       encoding: options.encoding ?? 'utf8',
-      env: {
-        ...process.env,
-        // 禁止只读命令借机刷新真实索引，保持 inspect 的字节级零副作用契约。
-        GIT_OPTIONAL_LOCKS: '0',
-        ...(options.env ?? {}),
-      },
+      env: childEnvironment,
       maxBuffer: 64 * 1024 * 1024,
     }, (error, stdout, stderr) => {
       if (error !== null) {
+        if (options.allowFailure === true) {
+          resolve({ stdout, stderr, status: error.code ?? 1 });
+          return;
+        }
         error.stdout = stdout;
         error.stderr = stderr;
         reject(error);
@@ -2632,6 +2638,641 @@ export async function cancelTransaction(request, runtime = {}) {
   };
 }
 
+const CONFIRMATION_KEYS = Object.freeze([
+  'head_oid',
+  'index_sha256',
+  'index_tree_oid',
+  'manifest_sha256',
+  'selected_unit_ids',
+  'worktree_state_sha256',
+  'task_tree_oid',
+  'script_sha256',
+  'message_sha256',
+]);
+
+function canonicalFieldMatches(left, right) {
+  try {
+    const leftCanonical = canonicalJson(left);
+    const rightCanonical = canonicalJson(right);
+    if (typeof leftCanonical !== 'string' || typeof rightCanonical !== 'string') return false;
+    const leftDigest = createHash('sha256').update(leftCanonical).digest();
+    const rightDigest = createHash('sha256').update(rightCanonical).digest();
+    return timingSafeEqual(leftDigest, rightDigest);
+  } catch {
+    return false;
+  }
+}
+
+function assertConfirmed(expected, actual) {
+  if (actual === null || Array.isArray(actual) || typeof actual !== 'object'
+    || CONFIRMATION_KEYS.some((key) => !canonicalFieldMatches(expected[key], actual[key]))) {
+    throw stopped('CONFIRMATION_STALE');
+  }
+}
+
+async function currentBinding(repository, indexPath, runtime) {
+  const body = await buildManifest(repository, indexPath, runtime);
+  return { ...body, manifest_sha256: digest(body) };
+}
+
+function assertRepositoryStillConfirmed(expected, current) {
+  for (const key of [
+    'head_oid',
+    'index_sha256',
+    'index_tree_oid',
+    'manifest_sha256',
+    'worktree_state_sha256',
+    'script_sha256',
+  ]) {
+    if (!canonicalFieldMatches(expected[key], current[key])) {
+      throw stopped('CONFIRMATION_STALE');
+    }
+  }
+}
+
+function assertCommitMessagePath(context, messageFile) {
+  const retainedPath = path.join(context.resourceDirectory, 'message.txt');
+  // Windows stat 不保留 POSIX 0600 位，只能复验该平台可观察的规范化权限；POSIX 则精确要求 0600。
+  const expectedMode = process.platform === 'win32' ? 0o666 : 0o600;
+  if (typeof messageFile !== 'string'
+    || !pathsAreEqual(path.resolve(messageFile), retainedPath)
+    || context.message === null
+    || context.message.identity.mode !== expectedMode) {
+    throw stopped('MESSAGE_FILE_INVALID');
+  }
+  return retainedPath;
+}
+
+function assertCommitMessageContent(message) {
+  if (message.bytes.length === 0
+    || (message.bytes.length >= 3
+      && message.bytes[0] === 0xef && message.bytes[1] === 0xbb && message.bytes[2] === 0xbf)
+    || message.bytes.includes(0)) {
+    throw stopped('MESSAGE_FILE_INVALID');
+  }
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(message.bytes);
+  } catch {
+    throw stopped('MESSAGE_FILE_INVALID');
+  }
+  if (text.trim().length === 0) throw stopped('MESSAGE_FILE_INVALID');
+  return text;
+}
+
+async function writeOwnedStateInPlace(context, nextState, ownershipToken) {
+  const statePath = path.join(context.resourceDirectory, 'state.json');
+  nextState.state_mac_sha256 = stateMac(nextState, ownershipToken);
+  const serialized = Buffer.from(`${canonicalJson(nextState)}\n`);
+  let handle;
+  try {
+    const before = await lstat(statePath, { bigint: true });
+    handle = await open(statePath, 'r+');
+    const openedBefore = await handle.stat({ bigint: true });
+    if ([before, openedBefore].some((metadata) =>
+      !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+      || !evidenceRecordsMatch(filesystemEvidence(before), context.stateFile.identity)
+      || !evidenceRecordsMatch(filesystemEvidence(openedBefore), context.stateFile.identity)) {
+      throw ownershipInvalid();
+    }
+    // cancel 认证 state 自身 inode；消息生命周期只能在同一 FileHandle 内原位更新并重新计算 HMAC。
+    await handle.truncate(0);
+    await handle.write(serialized, 0, serialized.length, 0);
+    await handle.sync();
+    const openedAfter = await handle.stat({ bigint: true });
+    const after = await lstat(statePath, { bigint: true });
+    if ([openedAfter, after].some((metadata) =>
+      !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+      || !evidenceRecordsMatch(filesystemEvidence(openedAfter), context.stateFile.identity)
+      || !evidenceRecordsMatch(filesystemEvidence(after), context.stateFile.identity)) {
+      throw ownershipInvalid();
+    }
+  } finally {
+    await handle?.close();
+  }
+  const stateFile = await readStableOwnedFile(
+    statePath,
+    context.resourceIdentity.canonical,
+    ownershipInvalid,
+  );
+  if (!timingSafeHexMatches(stateFile.sha256, digest(serialized))) throw ownershipInvalid();
+  context.state = nextState;
+  context.stateFile = stateFile;
+}
+
+async function updateRetainedState(context, ownershipToken, {
+  message,
+  refreshArtifacts = false,
+}) {
+  const nextState = structuredClone(context.state);
+  if (refreshArtifacts) {
+    const artifacts = await captureTransactionArtifacts(context.resourceDirectory, ownershipInvalid);
+    const byPath = new Map(artifacts.entries.map((entry) => [entry.path, entry]));
+    for (const [fileName, digestName] of [
+      ['original.index', 'original_index_sha256'],
+      ['task.index', 'task_index_sha256'],
+      ['recovery.index', 'recovery_index_sha256'],
+    ]) {
+      const entry = byPath.get(fileName);
+      if (entry?.type !== 'file' || !SHA256_PATTERN.test(entry.sha256)) throw ownershipInvalid();
+      nextState.files[digestName] = entry.sha256;
+    }
+    nextState.ownership.tree = artifacts.entries;
+  }
+  nextState.message_file_sha256 = message?.sha256 ?? null;
+  nextState.ownership.message_file = message === null ? null : message.identity;
+  await writeOwnedStateInPlace(context, nextState, ownershipToken);
+  context.message = message;
+}
+
+async function reverifyBoundMessage(context) {
+  const message = await readOptionalMessage(
+    context.resourceDirectory,
+    context.resourceIdentity.canonical,
+    context.state,
+  );
+  if (message === null || context.message === null
+    || !evidenceRecordsMatch(message.identity, context.message.identity)
+    || !timingSafeHexMatches(message.sha256, context.message.sha256)) {
+    throw stopped('CONFIRMATION_STALE');
+  }
+  return message;
+}
+
+async function acquireIndexLock(repository, indexLockPath, transactionId, tokenSha256) {
+  let handle;
+  try {
+    handle = await open(indexLockPath, 'wx', 0o600);
+  } catch (error) {
+    if (error?.code === 'EEXIST') throw stopped('INDEX_LOCKED');
+    throw stopped('INDEX_LOCK_FAILED');
+  }
+  const lock = { handle, path: indexLockPath, identity: null, closed: false, installed: false };
+  try {
+    await handle.chmod(0o600);
+    const opened = await handle.stat({ bigint: true });
+    const onPath = await lstat(indexLockPath, { bigint: true });
+    if ([opened, onPath].some((metadata) =>
+      !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+      || !evidenceRecordsMatch(filesystemEvidence(opened), filesystemEvidence(onPath))) {
+      throw stopped('INDEX_LOCK_FAILED');
+    }
+    lock.identity = filesystemEvidence(opened);
+    // lock 内容只记录本事务 identity 与 token 摘要，绝不落盘 ownership token。
+    const metadata = Buffer.from(`${canonicalJson({
+      schema_version: SCHEMA_VERSION,
+      transaction_id: transactionId,
+      token_sha256: tokenSha256,
+    })}\n`);
+    await handle.write(metadata, 0, metadata.length, 0);
+    await handle.sync();
+    return lock;
+  } catch (error) {
+    await releaseOwnedIndexLock(lock);
+    throw error;
+  }
+}
+
+async function assertIndexLockOwned(lock) {
+  if (lock.closed || lock.installed || lock.identity === null) throw stopped('INDEX_LOCK_OWNERSHIP_LOST');
+  const opened = await lock.handle.stat({ bigint: true });
+  const onPath = await lstat(lock.path, { bigint: true });
+  if ([opened, onPath].some((metadata) =>
+    !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+    || !evidenceRecordsMatch(filesystemEvidence(opened), lock.identity)
+    || !evidenceRecordsMatch(filesystemEvidence(onPath), lock.identity)) {
+    throw stopped('INDEX_LOCK_OWNERSHIP_LOST');
+  }
+}
+
+async function releaseOwnedIndexLock(lock) {
+  if (lock === undefined || lock.installed) return true;
+  try {
+    if (!lock.closed) {
+      await lock.handle.close();
+      lock.closed = true;
+    }
+    const current = await lstat(lock.path, { bigint: true });
+    if (lock.identity === null
+      || !current.isFile() || current.isSymbolicLink() || current.nlink !== 1n
+      || !evidenceRecordsMatch(filesystemEvidence(current), lock.identity)) return false;
+    await rm(lock.path, { force: false });
+    return true;
+  } catch (error) {
+    return error?.code === 'ENOENT';
+  }
+}
+
+function cleanGitEnvironment(overrides = {}, unset = []) {
+  const environment = { ...process.env, GIT_OPTIONAL_LOCKS: '0', ...overrides };
+  for (const name of unset) delete environment[name];
+  return environment;
+}
+
+function startGitProcess(repository, args, options, runtime) {
+  const spawnGit = runtime.spawnGit ?? ((repositoryRoot, gitArgs, spawnOptions) =>
+    spawn('git', gitArgs, {
+      cwd: repositoryRoot,
+      env: spawnOptions.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
+    }));
+  return spawnGit(repository.root, args, options);
+}
+
+function waitForGitProcess(child) {
+  const stderr = [];
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (status) => resolve({ status, stderr: Buffer.concat(stderr) }));
+  });
+}
+
+async function pipeConfirmedObjects(repository, context, runtime, includeOid, excludeOid) {
+  const objectDirectory = path.join(context.resourceDirectory, 'objects');
+  const mainObjectDirectory = await gitPath(repository, 'objects', runtime);
+  const producerArgs = ['pack-objects', '--stdout', '--revs', '--thin'];
+  const consumerArgs = ['index-pack', '--stdin', '--fix-thin'];
+  const producer = startGitProcess(repository, producerArgs, {
+    env: cleanGitEnvironment({
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: mainObjectDirectory,
+    }),
+  }, runtime);
+  const consumer = startGitProcess(repository, consumerArgs, {
+    env: cleanGitEnvironment({}, [
+      'GIT_OBJECT_DIRECTORY',
+      'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    ]),
+  }, runtime);
+  // pack bytes 只经真实 stdout→stdin pipe 进入主 ODB；参数数组与 shell:false 保持路径和修订值为数据。
+  producer.stdout.pipe(consumer.stdin);
+  consumer.stdin.on('error', () => {});
+  const producerDone = waitForGitProcess(producer);
+  const consumerDone = waitForGitProcess(consumer);
+  producer.stdin.end(`${includeOid}\n^${excludeOid}\n`);
+  const [produced, consumed] = await Promise.all([producerDone, consumerDone]);
+  if (produced.status !== 0 || consumed.status !== 0) {
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction objects could not be imported.',
+      { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
+    );
+  }
+}
+
+async function importConfirmedObjects(repository, context, runtime) {
+  const { stdout: originalHeadTree } = await git(
+    repository,
+    ['rev-parse', `${context.state.binding.head_oid}^{tree}`],
+    runtime,
+    { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
+  );
+  await pipeConfirmedObjects(
+    repository,
+    context,
+    runtime,
+    context.state.binding.task_tree_oid,
+    originalHeadTree.trim(),
+  );
+  try {
+    await git(repository, [
+      'cat-file', '-e', `${context.state.binding.task_tree_oid}^{tree}`,
+    ], runtime, {
+      unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+    });
+  } catch {
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction objects could not be verified.',
+      { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
+    );
+  }
+}
+
+async function importRecoveryObjects(repository, context, runtime) {
+  await pipeConfirmedObjects(
+    repository,
+    context,
+    runtime,
+    context.state.binding.recovery_tree_oid,
+    context.state.binding.task_tree_oid,
+  );
+  try {
+    await git(repository, [
+      'cat-file', '-e', `${context.state.binding.recovery_tree_oid}^{tree}`,
+    ], runtime, {
+      unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+    });
+  } catch {
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction objects could not be verified.',
+      { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
+    );
+  }
+}
+
+async function stableIndexFile(indexPath) {
+  const parent = await captureStableDirectory(path.dirname(indexPath), () => stopped('CONFIRMATION_STALE'));
+  return readStableOwnedFile(indexPath, parent.canonical, () => stopped('CONFIRMATION_STALE'));
+}
+
+async function installRecoveryIndex({
+  repository,
+  context,
+  indexPath,
+  originalIndex,
+  indexLock,
+}) {
+  const recoveryPath = path.join(context.resourceDirectory, 'recovery.index');
+  const recovery = await readStableOwnedFile(
+    recoveryPath,
+    context.resourceIdentity.canonical,
+    ownershipInvalid,
+  );
+  if (!timingSafeHexMatches(recovery.sha256, context.state.files.recovery_index_sha256)) {
+    throw ownershipInvalid();
+  }
+  const currentIndex = await stableIndexFile(indexPath);
+  if (!evidenceRecordsMatch(currentIndex.identity, originalIndex.identity)
+    || !timingSafeHexMatches(currentIndex.sha256, context.state.binding.index_sha256)) {
+    throw stopped('CONFIRMATION_STALE');
+  }
+  await assertIndexLockOwned(indexLock);
+  // 恢复 index 先写入本事务持有的真实 lock 并 fsync；原 index 摘要复验后才原子安装。
+  await indexLock.handle.truncate(0);
+  await indexLock.handle.write(recovery.bytes, 0, recovery.bytes.length, 0);
+  await indexLock.handle.sync();
+  await assertIndexLockOwned(indexLock);
+  const finalOriginal = await stableIndexFile(indexPath);
+  if (!evidenceRecordsMatch(finalOriginal.identity, originalIndex.identity)
+    || !timingSafeHexMatches(finalOriginal.sha256, context.state.binding.index_sha256)) {
+    throw stopped('CONFIRMATION_STALE');
+  }
+  await indexLock.handle.close();
+  indexLock.closed = true;
+  const closedLock = await lstat(indexLock.path, { bigint: true });
+  if (!closedLock.isFile() || closedLock.isSymbolicLink() || closedLock.nlink !== 1n
+    || !evidenceRecordsMatch(filesystemEvidence(closedLock), indexLock.identity)) {
+    throw stopped('INDEX_LOCK_OWNERSHIP_LOST');
+  }
+  await rename(indexLock.path, indexPath);
+  indexLock.installed = true;
+  const installed = await stableIndexFile(indexPath);
+  if (!timingSafeHexMatches(installed.sha256, recovery.sha256)) {
+    throw stopped('INDEX_RESTORE_FAILED');
+  }
+  return recovery.sha256;
+}
+
+function recoveryRequired(commitOid, warnings, context) {
+  return {
+    schema_version: SCHEMA_VERSION,
+    status: 'commit_created_recovery_required',
+    code: 'COMMIT_CREATED_RECOVERY_REQUIRED',
+    commit_oid: commitOid,
+    transaction_id: context.state.transaction_id,
+    recovery_index: path.join(context.resourceDirectory, 'recovery.index'),
+    repository_changed: true,
+    transaction_preserved: false,
+    warnings,
+  };
+}
+
+async function removeClaimedMessage(context) {
+  if (context.message === null) return false;
+  const current = await reverifyBoundMessage(context);
+  if (!evidenceRecordsMatch(current.identity, context.message.identity)
+    || !timingSafeHexMatches(current.sha256, context.message.sha256)) return false;
+  const messagePath = path.join(context.resourceDirectory, 'message.txt');
+  await rm(messagePath, { force: false });
+  try {
+    await lstat(messagePath);
+    return false;
+  } catch (error) {
+    return error?.code === 'ENOENT';
+  }
+}
+
+// 在九项确认、真实 lock 和对象导入证明后启动唯一 commit，并按实际 HEAD 安装恢复 index。
+export async function commitTransaction({
+  repository_root,
+  transaction_id,
+  ownership_token,
+  message_file,
+  confirmation,
+}, runtime = {}) {
+  let context;
+  let indexLock;
+  let messageClaimed = false;
+  let messageRemoved = false;
+  let retainedStateReady = false;
+  let result;
+  let primaryError;
+  const warnings = [];
+  try {
+    context = await verifyCancellationContext({
+      repository_root,
+      transaction_id,
+      ownership_token,
+    }, runtime);
+    assertCommitMessagePath(context, message_file);
+    messageClaimed = true;
+    assertCommitMessageContent(context.message);
+    const expectedConfirmation = {
+      ...context.state.binding,
+      message_sha256: context.message.sha256,
+    };
+    assertConfirmed(expectedConfirmation, confirmation);
+    const repository = context.repository;
+    const indexPath = await assertOrdinaryGitState(repository, runtime);
+    const originalIndex = await stableIndexFile(indexPath);
+    if (!timingSafeHexMatches(originalIndex.sha256, context.state.binding.index_sha256)) {
+      throw stopped('CONFIRMATION_STALE');
+    }
+    assertRepositoryStillConfirmed(
+      expectedConfirmation,
+      await currentBinding(repository, indexPath, runtime),
+    );
+
+    await updateRetainedState(context, ownership_token, { message: context.message });
+    indexLock = await acquireIndexLock(
+      repository,
+      await gitPath(repository, 'index.lock', runtime),
+      transaction_id,
+      context.state.token_sha256,
+    );
+    await assertIndexLockOwned(indexLock);
+    assertConfirmed(expectedConfirmation, confirmation);
+    assertRepositoryStillConfirmed(
+      expectedConfirmation,
+      await currentBinding(repository, indexPath, runtime),
+    );
+    await reverifyBoundMessage(context);
+    await importConfirmedObjects(repository, context, runtime);
+    await assertIndexLockOwned(indexLock);
+    assertRepositoryStillConfirmed(
+      expectedConfirmation,
+      await currentBinding(repository, indexPath, runtime),
+    );
+    await reverifyBoundMessage(context);
+
+    const taskIndex = path.join(context.resourceDirectory, 'task.index');
+    const attempt = await git(repository, [
+      'commit', '--no-gpg-sign', '-F', message_file,
+    ], runtime, {
+      env: { GIT_INDEX_FILE: taskIndex },
+      unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+      allowFailure: true,
+    });
+    const { stdout: actualHeadOutput } = await git(
+      repository,
+      ['rev-parse', 'HEAD'],
+      runtime,
+      { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
+    );
+    const actualHead = actualHeadOutput.trim();
+    // hook 可拒绝或改变待提交 index；恢复决策只信任实际 HEAD/tree，绝不通过 retry、amend 或历史改写纠正。
+    if ((attempt.status ?? 0) !== 0 || actualHead === context.state.binding.head_oid) {
+      if (actualHead !== context.state.binding.head_oid) {
+        result = recoveryRequired(actualHead, warnings, context);
+      } else {
+        throw new StageTransactionError(
+          'COMMIT_FAILED',
+          'Git rejected the confirmed commit.',
+          { retained: true, transaction_preserved: true, transaction_id },
+        );
+      }
+    } else {
+      const { stdout: actualTreeOutput } = await git(
+        repository,
+        ['rev-parse', `${actualHead}^{tree}`],
+        runtime,
+        { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
+      );
+      const actualTree = actualTreeOutput.trim();
+      if (!canonicalFieldMatches(actualTree, context.state.binding.task_tree_oid)) {
+        result = recoveryRequired(actualHead, warnings, context);
+      } else {
+        const recoveryIndex = path.join(context.resourceDirectory, 'recovery.index');
+        try {
+          // recovery index 可能引用 task tree 之外的合并 blob；commit 成功后单独导入，提交前 pack 仍只含 task 可达对象。
+          await importRecoveryObjects(repository, context, runtime);
+          await git(repository, [
+            'diff', '--cached', '--check', actualHead,
+          ], runtime, {
+            env: { GIT_INDEX_FILE: recoveryIndex },
+            unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+          });
+          const { stdout: recoveryPatch } = await git(repository, [
+            'diff', '--cached', '--binary', '--full-index', actualHead,
+          ], runtime, {
+            encoding: 'buffer',
+            env: { GIT_INDEX_FILE: recoveryIndex },
+            unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+          });
+          if (!timingSafeHexMatches(
+            digest(recoveryPatch),
+            context.state.files.recovery_patch_sha256,
+          )) throw new Error('Recovery patch changed.');
+          const recoveryIndexSha256 = await installRecoveryIndex({
+            repository,
+            context,
+            indexPath,
+            originalIndex,
+            indexLock,
+          });
+          const { stdout: finalHeadOutput } = await git(
+            repository,
+            ['rev-parse', 'HEAD'],
+            runtime,
+            { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
+          );
+          if (finalHeadOutput.trim() !== actualHead) {
+            result = recoveryRequired(actualHead, warnings, context);
+          } else {
+            const { stdout: actualSubject } = await git(
+              repository,
+              ['show', '-s', '--format=%s', actualHead],
+              runtime,
+              { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
+            );
+            result = {
+              schema_version: SCHEMA_VERSION,
+              status: 'committed',
+              commit_oid: actualHead,
+              subject: actualSubject.trimEnd(),
+              recovery_index_sha256: recoveryIndexSha256,
+              repository_changed: true,
+              warnings,
+            };
+          }
+        } catch {
+          result = recoveryRequired(actualHead, warnings, context);
+        }
+      }
+    }
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    if (indexLock !== undefined && !indexLock.installed) {
+      if (!await releaseOwnedIndexLock(indexLock)) warnings.push('INDEX_LOCK_CLEANUP_FAILED');
+    }
+    if (context !== undefined && messageClaimed) {
+      try {
+        messageRemoved = await removeClaimedMessage(context);
+        if (!messageRemoved) {
+          warnings.push('MESSAGE_FILE_CLEANUP_FAILED');
+        } else if (context.state.message_file_sha256 !== null) {
+          await updateRetainedState(context, ownership_token, {
+            message: null,
+            refreshArtifacts: true,
+          });
+          retainedStateReady = true;
+        } else {
+          retainedStateReady = true;
+        }
+      } catch {
+        warnings.push('MESSAGE_FILE_CLEANUP_FAILED');
+      }
+    }
+  }
+
+  let transactionPreserved = false;
+  if (context !== undefined
+    && (primaryError !== undefined || result?.status === 'commit_created_recovery_required')) {
+    try {
+      await verifyCancellationContext({ repository_root, transaction_id, ownership_token }, runtime);
+      transactionPreserved = true;
+    } catch {
+      transactionPreserved = false;
+    }
+  }
+  if (primaryError !== undefined) {
+    if (transactionPreserved) {
+      primaryError.retained = true;
+      primaryError.transaction_preserved = true;
+      primaryError.transaction_id ??= transaction_id;
+    }
+    if (warnings.length > 0) primaryError.warnings = warnings;
+    throw primaryError;
+  }
+  if (result?.status === 'commit_created_recovery_required') {
+    result.transaction_preserved = transactionPreserved;
+    if (!transactionPreserved) warnings.push('TRANSACTION_PRESERVATION_UNVERIFIED');
+  }
+  if (result?.status === 'committed' && messageRemoved && retainedStateReady) {
+    try {
+      await cancelTransaction({ repository_root, transaction_id, ownership_token }, runtime);
+    } catch {
+      warnings.push('TRANSACTION_CLEANUP_FAILED');
+    }
+  }
+  return result;
+}
+
 async function readCliRequest() {
   const chunks = [];
   let byteLength = 0;
@@ -2660,7 +3301,7 @@ function writeCliResult(value) {
 
 async function runCli() {
   const [command, ...extraArguments] = process.argv.slice(2);
-  if (!['cancel', 'inspect', 'prepare'].includes(command) || extraArguments.length !== 0) {
+  if (!['cancel', 'commit', 'inspect', 'prepare'].includes(command) || extraArguments.length !== 0) {
     writeCliResult({
       ok: false,
       status: 'failed',
@@ -2680,6 +3321,9 @@ async function runCli() {
     } else if (command === 'cancel') {
       const cancelled = await cancelTransaction(request);
       writeCliResult({ ok: true, ...cancelled });
+    } else if (command === 'commit') {
+      const committed = await commitTransaction(request);
+      writeCliResult({ ok: committed.status === 'committed', ...committed });
     } else {
       const prepared = await prepareTransaction(request);
       writeCliResult({ ok: true, ...prepared });

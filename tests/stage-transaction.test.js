@@ -32,19 +32,25 @@ async function runGit(root, args, options = {}) {
     ?? path.join(path.dirname(root), 'empty-global-config');
   return new Promise((resolve, reject) => {
     let stdinError;
+    const childEnvironment = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: globalConfig,
+      GIT_OPTIONAL_LOCKS: '0',
+      ...(options.env ?? {}),
+    };
+    for (const name of options.unsetEnv ?? []) delete childEnvironment[name];
     const child = execFile('git', args, {
       cwd: root,
       encoding: options.encoding ?? 'utf8',
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: globalConfig,
-        GIT_OPTIONAL_LOCKS: '0',
-        ...(options.env ?? {}),
-      },
+      env: childEnvironment,
       maxBuffer: 16 * 1024 * 1024,
     }, (error, stdout, stderr) => {
       if (error !== null) {
+        if (options.allowFailure === true) {
+          resolve({ stdout, stderr, status: error.code ?? 1 });
+          return;
+        }
         error.stdout = stdout;
         error.stderr = stderr;
         reject(error);
@@ -422,6 +428,14 @@ async function prepareTransaction(request, runtime) {
 
 async function cancelTransaction(request, runtime) {
   return stageTransaction.cancelTransaction(request, runtime);
+}
+
+async function commitTransaction(request, runtime) {
+  return stageTransaction.commitTransaction(request, runtime);
+}
+
+function patchWithoutIndexLine(value) {
+  return value.split('\n').filter((line) => !line.startsWith('index ')).join('\n');
 }
 
 async function preparedFixture(t) {
@@ -2349,4 +2363,685 @@ test('prepare CLI returns one-line transaction metadata without stderr', async (
   assert.match(response.transaction_id, /^[0-9a-f-]{36}$/u);
   assert.match(response.ownership_token, /^[0-9a-f]{64}$/u);
   assert.equal(response.message_file.endsWith('message.txt'), true);
+});
+
+test('commits selected hunks and restores unrelated staged changes', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) =>
+    unit.view === 'head_to_worktree' && unit.new_range.start === 2);
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, { temporaryRoot });
+  const message = 'feat(account): add activation control\n\n'
+    + '- Default new accounts to active\n'
+    + '- Reject inactive accounts during transfer\n';
+  await writeFile(prepared.message_file, message, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await chmod(prepared.message_file, 0o600);
+  const confirmation = {
+    ...prepared.binding,
+    message_sha256: sha256(Buffer.from(message, 'utf8')),
+  };
+  const countBefore = Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim());
+  const gitCalls = [];
+  const packInputs = [];
+  const originalHeadTree = (await runGit(
+    root,
+    ['rev-parse', `${prepared.binding.head_oid}^{tree}`],
+  )).stdout.trim();
+
+  const result = await commitTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+    message_file: prepared.message_file,
+    confirmation,
+  }, {
+    temporaryRoot,
+    runGit: async (repositoryRoot, args, options) => {
+      gitCalls.push({ command: args[0], args: [...args], env: { ...(options.env ?? {}) } });
+      return runGit(repositoryRoot, args, options);
+    },
+    spawnGit: (repositoryRoot, args, options) => {
+      gitCalls.push({ command: args[0], args: [...args], env: { ...(options.env ?? {}) } });
+      const child = spawn('git', args, {
+        cwd: repositoryRoot,
+        env: {
+          ...options.env,
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: gitConfigByRepository.get(repositoryRoot),
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false,
+      });
+      if (args[0] === 'pack-objects') {
+        const end = child.stdin.end.bind(child.stdin);
+        child.stdin.end = (chunk, ...endArguments) => {
+          packInputs.push(String(chunk));
+          return end(chunk, ...endArguments);
+        };
+      }
+      return child;
+    },
+  });
+
+  assert.equal(result.status, 'committed', JSON.stringify(result));
+  assert.equal(Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim()), countBefore + 1);
+  assert.equal(
+    patchWithoutIndexLine((await runGit(root, ['show', '--format=', '--unified=0', 'HEAD'])).stdout),
+    'diff --git a/feature.txt b/feature.txt\n'
+      + '--- a/feature.txt\n'
+      + '+++ b/feature.txt\n'
+      + '@@ -2 +2 @@ line 1\n'
+      + '-line 2\n'
+      + '+line 2 selected task\n',
+  );
+  assert.equal(
+    patchWithoutIndexLine((await runGit(root, ['diff', '--cached', '--unified=0'])).stdout),
+    'diff --git a/feature.txt b/feature.txt\n'
+      + '--- a/feature.txt\n'
+      + '+++ b/feature.txt\n'
+      + '@@ -16 +16 @@ line 15\n'
+      + '-line 16\n'
+      + '+line 16 retained staged\n',
+  );
+  assert.equal(
+    patchWithoutIndexLine((await runGit(root, ['diff', '--unified=0'])).stdout),
+    'diff --git a/feature.txt b/feature.txt\n'
+      + '--- a/feature.txt\n'
+      + '+++ b/feature.txt\n'
+      + '@@ -9 +9 @@ line 8\n'
+      + '-line 9\n'
+      + '+line 9 unselected worktree\n',
+  );
+  const commitCalls = gitCalls.filter(({ command }) => command === 'commit');
+  assert.equal(commitCalls.length, 1);
+  assert.deepEqual(commitCalls[0].args, [
+    'commit', '--no-gpg-sign', '-F', prepared.message_file,
+  ]);
+  assert.equal('GIT_OBJECT_DIRECTORY' in commitCalls[0].env, false);
+  assert.equal('GIT_ALTERNATE_OBJECT_DIRECTORIES' in commitCalls[0].env, false);
+  assert.deepEqual(
+    gitCalls.filter(({ command }) => command === 'pack-objects').map(({ args }) => args),
+    [
+      ['pack-objects', '--stdout', '--revs', '--thin'],
+      ['pack-objects', '--stdout', '--revs', '--thin'],
+    ],
+  );
+  assert.deepEqual(
+    gitCalls.filter(({ command }) => command === 'index-pack').map(({ args }) => args),
+    [
+      ['index-pack', '--stdin', '--fix-thin'],
+      ['index-pack', '--stdin', '--fix-thin'],
+    ],
+  );
+  assert.deepEqual(packInputs, [
+    `${prepared.task_tree_oid}\n^${originalHeadTree}\n`,
+    `${prepared.recovery_tree_oid}\n^${prepared.task_tree_oid}\n`,
+  ]);
+  for (const forbidden of ['--no-verify', '--amend', '-m', 'push', 'tag']) {
+    assert.equal(commitCalls[0].args.includes(forbidden), false);
+  }
+  assert.equal(gitCalls.some(({ command }) => ['commit-tree', 'push', 'tag'].includes(command)), false);
+  assert.equal(result.commit_oid, (await runGit(root, ['rev-parse', 'HEAD'])).stdout.trim());
+  assert.equal(result.subject, 'feat(account): add activation control');
+  assert.equal(result.recovery_index_sha256, sha256(await readIndexBytes(root)));
+  assert.deepEqual(result.warnings, []);
+  await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+  await assert.rejects(access(prepared.transaction_directory), { code: 'ENOENT' });
+  const indexLockPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+  );
+  await assert.rejects(access(indexLockPath), { code: 'ENOENT' });
+});
+
+async function prepareCommitCase(t, root, selected) {
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const unit = selected(manifest.units);
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [unit.unit_id],
+  }, { temporaryRoot });
+  const message = `feat: commit ${unit.kind}\n`;
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  return {
+    manifest,
+    message,
+    prepared,
+    temporaryRoot,
+    confirmation: {
+      ...prepared.binding,
+      message_sha256: sha256(Buffer.from(message)),
+    },
+  };
+}
+
+async function commitPrepared(root, fixture, runtime = {}) {
+  return commitTransaction({
+    repository_root: root,
+    transaction_id: fixture.prepared.transaction_id,
+    ownership_token: fixture.prepared.ownership_token,
+    message_file: fixture.prepared.message_file,
+    confirmation: fixture.confirmation,
+  }, { temporaryRoot: fixture.temporaryRoot, ...runtime });
+}
+
+test('commits binary rename delete mode and untracked atomic units individually', async (t) => {
+  for (const kind of ['binary_file', 'rename', 'deletion', 'mode_change', 'untracked_file']) {
+    await t.test(kind, { skip: kind === 'mode_change' && process.platform === 'win32' }, async (subtest) => {
+      const root = await repositoryWithManifestFixtures(subtest);
+      const fixture = await prepareCommitCase(subtest, root, (units) => units.find((unit) =>
+        unit.kind === kind && (kind === 'untracked_file'
+          ? unit.view === 'untracked'
+          : unit.view === 'head_to_worktree')));
+
+      const result = await commitPrepared(root, fixture);
+
+      assert.equal(result.status, 'committed');
+      assert.equal(
+        (await runGit(root, ['rev-parse', 'HEAD^{tree}'])).stdout.trim(),
+        fixture.prepared.task_tree_oid,
+      );
+      if (kind === 'binary_file') {
+        assert.deepEqual(
+          (await runGit(root, ['show', 'HEAD:binary.dat'], { encoding: 'buffer' })).stdout,
+          Buffer.from([0, 9, 2, 3]),
+        );
+      } else if (kind === 'rename') {
+        assert.match(
+          (await runGit(root, ['diff-tree', '--no-commit-id', '--name-status', '-r', '-M', 'HEAD'])).stdout,
+          /^R100\trename-before\.txt\trename after\.txt\n$/u,
+        );
+      } else if (kind === 'deletion') {
+        await assert.rejects(runGit(root, ['cat-file', '-e', 'HEAD:delete-me.txt']));
+      } else if (kind === 'mode_change') {
+        assert.match((await runGit(root, ['ls-tree', 'HEAD', '--', 'mode.sh'])).stdout, /^100755\s/u);
+      } else {
+        assert.equal(
+          (await runGit(root, ['show', 'HEAD:untracked file.txt'])).stdout,
+          'untracked bytes\n',
+        );
+      }
+      assert.match((await runGit(root, ['diff', '--cached', '--name-only'])).stdout, /feature\.txt/u);
+      await assert.rejects(access(fixture.prepared.message_file), { code: 'ENOENT' });
+    });
+  }
+});
+
+test('confirmation binds all nine canonical fields before lock import or commit', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const message = 'feat: bind every confirmed field\n';
+  const expected = {
+    ...prepared.binding,
+    message_sha256: sha256(Buffer.from(message)),
+  };
+  const before = await snapshotRepository(root);
+  const gitCalls = [];
+  const spawned = [];
+  for (const key of [
+    'head_oid',
+    'index_sha256',
+    'index_tree_oid',
+    'manifest_sha256',
+    'selected_unit_ids',
+    'worktree_state_sha256',
+    'task_tree_oid',
+    'script_sha256',
+    'message_sha256',
+  ]) {
+    await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+    await chmod(prepared.message_file, 0o600);
+    const confirmation = structuredClone(expected);
+    confirmation[key] = key === 'selected_unit_ids' ? [] : '0'.repeat(64);
+    await assert.rejects(
+      commitTransaction({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+        message_file: prepared.message_file,
+        confirmation,
+      }, {
+        temporaryRoot,
+        runGit: async (repositoryRoot, args, options) => {
+          gitCalls.push([...args]);
+          return runGit(repositoryRoot, args, options);
+        },
+        spawnGit: (_repositoryRoot, args) => {
+          spawned.push([...args]);
+          throw new Error('Confirmation mismatch must not start pack plumbing.');
+        },
+      }),
+      ({ code }) => code === 'CONFIRMATION_STALE',
+    );
+    await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+    assert.deepEqual(await snapshotRepository(root), before);
+  }
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const missingFieldConfirmation = structuredClone(expected);
+  delete missingFieldConfirmation.message_sha256;
+  await assert.rejects(
+    commitTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+      message_file: prepared.message_file,
+      confirmation: missingFieldConfirmation,
+    }, { temporaryRoot }),
+    ({ code }) => code === 'CONFIRMATION_STALE',
+  );
+  await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const nonCanonicalConfirmation = structuredClone(expected);
+  nonCanonicalConfirmation.message_sha256 = 1n;
+  await assert.rejects(
+    commitTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+      message_file: prepared.message_file,
+      confirmation: nonCanonicalConfirmation,
+    }, { temporaryRoot }),
+    ({ code }) => code === 'CONFIRMATION_STALE',
+  );
+  await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+  assert.equal(gitCalls.some((args) => args[0] === 'commit'), false);
+  assert.deepEqual(spawned, []);
+  assert.equal(
+    await access(path.resolve(root, await runGit(root, ['rev-parse', '--git-path', 'index.lock'])
+      .then(({ stdout }) => stdout.trim()))).then(() => true, () => false),
+    false,
+  );
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+});
+
+test('stale repository state and an existing index lock stop before import and preserve ownership', async (t) => {
+  await t.test('stale worktree', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const message = 'feat: reject stale worktree\n';
+    await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+    await chmod(prepared.message_file, 0o600);
+    await writeFile(path.join(root, 'feature.txt'), 'concurrent worktree bytes\n');
+    const before = await snapshotRepository(root);
+    const spawned = [];
+    await assert.rejects(
+      commitTransaction({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+        message_file: prepared.message_file,
+        confirmation: {
+          ...prepared.binding,
+          message_sha256: sha256(Buffer.from(message)),
+        },
+      }, {
+        temporaryRoot,
+        spawnGit: (_repositoryRoot, args) => {
+          spawned.push(args);
+          throw new Error('No process may start for stale confirmation.');
+        },
+      }),
+      ({ code }) => code === 'CONFIRMATION_STALE',
+    );
+    assert.deepEqual(spawned, []);
+    assert.deepEqual(await snapshotRepository(root), before);
+  });
+
+  await t.test('existing index lock', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const message = 'feat: preserve existing lock\n';
+    await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+    await chmod(prepared.message_file, 0o600);
+    const indexLock = path.resolve(
+      root,
+      (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+    );
+    const sentinel = Buffer.from('existing lock owner\n');
+    await writeFile(indexLock, sentinel, { flag: 'wx' });
+    await assert.rejects(
+      commitPrepared(root, {
+        prepared,
+        temporaryRoot,
+        confirmation: {
+          ...prepared.binding,
+          message_sha256: sha256(Buffer.from(message)),
+        },
+      }),
+      ({ code }) => code === 'INDEX_LOCKED',
+    );
+    assert.deepEqual(await readFile(indexLock), sentinel);
+    await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+  });
+});
+
+test('object import failure removes only its owned lock and keeps the transaction cancellable', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const message = 'feat: fail real object import safely\n';
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const blockedObjectDirectory = path.join(temporaryRoot, 'not-an-object-directory');
+  await writeFile(blockedObjectDirectory, 'ordinary file blocks object writes\n');
+  const before = await snapshotRepository(root);
+  const gitCalls = [];
+
+  await assert.rejects(
+    commitTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+      message_file: prepared.message_file,
+      confirmation: {
+        ...prepared.binding,
+        message_sha256: sha256(Buffer.from(message)),
+      },
+    }, {
+      temporaryRoot,
+      runGit: async (repositoryRoot, args, options) => {
+        gitCalls.push([...args]);
+        return runGit(repositoryRoot, args, options);
+      },
+      spawnGit: (repositoryRoot, args, options) => {
+        gitCalls.push([...args]);
+        return spawn('git', args, {
+          cwd: repositoryRoot,
+          env: {
+            ...options.env,
+            ...(args[0] === 'index-pack'
+              ? { GIT_OBJECT_DIRECTORY: blockedObjectDirectory }
+              : {}),
+            GIT_CONFIG_NOSYSTEM: '1',
+            GIT_CONFIG_GLOBAL: gitConfigByRepository.get(repositoryRoot),
+          },
+          stdio: ['pipe', 'pipe', 'pipe'],
+          shell: false,
+        });
+      },
+    }),
+    ({ code, transaction_preserved: transactionPreserved }) =>
+      code === 'OBJECT_IMPORT_FAILED' && transactionPreserved === true,
+  );
+
+  assert.equal(gitCalls.filter((args) => args[0] === 'commit').length, 0);
+  assert.deepEqual(await snapshotRepository(root), before);
+  await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+  const indexLock = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+  );
+  await assert.rejects(access(indexLock), { code: 'ENOENT' });
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+});
+
+test('rejects unsafe message files without starting commit', async (t) => {
+  await t.test('repository path', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const message = 'feat: reserved path only\n';
+    const repositoryMessage = path.join(root, 'message.txt');
+    await writeFile(repositoryMessage, message, { flag: 'wx', mode: 0o600 });
+    await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+    await chmod(prepared.message_file, 0o600);
+    await assert.rejects(
+      commitTransaction({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+        message_file: repositoryMessage,
+        confirmation: { ...prepared.binding, message_sha256: sha256(Buffer.from(message)) },
+      }, { temporaryRoot }),
+      ({ code }) => code === 'MESSAGE_FILE_INVALID',
+    );
+    assert.equal(await readFile(repositoryMessage, 'utf8'), message);
+  });
+
+  await t.test('symbolic link', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const target = path.join(temporaryRoot, 'linked-message-target.txt');
+    await writeFile(target, 'feat: linked message\n');
+    try {
+      await symlink(target, prepared.message_file, 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'UNKNOWN'].includes(error?.code)) {
+        subtest.skip(`File symlinks are unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      commitTransaction({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+        message_file: prepared.message_file,
+        confirmation: { ...prepared.binding, message_sha256: sha256(Buffer.from('feat: linked message\n')) },
+      }, { temporaryRoot }),
+      ({ code }) => code === 'TRANSACTION_OWNERSHIP_INVALID',
+    );
+    assert.equal(await readFile(target, 'utf8'), 'feat: linked message\n');
+  });
+
+  await t.test('hard link', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const source = path.join(temporaryRoot, 'hardlink-source.txt');
+    const message = 'feat: multiply linked message\n';
+    await writeFile(source, message, { flag: 'wx', mode: 0o600 });
+    await link(source, prepared.message_file);
+    await assert.rejects(
+      commitTransaction({
+        repository_root: root,
+        transaction_id: prepared.transaction_id,
+        ownership_token: prepared.ownership_token,
+        message_file: prepared.message_file,
+        confirmation: { ...prepared.binding, message_sha256: sha256(Buffer.from(message)) },
+      }, { temporaryRoot }),
+      ({ code }) => code === 'TRANSACTION_OWNERSHIP_INVALID',
+    );
+    assert.equal(await readFile(source, 'utf8'), message);
+  });
+
+  for (const [name, bytes, confirmationDigest] of [
+    ['UTF-8 BOM', Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('feat: bom\n')]), null],
+    ['NUL', Buffer.from('feat: nul\0body\n'), null],
+    ['invalid UTF-8', Buffer.from([0x66, 0x65, 0x61, 0x74, 0x3a, 0x20, 0xc3, 0x28]), null],
+    ['empty', Buffer.alloc(0), null],
+    ['digest change', Buffer.from('feat: changed digest\n'), '0'.repeat(64)],
+  ]) {
+    await t.test(name, async (subtest) => {
+      const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+      await writeFile(prepared.message_file, bytes, { flag: 'wx', mode: 0o600 });
+      await chmod(prepared.message_file, 0o600);
+      const commitCalls = [];
+      await assert.rejects(
+        commitTransaction({
+          repository_root: root,
+          transaction_id: prepared.transaction_id,
+          ownership_token: prepared.ownership_token,
+          message_file: prepared.message_file,
+          confirmation: {
+            ...prepared.binding,
+            message_sha256: confirmationDigest ?? sha256(bytes),
+          },
+        }, {
+          temporaryRoot,
+          runGit: async (repositoryRoot, args, options) => {
+            if (args[0] === 'commit') commitCalls.push(args);
+            return runGit(repositoryRoot, args, options);
+          },
+        }),
+        ({ code }) => code === (name === 'digest change' ? 'CONFIRMATION_STALE' : 'MESSAGE_FILE_INVALID'),
+      );
+      assert.deepEqual(commitCalls, []);
+      await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+    });
+  }
+});
+
+test('hook rejection removes the message and leaves a cancellable transaction', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected rejected task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, '#!/bin/sh\nexit 1\n');
+  await chmod(hookPath, 0o755);
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  const statePath = path.join(path.dirname(fixture.prepared.message_file), 'state.json');
+  const stateIdentity = await lstat(statePath, { bigint: true });
+  const messageIdentity = await lstat(fixture.prepared.message_file, { bigint: true });
+  let stateDuringCommit;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      runGit: async (repositoryRoot, args, options) => {
+        if (args[0] === 'commit') {
+          stateDuringCommit = JSON.parse(await readFile(statePath, 'utf8'));
+        }
+        return runGit(repositoryRoot, args, options);
+      },
+    }),
+    ({ code }) => code === 'COMMIT_FAILED',
+  );
+
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  assert.equal(stateDuringCommit.message_file_sha256, fixture.confirmation.message_sha256);
+  assert.deepEqual(stateDuringCommit.ownership.message_file, {
+    dev: String(messageIdentity.dev),
+    ino: String(messageIdentity.ino),
+    mode: normalizedMode(messageIdentity),
+  });
+  const stateAfter = JSON.parse(await readFile(statePath, 'utf8'));
+  const stateIdentityAfter = await lstat(statePath, { bigint: true });
+  assert.equal(String(stateIdentityAfter.dev), String(stateIdentity.dev));
+  assert.equal(String(stateIdentityAfter.ino), String(stateIdentity.ino));
+  assert.equal(stateAfter.message_file_sha256, null);
+  assert.equal(stateAfter.ownership.message_file, null);
+  await assert.rejects(access(fixture.prepared.message_file), { code: 'ENOENT' });
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: fixture.prepared.transaction_id,
+    ownership_token: fixture.prepared.ownership_token,
+  }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('commit-msg hook runs once and the result reports the actual commit subject', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected commit-msg task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/commit-msg'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    "printf 'feat: hook-adjusted subject\\n' > \"$1\"",
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const commitCalls = [];
+
+  const result = await commitPrepared(root, fixture, {
+    runGit: async (repositoryRoot, args, options) => {
+      if (args[0] === 'commit') commitCalls.push([...args]);
+      return runGit(repositoryRoot, args, options);
+    },
+  });
+
+  assert.equal(commitCalls.length, 1);
+  assert.equal(result.status, 'committed');
+  assert.equal(result.subject, 'feat: hook-adjusted subject');
+  assert.equal((await runGit(root, ['show', '-s', '--format=%s', 'HEAD'])).stdout.trim(), result.subject);
+});
+
+test('hook tree changes return commit created recovery required without rewriting history', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected hook task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const originalIndex = await readIndexBytes(root);
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    "printf 'hook-created\\n' > hook-created.txt",
+    'git add -- hook-created.txt',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const countBefore = Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim());
+
+  const result = await commitPrepared(root, fixture);
+
+  assert.equal(result.code, 'COMMIT_CREATED_RECOVERY_REQUIRED');
+  assert.equal(result.transaction_id, fixture.prepared.transaction_id);
+  assert.equal(
+    result.recovery_index,
+    path.join(path.dirname(fixture.prepared.message_file), 'recovery.index'),
+  );
+  assert.equal(result.transaction_preserved, true);
+  assert.equal(Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim()), countBefore + 1);
+  assert.notEqual((await runGit(root, ['rev-parse', 'HEAD^{tree}'])).stdout.trim(), fixture.prepared.task_tree_oid);
+  assert.deepEqual(await readIndexBytes(root), originalIndex);
+  await assert.rejects(access(fixture.prepared.message_file), { code: 'ENOENT' });
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: fixture.prepared.transaction_id,
+    ownership_token: fixture.prepared.ownership_token,
+  }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('commit CLI emits one safe JSON line and removes its message file', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected CLI task\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  });
+  const message = 'feat: commit through CLI\n';
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+
+  const cli = await runCli('commit', {
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+    message_file: prepared.message_file,
+    confirmation: {
+      ...prepared.binding,
+      message_sha256: sha256(Buffer.from(message)),
+    },
+  });
+  const response = JSON.parse(cli.stdout);
+
+  assert.equal(cli.status, 0);
+  assert.equal(cli.stderr, '');
+  assert.equal(cli.stdout.split('\n').length, 2);
+  assert.equal(response.ok, true);
+  assert.equal(response.status, 'committed');
+  assert.equal(response.subject, 'feat: commit through CLI');
+  assert.equal(JSON.stringify(response).includes(prepared.ownership_token), false);
+  await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
 });
