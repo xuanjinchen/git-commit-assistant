@@ -1186,6 +1186,15 @@ function filesystemEvidence(metadata) {
   return { ...filesystemIdentity(metadata), mode: normalizedMode(metadata) };
 }
 
+function filesystemMutationEvidence(metadata) {
+  return {
+    ...filesystemEvidence(metadata),
+    size: String(metadata.size),
+    mtime_ns: String(metadata.mtimeNs),
+    ctime_ns: String(metadata.ctimeNs),
+  };
+}
+
 function identityRecordsMatch(left, right) {
   return left?.dev === right?.dev && left?.ino === right?.ino;
 }
@@ -1194,6 +1203,13 @@ function evidenceRecordsMatch(left, right) {
   return identityRecordsMatch(left, right)
     && Number.isSafeInteger(left?.mode)
     && left.mode === right?.mode;
+}
+
+function mutationEvidenceRecordsMatch(left, right) {
+  return evidenceRecordsMatch(left, right)
+    && left?.size === right?.size
+    && left?.mtime_ns === right?.mtime_ns
+    && left?.ctime_ns === right?.ctime_ns;
 }
 
 async function captureStableDirectory(candidate, failure) {
@@ -2858,6 +2874,55 @@ async function createConfirmedTaskIndex(repository, context, runtime) {
   }
 }
 
+async function captureCommitIndexSnapshot(repository, indexPath, runtime) {
+  const failure = () => stopped('CONFIRMATION_STALE');
+  const directoryPath = path.dirname(indexPath);
+  const directory = await captureStableDirectory(directoryPath, failure);
+  const directoryBefore = await lstat(directoryPath, { bigint: true });
+  const indexBefore = await lstat(indexPath, { bigint: true });
+  const index = await readStableOwnedFile(indexPath, directory.canonical, failure);
+  const indexAfter = await lstat(indexPath, { bigint: true });
+  const directoryAfter = await lstat(directoryPath, { bigint: true });
+  if (!indexBefore.isFile() || indexBefore.isSymbolicLink() || indexBefore.nlink !== 1n
+    || !indexAfter.isFile() || indexAfter.isSymbolicLink() || indexAfter.nlink !== 1n
+    || !directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()
+    || !directoryAfter.isDirectory() || directoryAfter.isSymbolicLink()
+    || !mutationEvidenceRecordsMatch(
+      filesystemMutationEvidence(indexBefore),
+      filesystemMutationEvidence(indexAfter),
+    )
+    || !mutationEvidenceRecordsMatch(
+      filesystemMutationEvidence(directoryBefore),
+      filesystemMutationEvidence(directoryAfter),
+    )) throw failure();
+
+  const externalRoot = await resolveExternalTemporaryRoot(repository, runtime);
+  const temporaryRoot = await mkdtemp(path.join(externalRoot, 'git-commit-assistant-index-tree-'));
+  const temporaryIndex = path.join(temporaryRoot, 'index');
+  try {
+    await writeFile(temporaryIndex, index.bytes, { flag: 'wx', mode: 0o600 });
+    const { stdout } = await git(repository, ['write-tree'], runtime, {
+      env: { GIT_INDEX_FILE: temporaryIndex },
+      unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+    });
+    return {
+      tree: stdout.trim(),
+      sha256: index.sha256,
+      index: filesystemMutationEvidence(indexAfter),
+      directory: filesystemMutationEvidence(directoryAfter),
+    };
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function commitIndexSnapshotsMatch(left, right) {
+  return canonicalFieldMatches(left?.tree, right?.tree)
+    && timingSafeHexMatches(left?.sha256, right?.sha256)
+    && mutationEvidenceRecordsMatch(left?.index, right?.index)
+    && mutationEvidenceRecordsMatch(left?.directory, right?.directory);
+}
+
 async function assertTransactionStillConfirmed(repository, context, runtime, { retain = false } = {}) {
   await reverifyCancellationContext(context);
   const confirmed = await createConfirmedTaskIndex(repository, context, runtime);
@@ -3053,6 +3118,13 @@ async function reverifyBoundMessageHandles(context, handles) {
 async function createCommitHookBarrier(repository, context, runtime) {
   const barrierRoot = await mkdtemp(path.join(context.temporaryRoot, 'commit-message-barrier-'));
   const hooksDirectory = path.join(barrierRoot, 'hooks');
+  const indexPreReadyPath = path.join(barrierRoot, 'index-pre-ready');
+  const indexPreAllowPath = path.join(barrierRoot, 'index-pre-allow');
+  const indexPreSkipPath = path.join(barrierRoot, 'index-pre-skip');
+  const indexPreDenyPath = path.join(barrierRoot, 'index-pre-deny');
+  const indexPostReadyPath = path.join(barrierRoot, 'index-post-ready');
+  const indexPostAllowPath = path.join(barrierRoot, 'index-post-allow');
+  const indexPostDenyPath = path.join(barrierRoot, 'index-post-deny');
   const readyPath = path.join(barrierRoot, 'message-opened');
   const allowPath = path.join(barrierRoot, 'allow');
   const denyPath = path.join(barrierRoot, 'deny');
@@ -3066,8 +3138,8 @@ async function createCommitHookBarrier(repository, context, runtime) {
     && configuredHooks.stdout.trim().length > 0
     ? path.resolve(repository.root, configuredHooks.stdout.trim())
     : await gitPath(repository, 'hooks', runtime);
+  const clearProxyEnvironment = 'unset GCA_ORIGINAL_HOOKS_PATH GCA_HOOKS_ALLOW_REGULAR GCA_PROXY_CONFIG_INDEX GCA_ORIGINAL_CONFIG_COUNT_PRESENT GCA_ORIGINAL_CONFIG_COUNT GCA_INDEX_PRE_BARRIER_READY GCA_INDEX_PRE_BARRIER_ALLOW GCA_INDEX_PRE_BARRIER_SKIP GCA_INDEX_PRE_BARRIER_DENY GCA_INDEX_POST_BARRIER_READY GCA_INDEX_POST_BARRIER_ALLOW GCA_INDEX_POST_BARRIER_DENY GCA_MESSAGE_BARRIER_READY GCA_MESSAGE_BARRIER_ALLOW GCA_MESSAGE_BARRIER_DENY';
   for (const hookName of [
-    'pre-commit',
     'commit-msg',
     'post-commit',
     'post-rewrite',
@@ -3083,13 +3155,48 @@ async function createCommitHookBarrier(repository, context, runtime) {
       'original_config_count="$GCA_ORIGINAL_CONFIG_COUNT"',
       'unset "GIT_CONFIG_KEY_${proxy_config_index}" "GIT_CONFIG_VALUE_${proxy_config_index}"',
       'if test "$original_config_count_present" = 1; then GIT_CONFIG_COUNT="$original_config_count"; export GIT_CONFIG_COUNT; else unset GIT_CONFIG_COUNT; fi',
-      'unset GCA_ORIGINAL_HOOKS_PATH GCA_HOOKS_ALLOW_REGULAR GCA_PROXY_CONFIG_INDEX GCA_ORIGINAL_CONFIG_COUNT_PRESENT GCA_ORIGINAL_CONFIG_COUNT GCA_MESSAGE_BARRIER_READY GCA_MESSAGE_BARRIER_ALLOW GCA_MESSAGE_BARRIER_DENY',
+      clearProxyEnvironment,
       'if test -x "$original" || { test "$allow_regular" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
       'exit 0',
       '',
     ].join('\n'), { flag: 'wx', mode: 0o700 });
     await chmod(proxyPath, 0o700);
   }
+  const preCommitHook = path.join(hooksDirectory, 'pre-commit');
+  await writeFile(preCommitHook, [
+    '#!/bin/sh',
+    'pre_ready="$GCA_INDEX_PRE_BARRIER_READY"',
+    'pre_allow="$GCA_INDEX_PRE_BARRIER_ALLOW"',
+    'pre_skip="$GCA_INDEX_PRE_BARRIER_SKIP"',
+    'pre_deny="$GCA_INDEX_PRE_BARRIER_DENY"',
+    'post_ready="$GCA_INDEX_POST_BARRIER_READY"',
+    'post_allow="$GCA_INDEX_POST_BARRIER_ALLOW"',
+    'post_deny="$GCA_INDEX_POST_BARRIER_DENY"',
+    'original="\${GCA_ORIGINAL_HOOKS_PATH}/pre-commit"',
+    'allow_regular="$GCA_HOOKS_ALLOW_REGULAR"',
+    'proxy_config_index="$GCA_PROXY_CONFIG_INDEX"',
+    'original_config_count_present="$GCA_ORIGINAL_CONFIG_COUNT_PRESENT"',
+    'original_config_count="$GCA_ORIGINAL_CONFIG_COUNT"',
+    'printf ready > "$pre_ready" || exit 1',
+    'while ! test -e "$pre_allow" && ! test -e "$pre_skip" && ! test -e "$pre_deny"; do sleep 0.01; done',
+    'if test -e "$pre_deny"; then exit 1; fi',
+    'skip_original=0',
+    'if test -e "$pre_skip"; then skip_original=1; fi',
+    'unset "GIT_CONFIG_KEY_\${proxy_config_index}" "GIT_CONFIG_VALUE_\${proxy_config_index}"',
+    'if test "$original_config_count_present" = 1; then GIT_CONFIG_COUNT="$original_config_count"; export GIT_CONFIG_COUNT; else unset GIT_CONFIG_COUNT; fi',
+    clearProxyEnvironment,
+    'if test "$skip_original" = 0 && { test -x "$original" || { test "$allow_regular" = 1 && test -f "$original"; }; }; then',
+    '  "$original" "$@"',
+    '  status=$?',
+    '  if test "$status" -ne 0; then exit "$status"; fi',
+    'fi',
+    'printf ready > "$post_ready" || exit 1',
+    'while ! test -e "$post_allow" && ! test -e "$post_deny"; do sleep 0.01; done',
+    'if test -e "$post_deny"; then exit 1; fi',
+    'exit 0',
+    '',
+  ].join('\n'), { flag: 'wx', mode: 0o700 });
+  await chmod(preCommitHook, 0o700);
   const prepareHook = path.join(hooksDirectory, 'prepare-commit-msg');
   await writeFile(prepareHook, [
     '#!/bin/sh',
@@ -3103,7 +3210,7 @@ async function createCommitHookBarrier(repository, context, runtime) {
     'original_config_count="$GCA_ORIGINAL_CONFIG_COUNT"',
     'unset "GIT_CONFIG_KEY_${proxy_config_index}" "GIT_CONFIG_VALUE_${proxy_config_index}"',
     'if test "$original_config_count_present" = 1; then GIT_CONFIG_COUNT="$original_config_count"; export GIT_CONFIG_COUNT; else unset GIT_CONFIG_COUNT; fi',
-    'unset GCA_ORIGINAL_HOOKS_PATH GCA_HOOKS_ALLOW_REGULAR GCA_PROXY_CONFIG_INDEX GCA_ORIGINAL_CONFIG_COUNT_PRESENT GCA_ORIGINAL_CONFIG_COUNT GCA_MESSAGE_BARRIER_READY GCA_MESSAGE_BARRIER_ALLOW GCA_MESSAGE_BARRIER_DENY',
+    clearProxyEnvironment,
     'if test -x "$original" || { test "$allow_regular" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
     'exit 0',
     '',
@@ -3113,6 +3220,13 @@ async function createCommitHookBarrier(repository, context, runtime) {
     barrierRoot,
     hooksDirectory,
     originalHooksDirectory,
+    indexPreReadyPath,
+    indexPreAllowPath,
+    indexPreSkipPath,
+    indexPreDenyPath,
+    indexPostReadyPath,
+    indexPostAllowPath,
+    indexPostDenyPath,
     readyPath,
     allowPath,
     denyPath,
@@ -3132,11 +3246,28 @@ function withInjectedGitConfig(environment, key, value) {
   return { environment: next, configIndex, originalCountPresent, originalCount };
 }
 
+async function waitForCommitBarrier(barrierPath, childDone) {
+  while (true) {
+    try {
+      await lstat(barrierPath);
+      return null;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    const progress = await Promise.race([
+      childDone.then((attempt) => ({ attempt })),
+      delay(10).then(() => null),
+    ]);
+    if (progress !== null) return progress.attempt;
+  }
+}
+
 async function commitWithBoundMessage(repository, context, taskIndex, messageFile, runtime) {
   const barrier = await createCommitHookBarrier(repository, context, runtime);
   let handles;
   try {
     handles = await openBoundMessageHandles(context);
+    const confirmedIndex = await captureCommitIndexSnapshot(repository, taskIndex, runtime);
     const baseEnvironment = cleanGitEnvironment({
       GIT_INDEX_FILE: taskIndex,
     }, ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']);
@@ -3152,6 +3283,13 @@ async function commitWithBoundMessage(repository, context, taskIndex, messageFil
       GCA_PROXY_CONFIG_INDEX: String(injected.configIndex),
       GCA_ORIGINAL_CONFIG_COUNT_PRESENT: injected.originalCountPresent ? '1' : '0',
       GCA_ORIGINAL_CONFIG_COUNT: injected.originalCount,
+      GCA_INDEX_PRE_BARRIER_READY: barrier.indexPreReadyPath,
+      GCA_INDEX_PRE_BARRIER_ALLOW: barrier.indexPreAllowPath,
+      GCA_INDEX_PRE_BARRIER_SKIP: barrier.indexPreSkipPath,
+      GCA_INDEX_PRE_BARRIER_DENY: barrier.indexPreDenyPath,
+      GCA_INDEX_POST_BARRIER_READY: barrier.indexPostReadyPath,
+      GCA_INDEX_POST_BARRIER_ALLOW: barrier.indexPostAllowPath,
+      GCA_INDEX_POST_BARRIER_DENY: barrier.indexPostDenyPath,
       GCA_MESSAGE_BARRIER_READY: barrier.readyPath,
       GCA_MESSAGE_BARRIER_ALLOW: barrier.allowPath,
       GCA_MESSAGE_BARRIER_DENY: barrier.denyPath,
@@ -3162,25 +3300,60 @@ async function commitWithBoundMessage(repository, context, taskIndex, messageFil
     child.stdout.on('data', () => {});
     const childDone = waitForGitProcess(child);
     child.stdin.end();
-    while (true) {
-      try {
-        await lstat(barrier.readyPath);
-        break;
-      } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
-      }
-      const progress = await Promise.race([
-        childDone.then((attempt) => ({ attempt })),
-        delay(10).then(() => null),
-      ]);
-      if (progress !== null) return progress.attempt;
-    }
-    await runtime.beforeMessageBarrierVerification?.({
-      readyPath: barrier.readyPath,
-      messageFile,
-    });
+
+    const preCommitCompletion = await waitForCommitBarrier(
+      barrier.indexPreReadyPath,
+      childDone,
+    );
+    if (preCommitCompletion !== null) return preCommitCompletion;
+
+    let deferredIndexError;
     try {
-      // prepare-commit-msg 在 Git 生成 COMMIT_EDITMSG 后运行；放行前同时认证源路径与 Git 实际消费的消息字节。
+      const consumedIndex = await captureCommitIndexSnapshot(repository, taskIndex, runtime);
+      // Git 可在 hook 前刷新 index 的 stat/cache 扩展；tree 才是确认并最终进入 commit 的语义快照。
+      if (!canonicalFieldMatches(confirmedIndex.tree, consumedIndex.tree)) {
+        throw stopped('CONFIRMATION_STALE');
+      }
+    } catch (error) {
+      deferredIndexError = error;
+    }
+    // 未认证入口不交给用户 hook；仍推进到消息屏障，以便在 commit object 前统一拒绝并覆盖瞬态恢复。
+    await writeFile(
+      deferredIndexError === undefined ? barrier.indexPreAllowPath : barrier.indexPreSkipPath,
+      'allow\n',
+      { flag: 'wx', mode: 0o600 },
+    );
+
+    const postCommitCompletion = await waitForCommitBarrier(
+      barrier.indexPostReadyPath,
+      childDone,
+    );
+    if (postCommitCompletion !== null) return postCommitCompletion;
+
+    let hookIndex;
+    try {
+      hookIndex = await captureCommitIndexSnapshot(repository, taskIndex, runtime);
+    } catch (error) {
+      await writeFile(barrier.indexPostDenyPath, 'deny\n', { flag: 'wx', mode: 0o600 });
+      await childDone.catch(() => {});
+      throw error;
+    }
+    await writeFile(barrier.indexPostAllowPath, 'allow\n', { flag: 'wx', mode: 0o600 });
+
+    const messageCompletion = await waitForCommitBarrier(barrier.readyPath, childDone);
+    if (messageCompletion !== null) return messageCompletion;
+
+    try {
+      await runtime.beforeMessageBarrierVerification?.({
+        readyPath: barrier.readyPath,
+        messageFile,
+      });
+      if (deferredIndexError !== undefined) throw deferredIndexError;
+      // prepare-commit-msg 前 Git 已重新消费 hook 可修改的 index；放行前同时认证 index 与消息实际字节。
+      const consumedIndex = await captureCommitIndexSnapshot(repository, taskIndex, runtime);
+      if (!commitIndexSnapshotsMatch(hookIndex, consumedIndex)) {
+        throw stopped('CONFIRMATION_STALE');
+      }
       await reverifyBoundMessageHandles(context, handles);
       const consumedMessage = await readStableOwnedFile(
         barrier.commitMessagePath,

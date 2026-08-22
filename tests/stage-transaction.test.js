@@ -2884,6 +2884,78 @@ test('commit consumes the authenticated task index after the final transaction c
   await assert.rejects(runGit(root, ['cat-file', '-e', 'HEAD:late-unconfirmed.txt']));
 });
 
+test('commit rejects replacement of the exact scratch index consumed by Git', async (t) => {
+  for (const restoration of ['persistent', 'restored-after-read']) {
+    await t.test(restoration, async (subtest) => {
+      const root = await repositoryWithBaseline(subtest);
+      await writeFile(path.join(root, 'feature.txt'), `line 1\nselected ${restoration} scratch\nline 3\n`);
+      const fixture = await prepareCommitCase(subtest, root, (units) => units.find((unit) =>
+        unit.view === 'head_to_worktree'));
+      const transactionIndex = path.join(
+        path.dirname(fixture.prepared.message_file),
+        'task.index',
+      );
+      const maliciousIndex = path.join(fixture.temporaryRoot, `${restoration}-scratch.index`);
+      const displacedIndex = path.join(
+        fixture.temporaryRoot,
+        `${restoration}-confirmed-scratch.index`,
+      );
+      await writeFile(maliciousIndex, await readFile(transactionIndex), {
+        flag: 'wx',
+        mode: 0o600,
+      });
+      const { stdout: maliciousBlob } = await runGit(root, ['hash-object', '-w', '--stdin'], {
+        input: Buffer.from(`unconfirmed ${restoration} scratch bytes\n`),
+      });
+      await runGit(root, [
+        'update-index', '--add', '--cacheinfo',
+        `100644,${maliciousBlob.trim()},unconfirmed-scratch.txt`,
+      ], {
+        env: {
+          GIT_INDEX_FILE: maliciousIndex,
+          GIT_OBJECT_DIRECTORY: path.join(path.dirname(fixture.prepared.message_file), 'objects'),
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(
+            root,
+            (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+          ),
+        },
+      });
+      const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+      let consumedIndex;
+      let replaced = false;
+      let restored = false;
+
+      await assert.rejects(
+        commitPrepared(root, fixture, {
+          spawnGit: (repositoryRoot, args, options) => {
+            if (args[0] === 'commit' && !replaced) {
+              consumedIndex = options.env.GIT_INDEX_FILE;
+              replaced = true;
+              return rename(consumedIndex, displacedIndex)
+                .then(() => rename(maliciousIndex, consumedIndex))
+                .then(() => spawnRealGit(repositoryRoot, args, options));
+            }
+            return spawnRealGit(repositoryRoot, args, options);
+          },
+          beforeMessageBarrierVerification: restoration === 'restored-after-read'
+            ? async () => {
+              await rm(consumedIndex, { force: false });
+              await rename(displacedIndex, consumedIndex);
+              restored = true;
+            }
+            : undefined,
+        }),
+        ({ code }) => code === 'CONFIRMATION_STALE',
+      );
+
+      assert.equal(replaced, true);
+      assert.equal(restored, restoration === 'restored-after-read');
+      assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+      await assert.rejects(runGit(root, ['cat-file', '-e', 'HEAD:unconfirmed-scratch.txt']));
+    });
+  }
+});
+
 test('state and recovery index writes complete through real short file writes', async (t) => {
   await t.test('authenticated state', async (subtest) => {
     const root = await repositoryWithBaseline(subtest);
