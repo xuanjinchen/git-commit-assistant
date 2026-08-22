@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   chmod,
@@ -20,6 +20,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deflateSync } from 'node:zlib';
 
 const SCHEMA_VERSION = 1;
+const LOOSE_OBJECT_HELPER_COMMAND = '__loose-object-helper';
 
 class StageTransactionError extends Error {
   constructor(code, message) {
@@ -735,42 +736,379 @@ async function mutableTransactionGit(repository, args, transaction, runtime, opt
   );
 }
 
-async function materializeLooseObject(repository, transaction, oid, objectBytes) {
-  const objectDirectory = path.join(transaction.objectDirectory, oid.slice(0, 2));
-  const objectFile = path.join(objectDirectory, oid.slice(2));
+function createHelperMonitor(child) {
+  const queued = [];
+  const waiting = [];
+  let closed;
+  let spawnError;
+  child.on('message', (message) => {
+    const waiter = waiting.shift();
+    if (waiter === undefined) queued.push(message);
+    else waiter.resolve(message);
+  });
+  child.once('error', (error) => {
+    spawnError = error;
+  });
+  const close = new Promise((resolve) => {
+    child.once('close', (code, signal) => {
+      closed = { code, signal, error: spawnError };
+      for (const waiter of waiting.splice(0)) {
+        waiter.reject(spawnError ?? new Error('Loose object helper exited unexpectedly.'));
+      }
+      resolve(closed);
+    });
+  });
+  return {
+    close,
+    isClosed: () => closed !== undefined,
+    next: () => {
+      if (queued.length !== 0) return Promise.resolve(queued.shift());
+      if (closed !== undefined) {
+        return Promise.reject(
+          closed.error ?? new Error('Loose object helper exited unexpectedly.'),
+        );
+      }
+      return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+    },
+  };
+}
+
+async function terminateHelper(child, monitor) {
+  if (!monitor.isClosed()) child.kill();
+  await monitor.close;
+}
+
+function sendHelperInstruction(child, monitor, message) {
+  return new Promise((resolve, reject) => {
+    if (monitor.isClosed() || !child.connected) {
+      reject(new Error('Loose object helper IPC is closed.'));
+      return;
+    }
+    child.send(message, (error) => {
+      if (error === null) resolve();
+      else reject(error);
+    });
+  });
+}
+
+function sendHelperInput(child, monitor, bytes) {
+  return new Promise((resolve, reject) => {
+    let inputError;
+    const onError = (error) => {
+      inputError = error;
+    };
+    child.stdin.once('error', onError);
+    child.stdin.end(bytes, () => {
+      child.stdin.off('error', onError);
+      if (inputError === undefined && !monitor.isClosed()) resolve();
+      else reject(inputError ?? new Error('Loose object helper closed its input early.'));
+    });
+  });
+}
+
+function validateHelperEvent(message, phase, oid) {
+  if (message?.type === 'failure') {
+    throw new Error('Loose object helper rejected publication.');
+  }
+  if (message?.type !== 'event' || message.phase !== phase || message.oid !== oid) {
+    throw new Error('Loose object helper returned an invalid protocol event.');
+  }
+  return message;
+}
+
+async function coordinateLooseObjectHelper(runtime, event, child, monitor) {
+  const terminate = () => terminateHelper(child, monitor);
+  await runtime.coordinateLooseObjectHelper?.(event, { terminate });
+  if (monitor.isClosed()) throw new Error('Loose object helper stopped during coordination.');
+}
+
+async function materializeLooseObject(repository, transaction, oid, objectBytes, runtime) {
   const compressed = deflateSync(objectBytes);
-  await withTransactionMutation(
+  const objectIdentity = await captureExternalDirectoryIdentity(
     repository,
-    transaction,
-    [objectDirectory],
-    async () => {
-      try {
-        await mkdir(objectDirectory, { mode: 0o700 });
-      } catch (error) {
-        if (error?.code !== 'EEXIST') throw error;
-        const metadata = await lstat(objectDirectory);
-        if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-          throw stopped('TRANSACTION_IDENTITY_CHANGED');
-        }
-      }
+    transaction.objectDirectory,
+  );
+  // helper 的 cwd 在创建子进程时锚定外部 ODB；ready 身份与 canonical 路径匹配前绝不发送对象 bytes。
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(import.meta.url), LOOSE_OBJECT_HELPER_COMMAND, oid],
+    {
+      cwd: transaction.objectDirectory,
+      windowsHide: true,
+      stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
     },
   );
-  await withTransactionMutation(
-    repository,
-    transaction,
-    [objectFile],
-    async () => {
-      try {
-        await writeFile(objectFile, compressed, { mode: 0o600, flag: 'wx' });
-      } catch (error) {
-        if (error?.code !== 'EEXIST'
-          || !compressed.equals(await readFile(objectFile))) {
-          throw stopped('TRANSACTION_IDENTITY_CHANGED');
-        }
+  const monitor = createHelperMonitor(child);
+  const stderr = [];
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  try {
+    const ready = validateHelperEvent(await monitor.next(), 'ready', oid);
+    if (!hasSameDirectoryIdentity(ready.identity, objectIdentity)) {
+      throw stopped('TRANSACTION_IDENTITY_CHANGED');
+    }
+    await coordinateLooseObjectHelper(runtime, {
+      phase: 'ready',
+      oid,
+      object_directory: transaction.objectDirectory,
+    }, child, monitor);
+    await assertTransactionGeometry(
+      repository,
+      transaction,
+      [transaction.objectDirectory],
+    );
+    if (!hasSameDirectoryIdentity(
+      await captureExternalDirectoryIdentity(repository, transaction.objectDirectory),
+      objectIdentity,
+    )) {
+      throw stopped('TRANSACTION_IDENTITY_CHANGED');
+    }
+    await sendHelperInstruction(child, monitor, {
+      type: 'start',
+      oid,
+      size: compressed.length,
+      sha256: digest(compressed),
+    });
+    await sendHelperInput(child, monitor, compressed);
+
+    const prefixReady = validateHelperEvent(await monitor.next(), 'prefix-ready', oid);
+    const prefixPath = path.join(transaction.objectDirectory, oid.slice(0, 2));
+    await coordinateLooseObjectHelper(runtime, {
+      phase: 'prefix-ready',
+      oid,
+      object_directory: transaction.objectDirectory,
+      prefix_path: prefixPath,
+    }, child, monitor);
+    await assertTransactionGeometry(repository, transaction, [transaction.objectDirectory, prefixPath]);
+    await sendHelperInstruction(child, monitor, {
+      type: 'continue',
+      phase: prefixReady.phase,
+      oid,
+    });
+
+    validateHelperEvent(await monitor.next(), 'partial-write', oid);
+    await coordinateLooseObjectHelper(runtime, {
+      phase: 'partial-write',
+      oid,
+      object_directory: transaction.objectDirectory,
+      prefix_path: prefixPath,
+    }, child, monitor);
+    await assertTransactionGeometry(repository, transaction, [transaction.objectDirectory, prefixPath]);
+    await sendHelperInstruction(child, monitor, {
+      type: 'continue',
+      phase: 'partial-write',
+      oid,
+    });
+
+    validateHelperEvent(await monitor.next(), 'published', oid);
+    const result = await monitor.close;
+    if (result.code !== 0 || stderr.length !== 0) {
+      throw new Error('Loose object helper did not exit cleanly.');
+    }
+    await assertTransactionGeometry(repository, transaction, [transaction.objectDirectory, prefixPath]);
+  } catch (error) {
+    if (error instanceof StageTransactionError) throw error;
+    throw stopped('TRANSACTION_IDENTITY_CHANGED');
+  } finally {
+    await terminateHelper(child, monitor);
+  }
+}
+
+function receiveHelperInstruction(type, phase) {
+  return new Promise((resolve, reject) => {
+    const onMessage = (message) => {
+      if (message?.type !== type || (phase !== undefined && message.phase !== phase)) {
+        cleanup();
+        reject(new Error('Loose object helper received an invalid instruction.'));
+        return;
       }
-      await chmod(objectFile, 0o600);
-    },
-  );
+      cleanup();
+      resolve(message);
+    };
+    const onDisconnect = () => {
+      cleanup();
+      reject(new Error('Loose object helper IPC disconnected.'));
+    };
+    const cleanup = () => {
+      process.off('message', onMessage);
+      process.off('disconnect', onDisconnect);
+    };
+    process.once('message', onMessage);
+    process.once('disconnect', onDisconnect);
+  });
+}
+
+function sendInternalHelperMessage(message) {
+  return new Promise((resolve, reject) => {
+    if (!process.connected) {
+      reject(new Error('Loose object helper requires an IPC parent.'));
+      return;
+    }
+    process.send(message, (error) => {
+      if (error === null) resolve();
+      else reject(error);
+    });
+  });
+}
+
+async function readLooseObjectHelperInput(command) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of process.stdin) {
+    length += chunk.length;
+    if (length > command.size) {
+      throw new Error('Loose object helper input exceeded its declared size.');
+    }
+    chunks.push(chunk);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (bytes.length !== command.size || digest(bytes) !== command.sha256) {
+    throw new Error('Loose object helper input was incomplete or corrupted.');
+  }
+  return bytes;
+}
+
+async function helperDirectoryIdentity(candidate, includeCanonical = false) {
+  const metadata = await lstat(candidate);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error('Loose object helper directory is not ordinary.');
+  }
+  return {
+    dev: metadata.dev,
+    ino: metadata.ino,
+    ...(includeCanonical ? { canonical: path.normalize(await realpath(candidate)) } : {}),
+  };
+}
+
+async function writeAll(handle, bytes, start, end) {
+  let offset = start;
+  while (offset < end) {
+    const { bytesWritten } = await handle.write(bytes, offset, end - offset, offset);
+    if (bytesWritten === 0) throw new Error('Loose object helper made no write progress.');
+    offset += bytesWritten;
+  }
+}
+
+async function verifyExistingLooseObject(basename, compressed) {
+  const entryBefore = await lstat(basename);
+  if (!entryBefore.isFile() || entryBefore.isSymbolicLink()) {
+    throw new Error('Existing loose object is not an ordinary file.');
+  }
+  const handle = await open(basename, 'r');
+  try {
+    const openedBefore = await handle.stat();
+    const bytes = await handle.readFile();
+    const openedAfter = await handle.stat();
+    const entryAfter = await lstat(basename);
+    if (!entryAfter.isFile() || entryAfter.isSymbolicLink()
+      || !hasSameFilesystemIdentity(entryBefore, openedBefore)
+      || !hasSameFilesystemIdentity(openedBefore, openedAfter)
+      || !hasSameFilesystemIdentity(openedAfter, entryAfter)
+      || openedBefore.size !== openedAfter.size
+      || !compressed.equals(bytes)) {
+      throw new Error('Existing loose object changed or has unexpected bytes.');
+    }
+    await handle.chmod(0o600);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function publishLooseObjectFromAnchoredCwd(oid, compressed) {
+  const prefix = oid.slice(0, 2);
+  const basename = oid.slice(2);
+  try {
+    await mkdir(prefix, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  const prefixIdentity = await helperDirectoryIdentity(prefix);
+  const continuePrefix = receiveHelperInstruction('continue', 'prefix-ready');
+  await sendInternalHelperMessage({
+    type: 'event',
+    phase: 'prefix-ready',
+    oid,
+    identity: prefixIdentity,
+  });
+  await continuePrefix;
+
+  const currentPrefixIdentity = await helperDirectoryIdentity(prefix);
+  if (!hasSameFilesystemIdentity(currentPrefixIdentity, prefixIdentity)) {
+    throw new Error('Loose object prefix identity changed before chdir.');
+  }
+  process.chdir(prefix);
+  if (!hasSameFilesystemIdentity(await helperDirectoryIdentity('.'), prefixIdentity)) {
+    throw new Error('Loose object prefix identity changed during chdir.');
+  }
+  // chdir 后的相对 chmod/open 由进程 cwd 锚定；目录旧路径随后换指也不会触达替代目标。
+  await chmod('.', 0o700);
+
+  let existing = false;
+  let handle;
+  try {
+    handle = await open(basename, 'wx', 0o600);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    existing = true;
+  }
+  if (existing) {
+    await verifyExistingLooseObject(basename, compressed);
+  } else {
+    try {
+      const split = Math.max(1, Math.floor(compressed.length / 2));
+      await writeAll(handle, compressed, 0, split);
+      const continueWrite = receiveHelperInstruction('continue', 'partial-write');
+      await sendInternalHelperMessage({ type: 'event', phase: 'partial-write', oid });
+      await continueWrite;
+      await writeAll(handle, compressed, split, compressed.length);
+      await handle.chmod(0o600);
+    } finally {
+      await handle.close();
+    }
+    return;
+  }
+
+  const continueWrite = receiveHelperInstruction('continue', 'partial-write');
+  await sendInternalHelperMessage({
+    type: 'event',
+    phase: 'partial-write',
+    oid,
+    existing: true,
+  });
+  await continueWrite;
+}
+
+async function runLooseObjectHelper() {
+  const oid = process.argv[3];
+  try {
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid ?? '')) {
+      throw new Error('Loose object helper received an invalid object ID.');
+    }
+    const start = receiveHelperInstruction('start');
+    await sendInternalHelperMessage({
+      type: 'event',
+      phase: 'ready',
+      oid,
+      identity: await helperDirectoryIdentity('.', true),
+    });
+    const command = await start;
+    if (command.oid !== oid || !Number.isSafeInteger(command.size) || command.size < 0
+      || !/^[0-9a-f]{64}$/u.test(command.sha256 ?? '')) {
+      throw new Error('Loose object helper received invalid publication metadata.');
+    }
+    const compressed = await readLooseObjectHelperInput(command);
+    await publishLooseObjectFromAnchoredCwd(oid, compressed);
+    await sendInternalHelperMessage({ type: 'event', phase: 'published', oid });
+    process.disconnect();
+    return 0;
+  } catch {
+    try {
+      await sendInternalHelperMessage({ type: 'failure', oid });
+    } catch {
+      // 父进程已退出时只需让 helper 非零结束，不能再尝试任何路径清理。
+    }
+    process.disconnect?.();
+    return 1;
+  }
 }
 
 // Git 只负责按仓库 object format 计算 OID；identity post-check 通过后才由受控本地写入物化 loose object。
@@ -791,7 +1129,7 @@ async function hashAndMaterializeObject(repository, type, bytes, transaction, ru
   if (createHash(algorithm).update(objectBytes).digest('hex') !== oid) {
     throw new StageTransactionError('GIT_OUTPUT_INVALID', 'Git returned an inconsistent object ID.');
   }
-  await materializeLooseObject(repository, transaction, oid, objectBytes);
+  await materializeLooseObject(repository, transaction, oid, objectBytes, runtime);
   return oid;
 }
 
@@ -1713,5 +2051,9 @@ async function runCli() {
 
 // 仅直接执行脚本时启用单行 JSON CLI；作为模块导入不会读取 stdin 或写输出。
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runCli();
+  if (process.argv[2] === LOOSE_OBJECT_HELPER_COMMAND) {
+    process.exitCode = await runLooseObjectHelper();
+  } else {
+    await runCli();
+  }
 }

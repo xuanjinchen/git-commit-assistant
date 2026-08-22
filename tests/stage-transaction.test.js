@@ -6,6 +6,7 @@ import {
   mkdir,
   lstat,
   readFile,
+  readlink,
   readdir,
   rename,
   rm,
@@ -87,7 +88,7 @@ async function runCli(command, input, options = {}) {
   };
 }
 
-async function createGitRepository(t, repositoryName = 'repository') {
+async function createGitRepository(t, repositoryName = 'repository', objectFormat = 'sha1') {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'git-commit-assistant-test-'));
   const root = path.join(fixtureRoot, repositoryName);
   await mkdir(root);
@@ -97,7 +98,10 @@ async function createGitRepository(t, repositoryName = 'repository') {
     gitConfigByRepository.delete(root);
     await rm(fixtureRoot, { recursive: true, force: true });
   });
-  await runGit(root, ['init', '-b', 'main']);
+  await runGit(root, [
+    'init', '-b', 'main',
+    ...(objectFormat === 'sha1' ? [] : [`--object-format=${objectFormat}`]),
+  ]);
   await runGit(root, ['config', 'user.name', 'Fixture Tester']);
   await runGit(root, ['config', 'user.email', 'tester@example.invalid']);
   await runGit(root, ['config', 'core.autocrlf', 'false']);
@@ -165,22 +169,48 @@ async function snapshotObjects(root) {
     root,
     (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
   );
-  const files = [];
+  const entries = [];
   async function visit(directory, relative = '') {
+    const metadata = await lstat(directory);
+    entries.push({
+      type: 'directory',
+      path: relative.split(path.sep).join('/'),
+      mode: metadata.mode & 0o7777,
+    });
     for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const child = path.join(directory, entry.name);
       const childRelative = path.join(relative, entry.name);
-      if (entry.isDirectory()) {
-        await visit(path.join(directory, entry.name), childRelative);
+      const childMetadata = await lstat(child);
+      const snapshotPath = childRelative.split(path.sep).join('/');
+      if (childMetadata.isSymbolicLink()) {
+        entries.push({
+          type: 'link',
+          path: snapshotPath,
+          mode: childMetadata.mode & 0o7777,
+          link_target: (await readlink(child)).split(path.sep).join('/'),
+        });
+      } else if (childMetadata.isDirectory()) {
+        await visit(child, childRelative);
+      } else if (childMetadata.isFile()) {
+        entries.push({
+          type: 'file',
+          path: snapshotPath,
+          mode: childMetadata.mode & 0o7777,
+          bytes_sha256: sha256(await readFile(child)),
+        });
       } else {
-        files.push({
-          path: childRelative.split(path.sep).join('/'),
-          bytes_sha256: sha256(await readFile(path.join(directory, entry.name))),
+        entries.push({
+          type: 'other',
+          path: snapshotPath,
+          mode: childMetadata.mode & 0o7777,
         });
       }
     }
   }
   await visit(objectRoot);
-  return files.sort((left, right) => left.path.localeCompare(right.path));
+  // 目录本身也进入快照，空 loose prefix、mode 和 link/junction 换指才不会被文件清单漏掉。
+  return entries.sort((left, right) =>
+    left.path.localeCompare(right.path) || left.type.localeCompare(right.type));
 }
 
 async function snapshotRepository(root) {
@@ -935,6 +965,185 @@ test('prepare preserves the main ODB when its external ODB identity changes at w
 test('prepare preserves the main ODB when its external ODB identity changes at commit-tree', async (t) => {
   await assertMainOdbPreservedAtGitWriter(t, 'commit-tree');
 });
+
+test('prepare anchors loose object publication when its object directory identity changes', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const selectedBytes = Buffer.from('anchored publication bytes\n');
+  await writeFile(path.join(root, 'selected-untracked.txt'), selectedBytes);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'untracked');
+  const mainObjectDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+  );
+  const before = await snapshotRepository(root);
+  let coordinated = false;
+  let unexpectedTransaction;
+
+  t.after(async () => {
+    if (unexpectedTransaction !== undefined) {
+      await rm(unexpectedTransaction.transaction_directory, { recursive: true, force: true });
+    }
+  });
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      coordinateLooseObjectHelper: async (event, helper) => {
+        if (coordinated || event.phase !== 'ready') return;
+        coordinated = true;
+        // Windows 必须先终止持有 cwd 的 helper 才能换指；POSIX 同样借此建立确定性时序。
+        await helper.terminate();
+        await rename(event.object_directory, `${event.object_directory}-displaced`);
+        await symlink(
+          mainObjectDirectory,
+          event.object_directory,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+    }).then((prepared) => {
+      unexpectedTransaction = prepared;
+      return prepared;
+    }),
+    ({ code }) => code === 'TRANSACTION_IDENTITY_CHANGED',
+  );
+
+  assert.equal(coordinated, true);
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
+test('prepare rejects a loose prefix replacement between creation and chdir', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'selected-untracked.txt'), 'prefix identity bytes\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'untracked');
+  const mainObjectDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+  );
+  const before = await snapshotRepository(root);
+  let prefixReplaced = false;
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      coordinateLooseObjectHelper: async (event) => {
+        if (prefixReplaced || event.phase !== 'prefix-ready') return;
+        prefixReplaced = true;
+        await rename(event.prefix_path, `${event.prefix_path}-displaced`);
+        await symlink(
+          mainObjectDirectory,
+          event.prefix_path,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+    }),
+    ({ code }) => code === 'TRANSACTION_IDENTITY_CHANGED',
+  );
+
+  assert.equal(prefixReplaced, true);
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
+for (const crashPhase of ['ready', 'partial-write']) {
+  test(`prepare cleans owned state when the loose object helper crashes at ${crashPhase}`, async (t) => {
+    const root = await repositoryWithBaseline(t);
+    const temporaryRoot = await createTemporaryRoot(t);
+    await writeFile(path.join(root, 'selected-untracked.txt'), `helper crash at ${crashPhase}\n`);
+    const manifest = await inspectRepository({ repository_root: root });
+    const selected = manifest.units.find((unit) => unit.view === 'untracked');
+    const before = await snapshotRepository(root);
+    let terminated = false;
+
+    await assert.rejects(
+      prepareTransaction({
+        repository_root: root,
+        manifest,
+        selected_unit_ids: [selected.unit_id],
+      }, {
+        temporaryRoot,
+        coordinateLooseObjectHelper: async (event, helper) => {
+          if (terminated || event.phase !== crashPhase) return;
+          terminated = true;
+          await helper.terminate();
+        },
+      }),
+      ({ code }) => code === 'TRANSACTION_IDENTITY_CHANGED',
+    );
+
+    assert.equal(terminated, true);
+    assert.deepEqual(await snapshotRepository(root), before);
+    assert.deepEqual(
+      await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+      [],
+    );
+  });
+}
+
+for (const objectFormat of ['sha1', 'sha256']) {
+  test(`loose object helper supports ${objectFormat} and an existing identical object`, async (t) => {
+    const root = await createGitRepository(t, `${objectFormat}-repository`, objectFormat);
+    const temporaryRoot = await createTemporaryRoot(t);
+    await writeFile(path.join(root, 'baseline.txt'), 'baseline\n');
+    await runGit(root, ['add', '--', 'baseline.txt']);
+    await runGit(root, ['commit', '-m', `${objectFormat} baseline`]);
+    const selectedBytes = Buffer.from(`identical ${objectFormat} bytes\n`);
+    await writeFile(path.join(root, 'first.txt'), selectedBytes);
+    await writeFile(path.join(root, 'second.txt'), selectedBytes);
+    const manifest = await inspectRepository({ repository_root: root });
+    const selected = manifest.units.filter((unit) => unit.view === 'untracked');
+    const before = await snapshotRepository(root);
+
+    const prepared = await prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: selected.map((unit) => unit.unit_id),
+    }, { temporaryRoot });
+
+    const externalObjectDirectory = path.join(path.dirname(prepared.message_file), 'objects');
+    const blobOid = (await runGit(root, ['hash-object', '--stdin'], {
+      input: selectedBytes,
+    })).stdout.trim();
+    const prefixMetadata = await stat(path.join(externalObjectDirectory, blobOid.slice(0, 2)));
+    const objectMetadata = await stat(path.join(
+      externalObjectDirectory,
+      blobOid.slice(0, 2),
+      blobOid.slice(2),
+    ));
+    assert.equal(prefixMetadata.isDirectory(), true);
+    assert.equal(objectMetadata.isFile(), true);
+    if (process.platform !== 'win32') {
+      assert.equal(prefixMetadata.mode & 0o777, 0o700);
+      assert.equal(objectMetadata.mode & 0o777, 0o600);
+    }
+    assert.equal(
+      await readExternalTreeFile(root, prepared.task_tree_oid, 'first.txt', externalObjectDirectory),
+      selectedBytes.toString('utf8'),
+    );
+    assert.equal(
+      await readExternalTreeFile(root, prepared.task_tree_oid, 'second.txt', externalObjectDirectory),
+      selectedBytes.toString('utf8'),
+    );
+    assert.deepEqual(await snapshotRepository(root), before);
+  });
+}
 
 test('prepare stops and removes owned files when transaction resource identity changes', async (t) => {
   const root = await repositoryWithBaseline(t);
