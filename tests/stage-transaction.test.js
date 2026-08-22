@@ -2956,6 +2956,126 @@ test('commit rejects replacement of the exact scratch index consumed by Git', as
   }
 });
 
+test('commit rejects a task index version read after user pre-commit returns', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected second index read\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const gitDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-dir'])).stdout.trim(),
+  );
+  const hookLog = path.join(gitDirectory, 'user-pre-commit.log');
+  const hookPath = path.join(gitDirectory, 'hooks', 'pre-commit');
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'printf "ran\\n" >> "$(git rev-parse --git-path user-pre-commit.log)"',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+
+  const alternateIndex = path.join(fixture.temporaryRoot, 'second-read-task.index');
+  await writeFile(alternateIndex, await readIndexBytes(root), { flag: 'wx', mode: 0o600 });
+  const { stdout: alternateBlob } = await runGit(root, ['hash-object', '-w', '--stdin'], {
+    input: Buffer.from('second task index version\n'),
+  });
+  await runGit(root, [
+    'update-index', '--add', '--cacheinfo',
+    `100644,${alternateBlob.trim()},second-read-version.txt`,
+  ], {
+    env: { GIT_INDEX_FILE: alternateIndex },
+  });
+  const alternateTree = (await runGit(root, ['write-tree'], {
+    env: { GIT_INDEX_FILE: alternateIndex },
+  })).stdout.trim();
+  const commitObjectsBefore = (await runGit(root, [
+    'cat-file', '--batch-all-objects', '--batch-check=%(objectname) %(objecttype)',
+  ])).stdout.split('\n').filter((line) => line.endsWith(' commit')).sort();
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  let commitIndex;
+  let displacedIndex;
+  let consumedAlternateIndex;
+  let commitSpawned = false;
+  let commitSnapshotWrites = 0;
+  let switched = false;
+  let restored = false;
+  let snapshotIndexMetadata;
+  let snapshotDirectoryMetadata;
+  let restoredIndexMetadata;
+  let restoredDirectoryMetadata;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      runGit: async (repositoryRoot, args, options) => {
+        const result = await runGit(repositoryRoot, args, options);
+        if (commitSpawned && args[0] === 'write-tree'
+          && path.basename(path.dirname(options.env?.GIT_INDEX_FILE ?? ''))
+            .startsWith('git-commit-assistant-index-tree-')) {
+          commitSnapshotWrites += 1;
+          if (commitSnapshotWrites === 2) {
+            // 第二次快照已记录用户 hook 的结果；切换后才放行父 Git 的第二次 index 读取。
+            snapshotIndexMetadata = await lstat(commitIndex, { bigint: true });
+            snapshotDirectoryMetadata = await lstat(path.dirname(commitIndex), { bigint: true });
+            displacedIndex = path.join(fixture.temporaryRoot, 'confirmed-second-read-task.index');
+            consumedAlternateIndex = path.join(
+              fixture.temporaryRoot,
+              'consumed-second-read-task.index',
+            );
+            await rename(commitIndex, displacedIndex);
+            await rename(alternateIndex, commitIndex);
+            switched = true;
+          }
+        }
+        return result;
+      },
+      spawnGit: (repositoryRoot, args, options) => {
+        if (args[0] === 'commit') {
+          commitIndex = options.env.GIT_INDEX_FILE;
+          commitSpawned = true;
+        }
+        return spawnRealGit(repositoryRoot, args, options);
+      },
+      beforeMessageBarrierVerification: async () => {
+        assert.equal(switched, true);
+        await rename(commitIndex, consumedAlternateIndex);
+        await rename(displacedIndex, commitIndex);
+        restoredIndexMetadata = await lstat(commitIndex, { bigint: true });
+        restoredDirectoryMetadata = await lstat(path.dirname(commitIndex), { bigint: true });
+        restored = true;
+      },
+    }),
+    ({ code }) => code === 'CONFIRMATION_STALE',
+  );
+
+  assert.equal(switched, true);
+  assert.equal(restored, true);
+  assert.equal(commitSnapshotWrites >= 3, true);
+  assert.equal(await readFile(hookLog, 'utf8'), 'ran\n');
+  assert.deepEqual(
+    [restoredIndexMetadata.dev, restoredIndexMetadata.ino,
+      restoredIndexMetadata.size, restoredIndexMetadata.mtimeNs],
+    [snapshotIndexMetadata.dev, snapshotIndexMetadata.ino,
+      snapshotIndexMetadata.size, snapshotIndexMetadata.mtimeNs],
+  );
+  assert.deepEqual(
+    [restoredDirectoryMetadata.dev, restoredDirectoryMetadata.ino],
+    [snapshotDirectoryMetadata.dev, snapshotDirectoryMetadata.ino],
+  );
+  assert.equal(
+    restoredIndexMetadata.ctimeNs !== snapshotIndexMetadata.ctimeNs
+      || restoredDirectoryMetadata.mtimeNs !== snapshotDirectoryMetadata.mtimeNs
+      || restoredDirectoryMetadata.ctimeNs !== snapshotDirectoryMetadata.ctimeNs,
+    true,
+  );
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  const commitObjectsAfter = (await runGit(root, [
+    'cat-file', '--batch-all-objects', '--batch-check=%(objectname) %(objecttype)',
+  ])).stdout.split('\n').filter((line) => line.endsWith(' commit')).sort();
+  assert.deepEqual(commitObjectsAfter, commitObjectsBefore);
+  assert.notEqual(alternateTree, fixture.prepared.task_tree_oid);
+  await assert.rejects(runGit(root, ['cat-file', '-e', 'HEAD:second-read-version.txt']));
+});
+
 test('state and recovery index writes complete through real short file writes', async (t) => {
   await t.test('authenticated state', async (subtest) => {
     const root = await repositoryWithBaseline(subtest);
