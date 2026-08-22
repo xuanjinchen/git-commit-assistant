@@ -818,7 +818,7 @@ function validateHelperEvent(message, phase, oid) {
 
 async function coordinateLooseObjectHelper(runtime, event, child, monitor) {
   const terminate = () => terminateHelper(child, monitor);
-  await runtime.coordinateLooseObjectHelper?.(event, { terminate });
+  await runtime.coordinateLooseObjectHelper?.(event, { pid: child.pid, terminate });
   if (monitor.isClosed()) throw new Error('Loose object helper stopped during coordination.');
 }
 
@@ -828,7 +828,7 @@ async function materializeLooseObject(repository, transaction, oid, objectBytes,
     repository,
     transaction.objectDirectory,
   );
-  // helper 的 cwd 在创建子进程时锚定外部 ODB；ready 身份与 canonical 路径匹配前绝不发送对象 bytes。
+  // helper 必须先把 prefix 锚定为 cwd 并持有目录句柄；稳定 ready 复核前绝不发送对象 bytes。
   const child = spawn(
     process.execPath,
     [fileURLToPath(import.meta.url), LOOSE_OBJECT_HELPER_COMMAND, oid],
@@ -842,23 +842,36 @@ async function materializeLooseObject(repository, transaction, oid, objectBytes,
   const stderr = [];
   child.stderr.on('data', (chunk) => stderr.push(chunk));
   try {
-    const ready = validateHelperEvent(await monitor.next(), 'ready', oid);
-    if (!hasSameDirectoryIdentity(ready.identity, objectIdentity)) {
+    const prefixReady = validateHelperEvent(await monitor.next(), 'prefix-ready', oid);
+    const prefixPath = path.join(transaction.objectDirectory, oid.slice(0, 2));
+    await assertTransactionGeometry(
+      repository,
+      transaction,
+      [transaction.objectDirectory, prefixPath],
+    );
+    const prefixIdentity = await captureExternalDirectoryIdentity(repository, prefixPath);
+    if (!hasSameDirectoryIdentity(prefixReady.parent_identity, objectIdentity)
+      || !hasSameDirectoryIdentity(prefixReady.identity, prefixIdentity)
+      || path.dirname(prefixReady.identity.canonical) !== objectIdentity.canonical) {
       throw stopped('TRANSACTION_IDENTITY_CHANGED');
     }
     await coordinateLooseObjectHelper(runtime, {
-      phase: 'ready',
+      phase: 'prefix-ready',
       oid,
       object_directory: transaction.objectDirectory,
+      prefix_path: prefixPath,
     }, child, monitor);
     await assertTransactionGeometry(
       repository,
       transaction,
-      [transaction.objectDirectory],
+      [transaction.objectDirectory, prefixPath],
     );
     if (!hasSameDirectoryIdentity(
       await captureExternalDirectoryIdentity(repository, transaction.objectDirectory),
       objectIdentity,
+    ) || !hasSameDirectoryIdentity(
+      await captureExternalDirectoryIdentity(repository, prefixPath),
+      prefixIdentity,
     )) {
       throw stopped('TRANSACTION_IDENTITY_CHANGED');
     }
@@ -869,21 +882,6 @@ async function materializeLooseObject(repository, transaction, oid, objectBytes,
       sha256: digest(compressed),
     });
     await sendHelperInput(child, monitor, compressed);
-
-    const prefixReady = validateHelperEvent(await monitor.next(), 'prefix-ready', oid);
-    const prefixPath = path.join(transaction.objectDirectory, oid.slice(0, 2));
-    await coordinateLooseObjectHelper(runtime, {
-      phase: 'prefix-ready',
-      oid,
-      object_directory: transaction.objectDirectory,
-      prefix_path: prefixPath,
-    }, child, monitor);
-    await assertTransactionGeometry(repository, transaction, [transaction.objectDirectory, prefixPath]);
-    await sendHelperInstruction(child, monitor, {
-      type: 'continue',
-      phase: prefixReady.phase,
-      oid,
-    });
 
     validateHelperEvent(await monitor.next(), 'partial-write', oid);
     await coordinateLooseObjectHelper(runtime, {
@@ -1013,35 +1011,45 @@ async function verifyExistingLooseObject(basename, compressed) {
   }
 }
 
-async function publishLooseObjectFromAnchoredCwd(oid, compressed) {
+async function anchorLooseObjectPrefix(oid) {
   const prefix = oid.slice(0, 2);
-  const basename = oid.slice(2);
+  const parentIdentity = await helperDirectoryIdentity('.', true);
   try {
     await mkdir(prefix, { mode: 0o700 });
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
   }
-  const prefixIdentity = await helperDirectoryIdentity(prefix);
-  const continuePrefix = receiveHelperInstruction('continue', 'prefix-ready');
-  await sendInternalHelperMessage({
-    type: 'event',
-    phase: 'prefix-ready',
-    oid,
-    identity: prefixIdentity,
-  });
-  await continuePrefix;
-
-  const currentPrefixIdentity = await helperDirectoryIdentity(prefix);
-  if (!hasSameFilesystemIdentity(currentPrefixIdentity, prefixIdentity)) {
-    throw new Error('Loose object prefix identity changed before chdir.');
+  const prefixIdentity = await helperDirectoryIdentity(prefix, true);
+  if (path.dirname(prefixIdentity.canonical) !== parentIdentity.canonical) {
+    throw new Error('Loose object prefix escaped its parent before chdir.');
   }
   process.chdir(prefix);
-  if (!hasSameFilesystemIdentity(await helperDirectoryIdentity('.'), prefixIdentity)) {
-    throw new Error('Loose object prefix identity changed during chdir.');
+  const directoryHandle = await open('.', 'r');
+  try {
+    const openedIdentity = await directoryHandle.stat();
+    const anchoredIdentity = await helperDirectoryIdentity('.', true);
+    const anchoredParentIdentity = await helperDirectoryIdentity('..', true);
+    if (!hasSameFilesystemIdentity(prefixIdentity, openedIdentity)
+      || !hasSameDirectoryIdentity(prefixIdentity, anchoredIdentity)
+      || !hasSameDirectoryIdentity(parentIdentity, anchoredParentIdentity)
+      || path.dirname(anchoredIdentity.canonical) !== anchoredParentIdentity.canonical) {
+      throw new Error('Loose object prefix identity changed while anchoring cwd.');
+    }
+    // Windows 用目录 FileHandle 排除 rename；POSIX 不具备该保证，只能在发 bytes 前检测路径变化并拒绝跟随替代路径。
+    await chmod('.', 0o700);
+    return {
+      directoryHandle,
+      identity: anchoredIdentity,
+      parentIdentity: anchoredParentIdentity,
+    };
+  } catch (error) {
+    await directoryHandle.close();
+    throw error;
   }
-  // chdir 后的相对 chmod/open 由进程 cwd 锚定；目录旧路径随后换指也不会触达替代目标。
-  await chmod('.', 0o700);
+}
 
+async function publishLooseObjectFromAnchoredCwd(oid, compressed) {
+  const basename = oid.slice(2);
   let existing = false;
   let handle;
   try {
@@ -1079,16 +1087,20 @@ async function publishLooseObjectFromAnchoredCwd(oid, compressed) {
 
 async function runLooseObjectHelper() {
   const oid = process.argv[3];
+  let prefixHandle;
   try {
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid ?? '')) {
       throw new Error('Loose object helper received an invalid object ID.');
     }
     const start = receiveHelperInstruction('start');
+    const anchored = await anchorLooseObjectPrefix(oid);
+    prefixHandle = anchored.directoryHandle;
     await sendInternalHelperMessage({
       type: 'event',
-      phase: 'ready',
+      phase: 'prefix-ready',
       oid,
-      identity: await helperDirectoryIdentity('.', true),
+      identity: anchored.identity,
+      parent_identity: anchored.parentIdentity,
     });
     const command = await start;
     if (command.oid !== oid || !Number.isSafeInteger(command.size) || command.size < 0
@@ -1108,6 +1120,8 @@ async function runLooseObjectHelper() {
     }
     process.disconnect?.();
     return 1;
+  } finally {
+    await prefixHandle?.close();
   }
 }
 

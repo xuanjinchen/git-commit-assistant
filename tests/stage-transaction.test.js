@@ -170,40 +170,55 @@ async function snapshotObjects(root) {
     (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
   );
   const entries = [];
-  async function visit(directory, relative = '') {
-    const metadata = await lstat(directory);
-    entries.push({
-      type: 'directory',
-      path: relative.split(path.sep).join('/'),
+  async function describe(candidate, relative) {
+    const metadata = await lstat(candidate);
+    const snapshotPath = relative.split(path.sep).join('/');
+    if (metadata.isSymbolicLink()) {
+      return {
+        type: 'link',
+        path: snapshotPath,
+        mode: metadata.mode & 0o7777,
+        link_target: (await readlink(candidate)).split(path.sep).join('/'),
+      };
+    }
+    if (metadata.isDirectory()) {
+      return {
+        type: 'directory',
+        path: snapshotPath,
+        mode: metadata.mode & 0o7777,
+      };
+    }
+    if (metadata.isFile()) {
+      return {
+        type: 'file',
+        path: snapshotPath,
+        mode: metadata.mode & 0o7777,
+        bytes_sha256: sha256(await readFile(candidate)),
+      };
+    }
+    return {
+      type: 'other',
+      path: snapshotPath,
       mode: metadata.mode & 0o7777,
-    });
+    };
+  }
+  async function visit(directory, relative = '') {
+    const directorySnapshot = await describe(directory, relative);
+    entries.push(directorySnapshot);
+    if (directorySnapshot.type === 'link') {
+      // ODB 根 link/junction 的目标内容仍属于仓库状态；子级 link 不递归，避免越界或环路。
+      if (relative !== '' || !(await stat(directory)).isDirectory()) return;
+    } else if (directorySnapshot.type !== 'directory') {
+      return;
+    }
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const child = path.join(directory, entry.name);
       const childRelative = path.join(relative, entry.name);
       const childMetadata = await lstat(child);
-      const snapshotPath = childRelative.split(path.sep).join('/');
-      if (childMetadata.isSymbolicLink()) {
-        entries.push({
-          type: 'link',
-          path: snapshotPath,
-          mode: childMetadata.mode & 0o7777,
-          link_target: (await readlink(child)).split(path.sep).join('/'),
-        });
-      } else if (childMetadata.isDirectory()) {
+      if (childMetadata.isDirectory() && !childMetadata.isSymbolicLink()) {
         await visit(child, childRelative);
-      } else if (childMetadata.isFile()) {
-        entries.push({
-          type: 'file',
-          path: snapshotPath,
-          mode: childMetadata.mode & 0o7777,
-          bytes_sha256: sha256(await readFile(child)),
-        });
       } else {
-        entries.push({
-          type: 'other',
-          path: snapshotPath,
-          mode: childMetadata.mode & 0o7777,
-        });
+        entries.push(await describe(child, childRelative));
       }
     }
   }
@@ -212,6 +227,36 @@ async function snapshotObjects(root) {
   return entries.sort((left, right) =>
     left.path.localeCompare(right.path) || left.type.localeCompare(right.type));
 }
+
+test('repository snapshot records a linked ODB root and empty directories', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const objectRoot = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+  );
+  const objectTarget = path.join(path.dirname(root), 'objects-target');
+  await rename(objectRoot, objectTarget);
+  await mkdir(path.join(objectTarget, 'empty-fanout'));
+  await symlink(
+    objectTarget,
+    objectRoot,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+
+  const objects = await snapshotObjects(root);
+  const rootMetadata = await lstat(objectRoot);
+  assert.deepEqual(objects.find(({ path: snapshotPath }) => snapshotPath === ''), {
+    type: 'link',
+    path: '',
+    mode: rootMetadata.mode & 0o7777,
+    link_target: (await readlink(objectRoot)).split(path.sep).join('/'),
+  });
+  assert.deepEqual(objects.find(({ path: snapshotPath }) => snapshotPath === 'empty-fanout'), {
+    type: 'directory',
+    path: 'empty-fanout',
+    mode: (await lstat(path.join(objectTarget, 'empty-fanout'))).mode & 0o7777,
+  });
+});
 
 async function snapshotRepository(root) {
   const configPath = (await runGit(root, ['rev-parse', '--git-path', 'config'])).stdout.trim();
@@ -994,7 +1039,7 @@ test('prepare anchors loose object publication when its object directory identit
     }, {
       temporaryRoot,
       coordinateLooseObjectHelper: async (event, helper) => {
-        if (coordinated || event.phase !== 'ready') return;
+        if (coordinated || event.phase !== 'prefix-ready') return;
         coordinated = true;
         // Windows 必须先终止持有 cwd 的 helper 才能换指；POSIX 同样借此建立确定性时序。
         await helper.terminate();
@@ -1020,7 +1065,9 @@ test('prepare anchors loose object publication when its object directory identit
   );
 });
 
-test('prepare rejects a loose prefix replacement between creation and chdir', async (t) => {
+test('prepare rejects a loose prefix replacement before bytes on POSIX', {
+  skip: process.platform === 'win32',
+}, async (t) => {
   const root = await repositoryWithBaseline(t);
   const temporaryRoot = await createTemporaryRoot(t);
   await writeFile(path.join(root, 'selected-untracked.txt'), 'prefix identity bytes\n');
@@ -1032,6 +1079,7 @@ test('prepare rejects a loose prefix replacement between creation and chdir', as
   );
   const before = await snapshotRepository(root);
   let prefixReplaced = false;
+  let partialWriteReached = false;
 
   await assert.rejects(
     prepareTransaction({
@@ -1041,6 +1089,10 @@ test('prepare rejects a loose prefix replacement between creation and chdir', as
     }, {
       temporaryRoot,
       coordinateLooseObjectHelper: async (event) => {
+        if (event.phase === 'partial-write') {
+          partialWriteReached = true;
+          return;
+        }
         if (prefixReplaced || event.phase !== 'prefix-ready') return;
         prefixReplaced = true;
         await rename(event.prefix_path, `${event.prefix_path}-displaced`);
@@ -1055,6 +1107,7 @@ test('prepare rejects a loose prefix replacement between creation and chdir', as
   );
 
   assert.equal(prefixReplaced, true);
+  assert.equal(partialWriteReached, false);
   assert.deepEqual(await snapshotRepository(root), before);
   assert.deepEqual(
     await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
@@ -1062,7 +1115,71 @@ test('prepare rejects a loose prefix replacement between creation and chdir', as
   );
 });
 
-for (const crashPhase of ['ready', 'partial-write']) {
+test('prepare preserves the ODB when Windows blocks a stable loose prefix relocation', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const selectedBytes = Buffer.from('stable prefix relocation bytes\n');
+  await writeFile(path.join(root, 'selected-untracked.txt'), selectedBytes);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'untracked');
+  const blobOid = (await runGit(root, ['hash-object', '--stdin'], {
+    input: selectedBytes,
+  })).stdout.trim();
+  const mainObjectDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+  );
+  const mainPrefix = path.join(mainObjectDirectory, blobOid.slice(0, 2));
+  await assert.rejects(lstat(mainPrefix), ({ code }) => code === 'ENOENT');
+  const before = await snapshotRepository(root);
+  let attemptedMove = false;
+  let moveError;
+  let partialWriteReached = false;
+  let helperPid;
+
+  await assert.rejects(
+    prepareTransaction({
+      repository_root: root,
+      manifest,
+      selected_unit_ids: [selected.unit_id],
+    }, {
+      temporaryRoot,
+      coordinateLooseObjectHelper: async (event, helper) => {
+        if (!attemptedMove && event.phase === 'prefix-ready') {
+          attemptedMove = true;
+          helperPid = helper.pid;
+          try {
+            // 直接把真实 prefix 移入主 ODB；稳定句柄应让 Windows 在发送 bytes 前拒绝移动。
+            await rename(event.prefix_path, mainPrefix);
+          } catch (error) {
+            moveError = error;
+          }
+        }
+        if (!partialWriteReached && event.phase === 'partial-write') {
+          partialWriteReached = true;
+          await helper.terminate();
+        }
+      },
+    }),
+    ({ code }) => code === 'TRANSACTION_IDENTITY_CHANGED',
+  );
+
+  // 先比较完整快照，确保空 fanout 等结构性污染不会被后续协议断言遮蔽。
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(attemptedMove, true);
+  assert.equal(moveError?.code, 'EBUSY');
+  assert.equal(partialWriteReached, true);
+  assert.equal(Number.isInteger(helperPid), true);
+  assert.throws(() => process.kill(helperPid, 0), ({ code }) => code === 'ESRCH');
+  assert.deepEqual(
+    await readdir(path.join(temporaryRoot, 'git-commit-assistant')).catch(() => []),
+    [],
+  );
+});
+
+for (const crashPhase of ['prefix-ready', 'partial-write']) {
   test(`prepare cleans owned state when the loose object helper crashes at ${crashPhase}`, async (t) => {
     const root = await repositoryWithBaseline(t);
     const temporaryRoot = await createTemporaryRoot(t);
