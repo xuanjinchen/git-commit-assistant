@@ -2832,7 +2832,7 @@ async function reverifyBoundMessage(context) {
   return message;
 }
 
-async function readConfirmedTaskTree(repository, context, runtime) {
+async function createConfirmedTaskIndex(repository, context, runtime) {
   const externalRoot = await resolveExternalTemporaryRoot(repository, runtime);
   const temporaryRoot = await mkdtemp(path.join(externalRoot, 'git-commit-assistant-confirm-'));
   const temporaryIndex = path.join(temporaryRoot, 'index');
@@ -2851,19 +2851,30 @@ async function readConfirmedTaskTree(repository, context, runtime) {
         ].join(path.delimiter),
       },
     });
-    return stdout.trim();
-  } finally {
+    return { temporaryRoot, temporaryIndex, taskTree: stdout.trim() };
+  } catch (error) {
     await rm(temporaryRoot, { recursive: true, force: true });
+    throw error;
   }
 }
 
-async function assertTransactionStillConfirmed(repository, context, runtime) {
+async function assertTransactionStillConfirmed(repository, context, runtime, { retain = false } = {}) {
   await reverifyCancellationContext(context);
-  const taskTree = await readConfirmedTaskTree(repository, context, runtime);
-  // write-tree 只读取闭集内 task.index；前后完整复验把路径读取绑定到同一份认证事务。
-  await reverifyCancellationContext(context);
-  if (!canonicalFieldMatches(taskTree, context.state.binding.task_tree_oid)) {
-    throw stopped('CONFIRMATION_STALE');
+  const confirmed = await createConfirmedTaskIndex(repository, context, runtime);
+  let retained = false;
+  try {
+    // write-tree 只读取闭集内 task.index；前后完整复验把路径读取绑定到同一份认证事务。
+    await reverifyCancellationContext(context);
+    if (!canonicalFieldMatches(confirmed.taskTree, context.state.binding.task_tree_oid)) {
+      throw stopped('CONFIRMATION_STALE');
+    }
+    if (retain) {
+      retained = true;
+      return confirmed;
+    }
+    return undefined;
+  } finally {
+    if (!retained) await rm(confirmed.temporaryRoot, { recursive: true, force: true });
   }
 }
 
@@ -3045,6 +3056,7 @@ async function createCommitHookBarrier(repository, context, runtime) {
   const readyPath = path.join(barrierRoot, 'message-opened');
   const allowPath = path.join(barrierRoot, 'allow');
   const denyPath = path.join(barrierRoot, 'deny');
+  const commitMessagePath = await gitPath(repository, 'COMMIT_EDITMSG', runtime);
   await mkdir(hooksDirectory, { mode: 0o700 });
   await chmod(barrierRoot, 0o700);
   const configuredHooks = await git(repository, [
@@ -3065,7 +3077,14 @@ async function createCommitHookBarrier(repository, context, runtime) {
     await writeFile(proxyPath, [
       '#!/bin/sh',
       `original="\${GCA_ORIGINAL_HOOKS_PATH}/${hookName}"`,
-      'if test -x "$original" || { test "$GCA_HOOKS_ALLOW_REGULAR" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
+      'allow_regular="$GCA_HOOKS_ALLOW_REGULAR"',
+      'proxy_config_index="$GCA_PROXY_CONFIG_INDEX"',
+      'original_config_count_present="$GCA_ORIGINAL_CONFIG_COUNT_PRESENT"',
+      'original_config_count="$GCA_ORIGINAL_CONFIG_COUNT"',
+      'unset "GIT_CONFIG_KEY_${proxy_config_index}" "GIT_CONFIG_VALUE_${proxy_config_index}"',
+      'if test "$original_config_count_present" = 1; then GIT_CONFIG_COUNT="$original_config_count"; export GIT_CONFIG_COUNT; else unset GIT_CONFIG_COUNT; fi',
+      'unset GCA_ORIGINAL_HOOKS_PATH GCA_HOOKS_ALLOW_REGULAR GCA_PROXY_CONFIG_INDEX GCA_ORIGINAL_CONFIG_COUNT_PRESENT GCA_ORIGINAL_CONFIG_COUNT GCA_MESSAGE_BARRIER_READY GCA_MESSAGE_BARRIER_ALLOW GCA_MESSAGE_BARRIER_DENY',
+      'if test -x "$original" || { test "$allow_regular" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
       'exit 0',
       '',
     ].join('\n'), { flag: 'wx', mode: 0o700 });
@@ -3078,7 +3097,14 @@ async function createCommitHookBarrier(repository, context, runtime) {
     'while ! test -e "$GCA_MESSAGE_BARRIER_ALLOW" && ! test -e "$GCA_MESSAGE_BARRIER_DENY"; do sleep 0.01; done',
     'if test -e "$GCA_MESSAGE_BARRIER_DENY"; then exit 1; fi',
     'original="${GCA_ORIGINAL_HOOKS_PATH}/prepare-commit-msg"',
-    'if test -x "$original" || { test "$GCA_HOOKS_ALLOW_REGULAR" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
+    'allow_regular="$GCA_HOOKS_ALLOW_REGULAR"',
+    'proxy_config_index="$GCA_PROXY_CONFIG_INDEX"',
+    'original_config_count_present="$GCA_ORIGINAL_CONFIG_COUNT_PRESENT"',
+    'original_config_count="$GCA_ORIGINAL_CONFIG_COUNT"',
+    'unset "GIT_CONFIG_KEY_${proxy_config_index}" "GIT_CONFIG_VALUE_${proxy_config_index}"',
+    'if test "$original_config_count_present" = 1; then GIT_CONFIG_COUNT="$original_config_count"; export GIT_CONFIG_COUNT; else unset GIT_CONFIG_COUNT; fi',
+    'unset GCA_ORIGINAL_HOOKS_PATH GCA_HOOKS_ALLOW_REGULAR GCA_PROXY_CONFIG_INDEX GCA_ORIGINAL_CONFIG_COUNT_PRESENT GCA_ORIGINAL_CONFIG_COUNT GCA_MESSAGE_BARRIER_READY GCA_MESSAGE_BARRIER_ALLOW GCA_MESSAGE_BARRIER_DENY',
+    'if test -x "$original" || { test "$allow_regular" = 1 && test -f "$original"; }; then exec "$original" "$@"; fi',
     'exit 0',
     '',
   ].join('\n'), { flag: 'wx', mode: 0o700 });
@@ -3090,17 +3116,20 @@ async function createCommitHookBarrier(repository, context, runtime) {
     readyPath,
     allowPath,
     denyPath,
+    commitMessagePath,
   };
 }
 
 function withInjectedGitConfig(environment, key, value) {
   const next = { ...environment };
+  const originalCountPresent = Object.hasOwn(environment, 'GIT_CONFIG_COUNT');
+  const originalCount = environment.GIT_CONFIG_COUNT ?? '';
   const existingCount = Number.parseInt(next.GIT_CONFIG_COUNT ?? '0', 10);
   const configIndex = Number.isSafeInteger(existingCount) && existingCount >= 0 ? existingCount : 0;
   next.GIT_CONFIG_COUNT = String(configIndex + 1);
   next[`GIT_CONFIG_KEY_${configIndex}`] = key;
   next[`GIT_CONFIG_VALUE_${configIndex}`] = value;
-  return next;
+  return { environment: next, configIndex, originalCountPresent, originalCount };
 }
 
 async function commitWithBoundMessage(repository, context, taskIndex, messageFile, runtime) {
@@ -3108,15 +3137,25 @@ async function commitWithBoundMessage(repository, context, taskIndex, messageFil
   let handles;
   try {
     handles = await openBoundMessageHandles(context);
-    const environment = withInjectedGitConfig(cleanGitEnvironment({
+    const baseEnvironment = cleanGitEnvironment({
       GIT_INDEX_FILE: taskIndex,
+    }, ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']);
+    const injected = withInjectedGitConfig(
+      baseEnvironment,
+      'core.hooksPath',
+      barrier.hooksDirectory,
+    );
+    const environment = {
+      ...injected.environment,
       GCA_ORIGINAL_HOOKS_PATH: barrier.originalHooksDirectory,
       GCA_HOOKS_ALLOW_REGULAR: process.platform === 'win32' ? '1' : '0',
+      GCA_PROXY_CONFIG_INDEX: String(injected.configIndex),
+      GCA_ORIGINAL_CONFIG_COUNT_PRESENT: injected.originalCountPresent ? '1' : '0',
+      GCA_ORIGINAL_CONFIG_COUNT: injected.originalCount,
       GCA_MESSAGE_BARRIER_READY: barrier.readyPath,
       GCA_MESSAGE_BARRIER_ALLOW: barrier.allowPath,
       GCA_MESSAGE_BARRIER_DENY: barrier.denyPath,
-    }, ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']),
-    'core.hooksPath', barrier.hooksDirectory);
+    };
     const child = await startGitProcess(repository, [
       'commit', '--no-gpg-sign', '-F', messageFile,
     ], { env: environment }, runtime);
@@ -3136,9 +3175,21 @@ async function commitWithBoundMessage(repository, context, taskIndex, messageFil
       ]);
       if (progress !== null) return progress.attempt;
     }
+    await runtime.beforeMessageBarrierVerification?.({
+      readyPath: barrier.readyPath,
+      messageFile,
+    });
     try {
-      // prepare-commit-msg 只会在 Git 已读取 -F 并写入 COMMIT_EDITMSG 后运行；屏障在任何 commit object 前复验源句柄与目录项。
+      // prepare-commit-msg 在 Git 生成 COMMIT_EDITMSG 后运行；放行前同时认证源路径与 Git 实际消费的消息字节。
       await reverifyBoundMessageHandles(context, handles);
+      const consumedMessage = await readStableOwnedFile(
+        barrier.commitMessagePath,
+        repository.gitDir,
+        () => stopped('CONFIRMATION_STALE'),
+      );
+      if (!timingSafeHexMatches(consumedMessage.sha256, context.message.sha256)) {
+        throw stopped('CONFIRMATION_STALE');
+      }
     } catch (error) {
       await writeFile(barrier.denyPath, 'deny\n', { flag: 'wx', mode: 0o600 });
       await childDone.catch(() => {});
@@ -3391,17 +3442,27 @@ export async function commitTransaction({
       expectedConfirmation,
       await currentBinding(repository, indexPath, runtime),
     );
-    await assertTransactionStillConfirmed(repository, context, runtime);
-
-    const taskIndex = path.join(context.resourceDirectory, 'task.index');
-    commitStarted = true;
-    const attempt = await commitWithBoundMessage(
+    const confirmedTask = await assertTransactionStillConfirmed(
       repository,
       context,
-      taskIndex,
-      message_file,
       runtime,
+      { retain: true },
     );
+
+    let attempt;
+    try {
+      // commit 只接收已夹持认证的 scratch index；原 task.index 在最终复验后不再被 Git 按路径重开。
+      commitStarted = true;
+      attempt = await commitWithBoundMessage(
+        repository,
+        context,
+        confirmedTask.temporaryIndex,
+        message_file,
+        runtime,
+      );
+    } finally {
+      await rm(confirmedTask.temporaryRoot, { recursive: true, force: true });
+    }
     const { stdout: actualHeadOutput } = await git(
       repository,
       ['rev-parse', 'HEAD'],
@@ -3507,9 +3568,9 @@ export async function commitTransaction({
           primaryError = error;
         }
       } catch {
-        // commit 进程启动后无法读取 HEAD 时只能保守报告可能已改变，绝不能把未知状态降格为 false。
-        error.repository_changed = true;
-        primaryError = error;
+        // commit 启动后持续无法读取 HEAD 时仍返回恢复契约；null 明确表示 OID 未获证，不能降格为普通失败。
+        warnings.push('POST_COMMIT_HEAD_UNVERIFIED');
+        result = recoveryRequired(null, warnings, context);
       }
     } else {
       error.repository_changed = false;

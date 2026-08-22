@@ -2827,6 +2827,63 @@ test('task index replacement after the final repository check stops before commi
   assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
 });
 
+test('commit consumes the authenticated task index after the final transaction check', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const message = 'feat: commit authenticated task index\n';
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const taskIndex = path.join(path.dirname(prepared.message_file), 'task.index');
+  const replacementIndex = path.join(temporaryRoot, 'late-replacement-task.index');
+  const displacedIndex = path.join(temporaryRoot, 'late-displaced-task.index');
+  await writeFile(replacementIndex, await readFile(taskIndex), { flag: 'wx', mode: 0o600 });
+  const { stdout: injectedBlob } = await runGit(root, ['hash-object', '-w', '--stdin'], {
+    input: Buffer.from('late unconfirmed task index bytes\n'),
+  });
+  await runGit(root, [
+    'update-index', '--add', '--cacheinfo', `100644,${injectedBlob.trim()},late-unconfirmed.txt`,
+  ], {
+    env: {
+      GIT_INDEX_FILE: replacementIndex,
+      GIT_OBJECT_DIRECTORY: path.join(path.dirname(prepared.message_file), 'objects'),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(
+        root,
+        (await runGit(root, ['rev-parse', '--git-path', 'objects'])).stdout.trim(),
+      ),
+    },
+  });
+  let replaced = false;
+
+  const result = await commitTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+    message_file: prepared.message_file,
+    confirmation: {
+      ...prepared.binding,
+      message_sha256: sha256(Buffer.from(message)),
+    },
+  }, {
+    temporaryRoot,
+    spawnGit: (repositoryRoot, args, options) => {
+      if (args[0] === 'commit' && !replaced) {
+        replaced = true;
+        return rename(taskIndex, displacedIndex)
+          .then(() => rename(replacementIndex, taskIndex))
+          .then(() => spawnRealGit(repositoryRoot, args, options));
+      }
+      return spawnRealGit(repositoryRoot, args, options);
+    },
+  });
+
+  assert.equal(replaced, true);
+  assert.equal(result.status, 'committed');
+  assert.equal(
+    (await runGit(root, ['rev-parse', 'HEAD^{tree}'])).stdout.trim(),
+    prepared.task_tree_oid,
+  );
+  await assert.rejects(runGit(root, ['cat-file', '-e', 'HEAD:late-unconfirmed.txt']));
+});
+
 test('state and recovery index writes complete through real short file writes', async (t) => {
   await t.test('authenticated state', async (subtest) => {
     const root = await repositoryWithBaseline(subtest);
@@ -3166,6 +3223,45 @@ test('message replacement at commit delegation cannot create an unconfirmed comm
   }
 });
 
+test('message restored after Git reads it cannot hide unconfirmed commit bytes', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected transient message\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const savedMessage = path.join(fixture.temporaryRoot, 'saved-confirmed-message.txt');
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  let maliciousInstalled = false;
+  let confirmedRestored = false;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      spawnGit: (repositoryRoot, args, options) => {
+        if (args[0] === 'commit' && !maliciousInstalled) {
+          maliciousInstalled = true;
+          return rename(fixture.prepared.message_file, savedMessage)
+            .then(() => writeFile(
+              fixture.prepared.message_file,
+              'feat: transient unconfirmed message\n',
+              { flag: 'wx', mode: 0o600 },
+            ))
+            .then(() => spawnRealGit(repositoryRoot, args, options));
+        }
+        return spawnRealGit(repositoryRoot, args, options);
+      },
+      beforeMessageBarrierVerification: async () => {
+        await rm(fixture.prepared.message_file, { force: false });
+        await rename(savedMessage, fixture.prepared.message_file);
+        confirmedRestored = true;
+      },
+    }),
+    ({ code }) => code === 'CONFIRMATION_STALE',
+  );
+
+  assert.equal(maliciousInstalled, true);
+  assert.equal(confirmedRestored, true);
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+});
+
 test('hook rejection removes the message and leaves a cancellable transaction', async (t) => {
   const root = await repositoryWithBaseline(t);
   await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected rejected task\nline 3\n');
@@ -3266,6 +3362,9 @@ test('hook barrier preserves original hook order arguments edits exits and confi
       ['prepare-commit-msg', [
         '#!/bin/sh',
         'log="$(git rev-parse --git-path hook-order.log)"',
+        'printf "effective-hooks:%s\\n" "$(git config --path --get core.hooksPath)" >> "$log"',
+        'printf "resolved-hooks:%s\\n" "$(git rev-parse --git-path hooks)" >> "$log"',
+        'printf "gca-count:%s\\n" "$(env | grep -c \'^GCA_\' || true)" >> "$log"',
         'printf "prepare-commit-msg:%s:%s:%s\\n" "$#" "$(basename "$1")" "$2" >> "$log"',
         'printf "feat: prepare hook subject\\n" > "$1"',
       ]],
@@ -3307,13 +3406,22 @@ test('hook barrier preserves original hook order arguments edits exits and confi
     assert.deepEqual(commitCalls, [[
       'commit', '--no-gpg-sign', '-F', fixture.prepared.message_file,
     ]]);
-    assert.equal(await readFile(hookLog, 'utf8'), [
-      'pre-commit:0',
+    const hookLines = (await readFile(hookLog, 'utf8')).trimEnd().split('\n');
+    assert.equal(hookLines[0], 'pre-commit:0');
+    assert.equal(
+      path.resolve(root, hookLines[1].slice('effective-hooks:'.length)),
+      hooksDirectory,
+    );
+    assert.equal(
+      path.resolve(root, hookLines[2].slice('resolved-hooks:'.length)),
+      hooksDirectory,
+    );
+    assert.equal(hookLines[3], 'gca-count:0');
+    assert.deepEqual(hookLines.slice(4), [
       'prepare-commit-msg:2:COMMIT_EDITMSG:message',
       'commit-msg:1:COMMIT_EDITMSG',
       'post-commit:0',
-      '',
-    ].join('\n'));
+    ]);
     assert.match((await runGit(root, ['show', '-s', '--format=%B', 'HEAD'])).stdout,
       /^feat: prepare hook subject\n\nbody from commit-msg\n/u);
     assert.deepEqual(await readFile(configPath), configBefore);
@@ -3424,6 +3532,56 @@ test('post-commit HEAD read failure reports repository changed and recovery requ
   assert.equal(injectedReadFailure, true);
   assert.equal(result.status, 'commit_created_recovery_required');
   assert.equal(result.repository_changed, true);
+  assert.equal(result.transaction_preserved, true);
+  assert.equal(Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim()), countBefore + 1);
+});
+
+test('persistent post-commit HEAD read failure still returns recovery evidence', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected persistent HEAD failure\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const headPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'HEAD'])).stdout.trim(),
+  );
+  const displacedHead = path.join(fixture.temporaryRoot, 'persistently-displaced-HEAD');
+  const countBefore = Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim());
+  let repositoryHeadChecks = 0;
+  let injectedFailures = 0;
+
+  const result = await commitPrepared(root, fixture, {
+    runGit: async (repositoryRoot, args, options) => {
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD' && args.length === 2) {
+        repositoryHeadChecks += 1;
+        if (repositoryHeadChecks >= 4) {
+          await rename(headPath, displacedHead);
+          let readError;
+          try {
+            await runGit(repositoryRoot, args, options);
+            assert.fail('rev-parse HEAD unexpectedly succeeded without HEAD.');
+          } catch (error) {
+            readError = error;
+          } finally {
+            await rename(displacedHead, headPath);
+          }
+          injectedFailures += 1;
+          throw readError;
+        }
+      }
+      return runGit(repositoryRoot, args, options);
+    },
+  });
+
+  assert.equal(injectedFailures >= 2, true);
+  assert.equal(result.status, 'commit_created_recovery_required');
+  assert.equal(result.code, 'COMMIT_CREATED_RECOVERY_REQUIRED');
+  assert.equal(result.commit_oid, null);
+  assert.equal(result.repository_changed, true);
+  assert.equal(result.recovery_index, path.join(
+    path.dirname(fixture.prepared.message_file),
+    'recovery.index',
+  ));
   assert.equal(result.transaction_preserved, true);
   assert.equal(Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim()), countBefore + 1);
 });
