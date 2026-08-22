@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chmod,
   copyFile,
@@ -23,9 +23,10 @@ const SCHEMA_VERSION = 1;
 const LOOSE_OBJECT_HELPER_COMMAND = '__loose-object-helper';
 
 class StageTransactionError extends Error {
-  constructor(code, message) {
+  constructor(code, message, details = {}) {
     super(message);
     this.code = code;
+    Object.assign(this, details);
   }
 }
 
@@ -1147,6 +1148,181 @@ async function hashAndMaterializeObject(repository, type, bytes, transaction, ru
   return oid;
 }
 
+function pathsAreEqual(left, right) {
+  const normalize = (value) => {
+    const normalized = path.normalize(value);
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  };
+  return normalize(left) === normalize(right);
+}
+
+function filesystemIdentity(metadata) {
+  return { dev: String(metadata.dev), ino: String(metadata.ino) };
+}
+
+function identityRecordsMatch(left, right) {
+  return left?.dev === right?.dev && left?.ino === right?.ino;
+}
+
+async function captureStableDirectory(candidate, failure) {
+  try {
+    const absolute = path.resolve(candidate);
+    const before = await lstat(absolute, { bigint: true });
+    const canonical = await realpath(absolute);
+    const after = await lstat(absolute, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink()
+      || !after.isDirectory() || after.isSymbolicLink()
+      || !identityRecordsMatch(filesystemIdentity(before), filesystemIdentity(after))
+      || !pathsAreEqual(canonical, absolute)) {
+      throw new Error('Directory identity changed.');
+    }
+    return { ...filesystemIdentity(after), canonical: path.normalize(canonical) };
+  } catch {
+    throw failure();
+  }
+}
+
+async function readStableOwnedFile(candidate, parentCanonical, failure) {
+  let handle;
+  try {
+    const absolute = path.resolve(candidate);
+    const before = await lstat(absolute, { bigint: true });
+    const canonical = await realpath(absolute);
+    handle = await open(absolute, 'r');
+    const openedBefore = await handle.stat({ bigint: true });
+    const bytes = await handle.readFile();
+    const openedAfter = await handle.stat({ bigint: true });
+    const after = await lstat(absolute, { bigint: true });
+    const identities = [before, openedBefore, openedAfter, after].map(filesystemIdentity);
+    if ([before, openedBefore, openedAfter, after].some((metadata) =>
+      !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n)
+      || identities.some((identity) => !identityRecordsMatch(identity, identities[0]))
+      || !isWithin(canonical, parentCanonical)) {
+      throw new Error('File identity changed.');
+    }
+    return {
+      bytes,
+      identity: identities[0],
+      sha256: digest(bytes),
+      size: String(openedAfter.size),
+    };
+  } catch {
+    throw failure();
+  } finally {
+    await handle?.close();
+  }
+}
+
+const TRANSACTION_ARTIFACT_NAMES = new Set([
+  'objects',
+  'original.index',
+  'recovery.index',
+  'snapshots',
+  'task.index',
+]);
+
+async function captureTransactionArtifacts(resourceDirectory, failure) {
+  const resource = await captureStableDirectory(resourceDirectory, failure);
+  let directNames;
+  try {
+    directNames = (await readdir(resourceDirectory)).sort();
+  } catch {
+    throw failure();
+  }
+  const artifacts = directNames.filter((name) => !['message.txt', 'state.json'].includes(name));
+  if (artifacts.length !== TRANSACTION_ARTIFACT_NAMES.size
+    || artifacts.some((name) => !TRANSACTION_ARTIFACT_NAMES.has(name))) {
+    throw failure();
+  }
+
+  const entries = [];
+  async function visit(candidate, relative) {
+    let metadata;
+    try {
+      metadata = await lstat(candidate, { bigint: true });
+    } catch {
+      throw failure();
+    }
+    if (metadata.isSymbolicLink()) throw failure();
+    if (metadata.isDirectory()) {
+      const before = await captureStableDirectory(candidate, failure);
+      if (!identityRecordsMatch(filesystemIdentity(metadata), before)
+        || !isWithin(before.canonical, resource.canonical)) throw failure();
+      entries.push({ path: relative, type: 'directory', ...filesystemIdentity(before) });
+      let names;
+      try {
+        names = (await readdir(candidate)).sort();
+      } catch {
+        throw failure();
+      }
+      for (const name of names) {
+        await visit(path.join(candidate, name), `${relative}/${name}`);
+      }
+      const after = await captureStableDirectory(candidate, failure);
+      if (!identityRecordsMatch(before, after)) throw failure();
+      return;
+    }
+    if (!metadata.isFile()) throw failure();
+    const file = await readStableOwnedFile(candidate, resource.canonical, failure);
+    entries.push({
+      path: relative,
+      type: 'file',
+      ...file.identity,
+      size: file.size,
+      sha256: file.sha256,
+    });
+  }
+  for (const name of artifacts) await visit(path.join(resourceDirectory, name), name);
+  entries.sort((left, right) => left.path.localeCompare(right.path));
+  if (!identityRecordsMatch(
+    resource,
+    await captureStableDirectory(resourceDirectory, failure),
+  )) throw failure();
+  return { resource, entries };
+}
+
+function stateWithoutMac({ state_mac_sha256: _stateMacSha256, ...state }) {
+  return state;
+}
+
+function stateMac(state, ownershipToken) {
+  return createHmac('sha256', Buffer.from(ownershipToken, 'utf8'))
+    .update(canonicalJson(stateWithoutMac(state)))
+    .digest('hex');
+}
+
+async function writeInitialOwnedState(repository, transaction, state, ownershipToken) {
+  await withTransactionMutation(
+    repository,
+    transaction,
+    [transaction.stateFile],
+    async () => {
+      let handle;
+      try {
+        handle = await open(transaction.stateFile, 'wx', 0o600);
+        const opened = await handle.stat({ bigint: true });
+        if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink !== 1n) {
+          throw stopped('TRANSACTION_IDENTITY_CHANGED');
+        }
+        // 先以独占句柄取得 state inode/file ID，再在同一 inode 内写入受 token MAC 认证的闭集。
+        state.ownership.state_file = filesystemIdentity(opened);
+        state.state_mac_sha256 = stateMac(state, ownershipToken);
+        await handle.writeFile(`${canonicalJson(state)}\n`);
+      } finally {
+        await handle?.close();
+      }
+    },
+  );
+}
+
+function ownershipInvalid() {
+  return new StageTransactionError(
+    'TRANSACTION_OWNERSHIP_INVALID',
+    'The staging transaction ownership could not be verified.',
+    { retained: true },
+  );
+}
+
 async function removeOwnedTransaction(repository, transaction) {
   let currentIdentity;
   try {
@@ -1178,6 +1354,10 @@ async function createTransactionDirectory(repository, runtime) {
     ...runtime,
     temporary_root: requestedRoot,
   });
+  const temporaryRootIdentity = await captureStableDirectory(
+    externalRoot,
+    () => stopped('UNSAFE_GIT_PATH'),
+  );
   // Git metadata 查询必须先于 UUID 目录创建，避免查询失败时留下尚未建立所有权的残留目录。
   const mainObjectDirectory = await gitPath(repository, 'objects', runtime);
   const transactionRoot = path.resolve(externalRoot, 'git-commit-assistant');
@@ -1185,6 +1365,10 @@ async function createTransactionDirectory(repository, runtime) {
   await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
   await assertExternalTransactionPath(repository, transactionRoot, true);
   await chmod(transactionRoot, 0o700);
+  const transactionRootIdentity = await captureStableDirectory(
+    transactionRoot,
+    () => stopped('UNSAFE_GIT_PATH'),
+  );
   const transactionId = randomUUID();
   const directory = path.join(transactionRoot, transactionId);
   await assertExternalTransactionPath(repository, directory);
@@ -1204,6 +1388,8 @@ async function createTransactionDirectory(repository, runtime) {
       directory,
       directoryIdentity,
       mainObjectDirectory,
+      temporaryRootIdentity,
+      transactionRootIdentity,
     };
     // 实际 index、ODB 与证据只放入不可预测内层，外层 UUID 保持可验证的清理锚点。
     const resourceDirectory = path.join(
@@ -1935,6 +2121,14 @@ export async function prepareTransaction({
         task_tree_oid: taskTreeOid,
         recovery_tree_oid: recoveryTreeOid,
       };
+      const artifactOwnership = await captureTransactionArtifacts(
+        transaction.resourceDirectory,
+        () => stopped('TRANSACTION_IDENTITY_CHANGED'),
+      );
+      const repositoryIdentity = await captureStableDirectory(
+        repository.root,
+        () => stopped('TRANSACTION_IDENTITY_CHANGED'),
+      );
       const state = {
         schema_version: SCHEMA_VERSION,
         lifecycle: 'prepared',
@@ -1945,6 +2139,19 @@ export async function prepareTransaction({
         },
         binding,
         token_sha256: digest(Buffer.from(ownershipToken)),
+        ownership: {
+          temporary_root: transaction.temporaryRootIdentity,
+          transaction_root: transaction.transactionRootIdentity,
+          transaction_directory: {
+            ...filesystemIdentity(await lstat(transaction.directory, { bigint: true })),
+          },
+          resource_directory: {
+            name: path.basename(transaction.resourceDirectory),
+            ...artifactOwnership.resource,
+          },
+          repository: repositoryIdentity,
+          tree: artifactOwnership.entries,
+        },
         staged_units: {
           consumed_unit_ids: staged.consumed.map(({ unit_id }) => unit_id),
           retained_unit_ids: staged.retained.map(({ unit_id }) => unit_id),
@@ -1958,15 +2165,7 @@ export async function prepareTransaction({
         },
         message_file_sha256: null,
       };
-      await withTransactionMutation(
-        repository,
-        transaction,
-        [transaction.stateFile],
-        () => writeFile(transaction.stateFile, `${canonicalJson(state)}\n`, {
-          mode: 0o600,
-          flag: 'wx',
-        }),
-      );
+      await writeInitialOwnedState(repository, transaction, state, ownershipToken);
       await secureTransactionFiles(repository, transaction, transaction.resourceDirectory);
       return {
         status: 'prepared',
@@ -1997,6 +2196,328 @@ export async function prepareTransaction({
   }
 }
 
+const TRANSACTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const RESOURCE_DIRECTORY_PATTERN = /^resources-[0-9a-f]{32}$/u;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+
+function timingSafeHexMatches(left, right) {
+  if (!SHA256_PATTERN.test(left) || !SHA256_PATTERN.test(right)) return false;
+  return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
+}
+
+function identityWithCanonicalMatches(expected, actual) {
+  return identityRecordsMatch(expected, actual)
+    && typeof expected?.canonical === 'string'
+    && pathsAreEqual(expected.canonical, actual.canonical);
+}
+
+function parseOwnedState(bytes, transactionId) {
+  let state;
+  try {
+    state = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw ownershipInvalid();
+  }
+  if (state === null || Array.isArray(state) || typeof state !== 'object'
+    || state.schema_version !== SCHEMA_VERSION || state.lifecycle !== 'prepared'
+    || state.transaction_id !== transactionId
+    || typeof state.repository?.canonical_path !== 'string'
+    || !SHA256_PATTERN.test(state.repository?.canonical_path_sha256)
+    || !SHA256_PATTERN.test(state.binding?.repository_sha256)
+    || !SHA256_PATTERN.test(state.token_sha256)
+    || !SHA256_PATTERN.test(state.state_mac_sha256)
+    || !Array.isArray(state.ownership?.tree)
+    || typeof state.ownership?.state_file?.dev !== 'string'
+    || typeof state.ownership?.state_file?.ino !== 'string'
+    || !Array.isArray(state.files?.worktree)) {
+    throw ownershipInvalid();
+  }
+  return state;
+}
+
+function assertStateFileEvidence(state, artifacts) {
+  const byPath = new Map();
+  for (const entry of artifacts.entries) {
+    if (typeof entry.path !== 'string' || byPath.has(entry.path)) throw ownershipInvalid();
+    byPath.set(entry.path, entry);
+  }
+  for (const [fileName, digestName] of [
+    ['original.index', 'original_index_sha256'],
+    ['task.index', 'task_index_sha256'],
+    ['recovery.index', 'recovery_index_sha256'],
+  ]) {
+    const entry = byPath.get(fileName);
+    if (entry?.type !== 'file'
+      || !SHA256_PATTERN.test(state.files[digestName])
+      || entry.sha256 !== state.files[digestName]) {
+      throw ownershipInvalid();
+    }
+  }
+  if (byPath.get('objects')?.type !== 'directory'
+    || byPath.get('snapshots')?.type !== 'directory') {
+    throw ownershipInvalid();
+  }
+
+  const expectedSnapshots = new Map();
+  for (const evidence of state.files.worktree) {
+    if (!SHA256_PATTERN.test(evidence?.path_sha256)
+      || expectedSnapshots.has(evidence.path_sha256)) {
+      throw ownershipInvalid();
+    }
+    if (evidence.exists === true) {
+      if (!SHA256_PATTERN.test(evidence.snapshot_sha256)) throw ownershipInvalid();
+      expectedSnapshots.set(
+        `snapshots/${evidence.path_sha256}.bin`,
+        evidence.snapshot_sha256,
+      );
+    } else if (evidence.exists !== false || evidence.snapshot_sha256 !== null) {
+      throw ownershipInvalid();
+    }
+  }
+  const actualSnapshots = [...byPath.values()].filter((entry) =>
+    entry.type === 'file' && entry.path.startsWith('snapshots/'));
+  if (actualSnapshots.length !== expectedSnapshots.size
+    || actualSnapshots.some((entry) => expectedSnapshots.get(entry.path) !== entry.sha256)) {
+    throw ownershipInvalid();
+  }
+}
+
+async function readOptionalMessage(resourceDirectory, resourceCanonical, state) {
+  const messagePath = path.join(resourceDirectory, 'message.txt');
+  try {
+    const message = await readStableOwnedFile(messagePath, resourceCanonical, ownershipInvalid);
+    if (state.message_file_sha256 !== null
+      && (!SHA256_PATTERN.test(state.message_file_sha256)
+        || !timingSafeHexMatches(message.sha256, state.message_file_sha256))) {
+      throw ownershipInvalid();
+    }
+    return message;
+  } catch (error) {
+    try {
+      await lstat(messagePath);
+    } catch (missing) {
+      if (missing?.code === 'ENOENT') return null;
+    }
+    if (error instanceof StageTransactionError) throw error;
+    throw ownershipInvalid();
+  }
+}
+
+async function verifyCancellationContext({
+  repository_root,
+  transaction_id,
+  ownership_token,
+}, runtime) {
+  if (!TRANSACTION_ID_PATTERN.test(transaction_id)
+    || typeof ownership_token !== 'string' || !SHA256_PATTERN.test(ownership_token)) {
+    throw ownershipInvalid();
+  }
+  const requestedRoot = runtime.temporaryRoot ?? runtime.temporary_root ?? os.tmpdir();
+  if (typeof requestedRoot !== 'string' || requestedRoot.length === 0) {
+    throw ownershipInvalid();
+  }
+  const temporaryRoot = path.resolve(requestedRoot);
+  try {
+    await assertPathHasNoLinks(temporaryRoot);
+  } catch {
+    throw ownershipInvalid();
+  }
+  const temporaryRootIdentity = await captureStableDirectory(temporaryRoot, ownershipInvalid);
+  const transactionRoot = path.resolve(temporaryRoot, 'git-commit-assistant');
+  if (!isWithin(transactionRoot, temporaryRoot) || pathsAreEqual(transactionRoot, temporaryRoot)) {
+    throw ownershipInvalid();
+  }
+  const transactionRootIdentity = await captureStableDirectory(transactionRoot, ownershipInvalid);
+  if (!pathsAreEqual(path.dirname(transactionRootIdentity.canonical), temporaryRootIdentity.canonical)) {
+    throw ownershipInvalid();
+  }
+  const transactionDirectory = path.resolve(transactionRoot, transaction_id);
+  if (!isWithin(transactionDirectory, transactionRoot)
+    || pathsAreEqual(transactionDirectory, transactionRoot)) {
+    throw ownershipInvalid();
+  }
+  const transactionIdentity = await captureStableDirectory(transactionDirectory, ownershipInvalid);
+  if (!pathsAreEqual(path.dirname(transactionIdentity.canonical), transactionRootIdentity.canonical)) {
+    throw ownershipInvalid();
+  }
+  let transactionEntries;
+  try {
+    transactionEntries = await readdir(transactionDirectory);
+  } catch {
+    throw ownershipInvalid();
+  }
+  if (transactionEntries.length !== 1
+    || !RESOURCE_DIRECTORY_PATTERN.test(transactionEntries[0])) {
+    throw ownershipInvalid();
+  }
+  const resourceName = transactionEntries[0];
+  const resourceDirectory = path.join(transactionDirectory, resourceName);
+  const resourceIdentity = await captureStableDirectory(resourceDirectory, ownershipInvalid);
+  if (!pathsAreEqual(path.dirname(resourceIdentity.canonical), transactionIdentity.canonical)) {
+    throw ownershipInvalid();
+  }
+  const statePath = path.join(resourceDirectory, 'state.json');
+  const stateFile = await readStableOwnedFile(statePath, resourceIdentity.canonical, ownershipInvalid);
+  const state = parseOwnedState(stateFile.bytes, transaction_id);
+
+  let repository;
+  try {
+    repository = await resolveOwnedRepository(repository_root, runtime);
+  } catch {
+    throw ownershipInvalid();
+  }
+  const repositoryIdentity = await captureStableDirectory(repository.root, ownershipInvalid);
+  const repositoryDigest = digest(Buffer.from(repository.root));
+  if (!pathsAreEqual(state.repository.canonical_path, repository.root)
+    || state.repository.canonical_path_sha256 !== repositoryDigest
+    || state.binding.repository_sha256 !== repositoryDigest
+    || !identityWithCanonicalMatches(state.ownership?.temporary_root, temporaryRootIdentity)
+    || !identityWithCanonicalMatches(state.ownership?.transaction_root, transactionRootIdentity)
+    || !identityRecordsMatch(state.ownership?.transaction_directory, transactionIdentity)
+    || state.ownership?.resource_directory?.name !== resourceName
+    || !identityWithCanonicalMatches(state.ownership?.resource_directory, resourceIdentity)
+    || !identityWithCanonicalMatches(state.ownership?.repository, repositoryIdentity)
+    || !identityRecordsMatch(state.ownership?.state_file, stateFile.identity)) {
+    throw ownershipInvalid();
+  }
+
+  const suppliedTokenDigest = digest(Buffer.from(ownership_token, 'utf8'));
+  if (!timingSafeHexMatches(state.token_sha256, suppliedTokenDigest)
+    || !timingSafeHexMatches(state.state_mac_sha256, stateMac(state, ownership_token))) {
+    throw ownershipInvalid();
+  }
+  const artifacts = await captureTransactionArtifacts(resourceDirectory, ownershipInvalid);
+  // state 中经 token MAC 认证的清单是唯一闭集；未知文件或任一 identity/摘要变化都必须保留事务。
+  if (canonicalJson(artifacts.entries) !== canonicalJson(state.ownership.tree)) {
+    throw ownershipInvalid();
+  }
+  assertStateFileEvidence(state, artifacts);
+  const message = await readOptionalMessage(resourceDirectory, resourceIdentity.canonical, state);
+  return {
+    repository,
+    temporaryRoot,
+    temporaryRootIdentity,
+    transactionRoot,
+    transactionRootIdentity,
+    transactionDirectory,
+    transactionIdentity,
+    resourceName,
+    resourceDirectory,
+    resourceIdentity,
+    state,
+    stateFile,
+    message,
+  };
+}
+
+async function reverifyCancellationContext(context) {
+  const temporaryRoot = await captureStableDirectory(context.temporaryRoot, ownershipInvalid);
+  const transactionRoot = await captureStableDirectory(context.transactionRoot, ownershipInvalid);
+  const transaction = await captureStableDirectory(context.transactionDirectory, ownershipInvalid);
+  const resource = await captureStableDirectory(context.resourceDirectory, ownershipInvalid);
+  if (!identityWithCanonicalMatches(context.temporaryRootIdentity, temporaryRoot)
+    || !identityWithCanonicalMatches(context.transactionRootIdentity, transactionRoot)
+    || !identityWithCanonicalMatches(context.transactionIdentity, transaction)
+    || !identityWithCanonicalMatches(context.resourceIdentity, resource)) {
+    throw ownershipInvalid();
+  }
+  const stateFile = await readStableOwnedFile(
+    path.join(context.resourceDirectory, 'state.json'),
+    resource.canonical,
+    ownershipInvalid,
+  );
+  const artifacts = await captureTransactionArtifacts(context.resourceDirectory, ownershipInvalid);
+  const message = await readOptionalMessage(
+    context.resourceDirectory,
+    resource.canonical,
+    context.state,
+  );
+  if (!identityRecordsMatch(context.stateFile.identity, stateFile.identity)
+    || context.stateFile.sha256 !== stateFile.sha256
+    || canonicalJson(artifacts.entries) !== canonicalJson(context.state.ownership.tree)
+    || (context.message === null) !== (message === null)
+    || (message !== null && (!identityRecordsMatch(context.message.identity, message.identity)
+      || context.message.sha256 !== message.sha256))) {
+    throw ownershipInvalid();
+  }
+  assertStateFileEvidence(context.state, artifacts);
+}
+
+// 递归删除只接收已完成两轮所有权复核并原子移入同一固定根的 UUID 目录。
+async function deleteVerifiedCancellation(context) {
+  await reverifyCancellationContext(context);
+  const movedDirectory = path.join(
+    context.transactionRoot,
+    `.cancel-${context.state.transaction_id}-${randomBytes(16).toString('hex')}`,
+  );
+  if (!isWithin(movedDirectory, context.transactionRoot)
+    || pathsAreEqual(movedDirectory, context.transactionRoot)) {
+    throw ownershipInvalid();
+  }
+  try {
+    await rename(context.transactionDirectory, movedDirectory);
+  } catch {
+    throw ownershipInvalid();
+  }
+  const movedIdentity = await captureStableDirectory(movedDirectory, ownershipInvalid);
+  const movedResource = path.join(movedDirectory, context.resourceName);
+  const movedResourceIdentity = await captureStableDirectory(movedResource, ownershipInvalid);
+  const movedState = await readStableOwnedFile(
+    path.join(movedResource, 'state.json'),
+    movedResourceIdentity.canonical,
+    ownershipInvalid,
+  );
+  const movedArtifacts = await captureTransactionArtifacts(movedResource, ownershipInvalid);
+  const movedMessage = await readOptionalMessage(
+    movedResource,
+    movedResourceIdentity.canonical,
+    context.state,
+  );
+  const rootAfterMove = await captureStableDirectory(context.transactionRoot, ownershipInvalid);
+  if (!identityRecordsMatch(context.transactionIdentity, movedIdentity)
+    || !identityRecordsMatch(context.resourceIdentity, movedResourceIdentity)
+    || !identityRecordsMatch(context.stateFile.identity, movedState.identity)
+    || context.stateFile.sha256 !== movedState.sha256
+    || canonicalJson(movedArtifacts.entries) !== canonicalJson(context.state.ownership.tree)
+    || !identityWithCanonicalMatches(context.transactionRootIdentity, rootAfterMove)
+    || (context.message === null) !== (movedMessage === null)
+    || (movedMessage !== null && (!identityRecordsMatch(context.message.identity, movedMessage.identity)
+      || context.message.sha256 !== movedMessage.sha256))) {
+    throw ownershipInvalid();
+  }
+  assertStateFileEvidence(context.state, movedArtifacts);
+  // 删除目标在 Node 的同一 path 语义中再次证明位于固定根内，绝不把 root 或相邻目录交给 rm。
+  if (!isWithin(path.resolve(movedDirectory), path.resolve(context.transactionRoot))
+    || pathsAreEqual(movedDirectory, context.transactionRoot)) {
+    throw ownershipInvalid();
+  }
+  try {
+    await rm(movedDirectory, { recursive: true, force: false });
+  } catch {
+    throw ownershipInvalid();
+  }
+}
+
+// ownership token 只在内存中参与 timing-safe 摘要/MAC 比较，任何失败都保留外部事务。
+export async function cancelTransaction(request, runtime = {}) {
+  let context;
+  try {
+    context = await verifyCancellationContext(request, runtime);
+    await deleteVerifiedCancellation(context);
+  } catch (error) {
+    if (error instanceof StageTransactionError
+      && error.code === 'TRANSACTION_OWNERSHIP_INVALID') {
+      throw error;
+    }
+    throw ownershipInvalid();
+  }
+  return {
+    schema_version: SCHEMA_VERSION,
+    status: 'cancelled',
+    repository_changed: false,
+  };
+}
+
 async function readCliRequest() {
   const chunks = [];
   let byteLength = 0;
@@ -2025,12 +2546,13 @@ function writeCliResult(value) {
 
 async function runCli() {
   const [command, ...extraArguments] = process.argv.slice(2);
-  if (!['inspect', 'prepare'].includes(command) || extraArguments.length !== 0) {
+  if (!['cancel', 'inspect', 'prepare'].includes(command) || extraArguments.length !== 0) {
     writeCliResult({
       ok: false,
       status: 'failed',
       error: { code: 'PROTOCOL_ERROR', description: 'Expected exactly one supported command.' },
       repository_changed: false,
+      retained: false,
       transaction_preserved: false,
     });
     process.exitCode = 2;
@@ -2041,6 +2563,9 @@ async function runCli() {
     if (command === 'inspect') {
       const manifest = await inspectRepository(request);
       writeCliResult({ ok: true, status: 'inspected', ...manifest });
+    } else if (command === 'cancel') {
+      const cancelled = await cancelTransaction(request);
+      writeCliResult({ ok: true, ...cancelled });
     } else {
       const prepared = await prepareTransaction(request);
       writeCliResult({ ok: true, ...prepared });
@@ -2057,7 +2582,8 @@ async function runCli() {
           : 'The request could not be completed safely.',
       },
       repository_changed: false,
-      transaction_preserved: false,
+      retained: error?.retained === true,
+      transaction_preserved: error?.retained === true,
     });
     process.exitCode = protocolError ? 2 : 1;
   }

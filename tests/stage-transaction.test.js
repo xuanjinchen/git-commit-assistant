@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  access,
+  link,
   mkdtemp,
   mkdir,
   lstat,
@@ -362,6 +364,24 @@ async function assertMainOdbPreservedAtGitWriter(t, command) {
 
 async function prepareTransaction(request, runtime) {
   return stageTransaction.prepareTransaction(request, runtime);
+}
+
+async function cancelTransaction(request, runtime) {
+  return stageTransaction.cancelTransaction(request, runtime);
+}
+
+async function preparedFixture(t) {
+  const root = await repositoryWithBaseline(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected cancellation\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  }, { temporaryRoot });
+  return { root, prepared, temporaryRoot };
 }
 
 async function treeFromExternalIndex(root, indexPath, objectDirectory) {
@@ -840,6 +860,365 @@ test('prepare stores external recovery evidence without token or patch plaintext
     path.basename(resourceDirectory),
     /^resources-[0-9a-f]{32}$/u,
   );
+});
+
+test('cancel preserves original user state', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const transactionPath = path.join(
+    temporaryRoot,
+    'git-commit-assistant',
+    prepared.transaction_id,
+  );
+  const adjacent = path.join(path.dirname(transactionPath), 'adjacent-user-directory');
+  await mkdir(adjacent);
+  await writeFile(path.join(adjacent, 'keep.txt'), 'adjacent transaction-root bytes\n');
+  const before = await snapshotRepository(root);
+
+  const result = await cancelTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(result, {
+    schema_version: 1,
+    status: 'cancelled',
+    repository_changed: false,
+  });
+  assert.deepEqual(await snapshotRepository(root), before);
+  await assert.rejects(access(transactionPath), { code: 'ENOENT' });
+  assert.equal(
+    await readFile(path.join(adjacent, 'keep.txt'), 'utf8'),
+    'adjacent transaction-root bytes\n',
+  );
+});
+
+async function assertCancellationRetained(request, runtime) {
+  await assert.rejects(
+    cancelTransaction(request, runtime),
+    (error) => error.code === 'TRANSACTION_OWNERSHIP_INVALID' && error.retained === true,
+  );
+}
+
+async function createDirectoryLinkOrSkip(t, target, candidate) {
+  try {
+    await symlink(target, candidate, process.platform === 'win32' ? 'junction' : 'dir');
+    return true;
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOSYS'].includes(error?.code)) {
+      t.skip('This platform does not permit creating a directory link or junction.');
+      return false;
+    }
+    throw error;
+  }
+}
+
+test('cancel rejects a wrong ownership token and retains adjacent state', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const adjacent = path.join(temporaryRoot, 'adjacent-owned-by-user');
+  await mkdir(adjacent);
+  await writeFile(path.join(adjacent, 'keep.txt'), 'keep adjacent bytes\n');
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: '0'.repeat(64),
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(path.join(adjacent, 'keep.txt'), 'utf8'), 'keep adjacent bytes\n');
+  await access(prepared.transaction_directory);
+});
+
+test('cancel rejects a transaction path escape without touching the outside directory', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const outside = path.join(temporaryRoot, 'outside');
+  await mkdir(outside);
+  await writeFile(path.join(outside, 'keep.txt'), 'outside bytes\n');
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: '../outside',
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(path.join(outside, 'keep.txt'), 'utf8'), 'outside bytes\n');
+  await access(prepared.transaction_directory);
+});
+
+test('cancel rejects a transaction directory link or junction', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const displaced = `${prepared.transaction_directory}-displaced`;
+  await rename(prepared.transaction_directory, displaced);
+  try {
+    await symlink(
+      displaced,
+      prepared.transaction_directory,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOSYS'].includes(error?.code)) {
+      t.skip('This platform does not permit creating a directory link or junction.');
+      return;
+    }
+    throw error;
+  }
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal((await lstat(prepared.transaction_directory)).isSymbolicLink(), true);
+  await access(path.join(displaced, path.basename(path.dirname(prepared.message_file)), 'state.json'));
+});
+
+test('cancel rejects a linked fixed temporary root', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const linkContainer = await createTemporaryRoot(t);
+  const linkedRoot = path.join(linkContainer, 'linked-temporary-root');
+  if (!await createDirectoryLinkOrSkip(t, temporaryRoot, linkedRoot)) return;
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot: linkedRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal((await lstat(linkedRoot)).isSymbolicLink(), true);
+  await access(prepared.transaction_directory);
+});
+
+test('cancel rejects a linked transaction root', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const transactionRoot = path.dirname(prepared.transaction_directory);
+  const displacedRoot = `${transactionRoot}-displaced`;
+  await rename(transactionRoot, displacedRoot);
+  if (!await createDirectoryLinkOrSkip(t, displacedRoot, transactionRoot)) return;
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal((await lstat(transactionRoot)).isSymbolicLink(), true);
+  await access(path.join(displacedRoot, prepared.transaction_id));
+});
+
+test('cancel rejects a linked transaction content tree', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const snapshots = path.join(path.dirname(prepared.message_file), 'snapshots');
+  const displacedSnapshots = path.join(temporaryRoot, 'displaced-snapshots');
+  await rename(snapshots, displacedSnapshots);
+  if (!await createDirectoryLinkOrSkip(t, displacedSnapshots, snapshots)) return;
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal((await lstat(snapshots)).isSymbolicLink(), true);
+  await access(displacedSnapshots);
+});
+
+test('cancel rejects an identical state file inode replacement', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const statePath = path.join(path.dirname(prepared.message_file), 'state.json');
+  const displacedState = path.join(temporaryRoot, 'displaced-state.json');
+  const stateBytes = await readFile(statePath);
+  await rename(statePath, displacedState);
+  await writeFile(statePath, stateBytes, { flag: 'wx' });
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(await readFile(displacedState), stateBytes);
+  await access(prepared.transaction_directory);
+});
+
+test('cancel rejects a multiply-linked state file', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const statePath = path.join(path.dirname(prepared.message_file), 'state.json');
+  const secondLink = path.join(temporaryRoot, 'state-hardlink.json');
+  try {
+    await link(statePath, secondLink);
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOSYS', 'EXDEV'].includes(error?.code)) {
+      t.skip('This platform does not permit creating a hard link for the state file.');
+      return;
+    }
+    throw error;
+  }
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal((await lstat(statePath)).nlink >= 2, true);
+  await access(prepared.transaction_directory);
+});
+
+test('cancel rejects an unknown transaction file and retains the complete tree', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const unknown = path.join(path.dirname(prepared.message_file), 'unknown.txt');
+  await writeFile(unknown, 'unknown bytes\n');
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(unknown, 'utf8'), 'unknown bytes\n');
+});
+
+test('cancel rejects transaction artifact inode and digest changes', async (t) => {
+  await t.test('identical task index replacement', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const taskIndex = path.join(path.dirname(prepared.message_file), 'task.index');
+    const displaced = path.join(temporaryRoot, 'displaced-task.index');
+    const bytes = await readFile(taskIndex);
+    await rename(taskIndex, displaced);
+    await writeFile(taskIndex, bytes, { flag: 'wx' });
+    const before = await snapshotRepository(root);
+
+    await assertCancellationRetained({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+    }, { temporaryRoot });
+
+    assert.deepEqual(await snapshotRepository(root), before);
+    assert.deepEqual(await readFile(displaced), bytes);
+    await access(prepared.transaction_directory);
+  });
+
+  await t.test('original index digest change', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const originalIndex = path.join(path.dirname(prepared.message_file), 'original.index');
+    const originalBytes = await readFile(originalIndex);
+    await writeFile(originalIndex, Buffer.concat([originalBytes, Buffer.from('changed')]));
+    const before = await snapshotRepository(root);
+
+    await assertCancellationRetained({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+    }, { temporaryRoot });
+
+    assert.deepEqual(await snapshotRepository(root), before);
+    await access(prepared.transaction_directory);
+  });
+});
+
+test('a second cancel is rejected without touching the repository or adjacent directory', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const adjacent = path.join(temporaryRoot, 'adjacent-after-cancel');
+  await mkdir(adjacent);
+  await writeFile(path.join(adjacent, 'keep.txt'), 'still here\n');
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+  const before = await snapshotRepository(root);
+
+  await assertCancellationRetained({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(path.join(adjacent, 'keep.txt'), 'utf8'), 'still here\n');
+});
+
+test('cancel permits a message only at the exact retained path', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  await writeFile(prepared.message_file, 'candidate commit message\n', { flag: 'wx' });
+  const adjacent = path.join(temporaryRoot, 'adjacent-message.txt');
+  await writeFile(adjacent, 'do not remove\n');
+  const before = await snapshotRepository(root);
+
+  const cancelled = await cancelTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot });
+
+  assert.equal(cancelled.status, 'cancelled');
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(adjacent, 'utf8'), 'do not remove\n');
+  await assert.rejects(access(prepared.transaction_directory), { code: 'ENOENT' });
+});
+
+test('cancel CLI emits one safe JSON line for success and retained failures', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nCLI cancellation\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  });
+  t.after(() => rm(prepared.transaction_directory, { recursive: true, force: true }));
+  const request = {
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  };
+  const before = await snapshotRepository(root);
+
+  const wrong = await runCli('cancel', { ...request, ownership_token: '0'.repeat(64) });
+  assert.equal(wrong.status, 1);
+  assert.equal(wrong.stderr, '');
+  assert.equal(wrong.stdout.split('\n').length, 2);
+  assert.equal(JSON.parse(wrong.stdout).retained, true);
+  assert.equal(wrong.stdout.includes(prepared.ownership_token), false);
+
+  const success = await runCli('cancel', request);
+  assert.equal(success.status, 0);
+  assert.equal(success.stderr, '');
+  assert.equal(success.stdout.split('\n').length, 2);
+  assert.deepEqual(JSON.parse(success.stdout), {
+    ok: true,
+    schema_version: 1,
+    status: 'cancelled',
+    repository_changed: false,
+  });
+
+  const repeated = await runCli('cancel', request);
+  assert.equal(repeated.status, 1);
+  assert.equal(repeated.stderr, '');
+  assert.equal(JSON.parse(repeated.stdout).retained, true);
+  assert.equal(repeated.stdout.includes(prepared.ownership_token), false);
+  assert.deepEqual(await snapshotRepository(root), before);
 });
 
 test('prepare consumes equivalent staged content and writes selected untracked bytes externally', async (t) => {
