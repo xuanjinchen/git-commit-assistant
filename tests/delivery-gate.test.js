@@ -539,10 +539,10 @@ test('does not accept a context readFile override', async () => {
   assert.deepEqual(report.errors, []);
 });
 
-test('rejects initialized package publish paths beyond SKILL.md', async () => {
+test('rejects initialized package publish paths beyond the runtime pair', async () => {
   const root = await copyFixture();
   const pkg = await readJson(root, 'package.json');
-  pkg.files = ['SKILL.md', 'evals'];
+  pkg.files = ['SKILL.md', 'scripts/stage-transaction.mjs', 'evals'];
   await writeJson(root, 'package.json', pkg);
 
   const codes = issueCodes(await evaluateDelivery(root));

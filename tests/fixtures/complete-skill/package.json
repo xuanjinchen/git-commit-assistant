@@ -15,7 +15,8 @@
     "gate:delivery": "node scripts/delivery-gate.js"
   },
   "files": [
-    "SKILL.md"
+    "SKILL.md",
+    "scripts/stage-transaction.mjs"
   ],
   "license": "UNLICENSED",
   "scaffold": {

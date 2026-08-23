@@ -72,6 +72,18 @@ const PACKAGE_TOP_LEVEL = new Set([
   'src',
   'templates',
 ]);
+// 已初始化 Skill 的归档必须是可审计的运行时闭集，不能因 scripts 目录而放宽到任意脚本。
+const INITIALIZED_ARCHIVE_FILES = new Set([
+  'LICENSE',
+  'README.md',
+  'package.json',
+  'SKILL.md',
+  'scripts/stage-transaction.mjs',
+]);
+const INITIALIZED_REQUIRED_RUNTIME = new Set([
+  'SKILL.md',
+  'scripts/stage-transaction.mjs',
+]);
 const PACKAGE_FORBIDDEN_ROOTS = new Set([
   '.git',
   '.scaffold',
@@ -420,7 +432,8 @@ function parsePackageArchive(buffer) {
   return entries;
 }
 
-function validatePackageEntries(entries, addIssue, scanContent) {
+function validatePackageEntries(entries, initialized, addIssue, scanContent) {
+  const present = new Set();
   for (const entry of entries) {
     const relativePath = packagePath(entry?.path, entry?.type);
     if (relativePath === null) {
@@ -428,6 +441,7 @@ function validatePackageEntries(entries, addIssue, scanContent) {
       continue;
     }
     const location = safeLocation('package', relativePath);
+    present.add(relativePath);
     const segments = relativePath.split('/');
     const [topLevel] = segments;
     if (entry?.type === 'symlink' || entry?.type === 'hardlink') {
@@ -444,16 +458,30 @@ function validatePackageEntries(entries, addIssue, scanContent) {
       .some((segment) => TRANSACTION_ARTIFACT_PATTERN.test(segment));
     if (sensitiveFilename(relativePath)) {
       addIssue('SENSITIVE_FILENAME', location);
-    } else if (!PACKAGE_TOP_LEVEL.has(topLevel)
+    } else if ((initialized && !INITIALIZED_ARCHIVE_FILES.has(relativePath))
+      || (!initialized && (!PACKAGE_TOP_LEVEL.has(topLevel)
       || containsForbiddenDirectory
       || containsTransactionArtifact
-      || relativePath.toLowerCase().endsWith('.log')) {
+      || relativePath.toLowerCase().endsWith('.log')))) {
       addIssue('PACKAGE_FILE_FORBIDDEN', location);
     }
     if ((entry?.type === undefined || entry.type === 'file') && entry?.content !== undefined) {
       scanContent(entry.content, location);
     }
   }
+  if (initialized) {
+    for (const runtimePath of INITIALIZED_REQUIRED_RUNTIME) {
+      if (!present.has(runtimePath)) {
+        addIssue('PACKAGE_RUNTIME_FILE_MISSING', safeLocation('package', runtimePath));
+      }
+    }
+  }
+}
+
+async function initializedPackage(root) {
+  const source = await readFile(path.join(root, 'package.json'), 'utf8');
+  const pkg = JSON.parse(source);
+  return pkg?.scaffold?.mode === 'initialized';
 }
 
 async function loadPackageEntries(root) {
@@ -636,6 +664,7 @@ export async function auditRepository(root, context = {}) {
       context.packEntries === undefined
         ? await loadPackageEntries(absoluteRoot)
         : context.packEntries,
+      await initializedPackage(absoluteRoot),
       addIssue,
       scanContent,
     );

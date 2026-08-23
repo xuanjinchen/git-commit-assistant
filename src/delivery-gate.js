@@ -39,6 +39,7 @@ const FIXED_EVIDENCE_FILES = Object.freeze([
   'package.json',
   'README.md',
   'SKILL.md',
+  'scripts/stage-transaction.mjs',
   CONTRACTS.brief.path,
   CONTRACTS.decisions.path,
   CONTRACTS.delivery.path,
@@ -832,13 +833,14 @@ async function validateClaims(delivery, tracks, reader, errors) {
 
 function validatePublishPaths(pkg, errors) {
   if (!Array.isArray(pkg?.files)
-    || pkg.files.length !== 1
-    || pkg.files[0] !== 'SKILL.md') {
+    || pkg.files.length !== 2
+    || pkg.files[0] !== 'SKILL.md'
+    || pkg.files[1] !== 'scripts/stage-transaction.mjs') {
     addIssue(
       errors,
       'GATE_PUBLISH_PATH_FORBIDDEN',
       'package.json#files',
-      'initialized delivery may publish only SKILL.md',
+      'initialized delivery may publish only SKILL.md and scripts/stage-transaction.mjs',
     );
   }
 }

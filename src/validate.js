@@ -30,7 +30,10 @@ const SOURCE_FILES = Object.freeze([
   'src',
   'templates',
 ]);
-const INITIALIZED_FILES = Object.freeze(['SKILL.md']);
+const INITIALIZED_FILES = Object.freeze([
+  'SKILL.md',
+  'scripts/stage-transaction.mjs',
+]);
 const OPTIONAL_SOURCE_FILES = new Set();
 const REQUIRED_SOURCE_FILES = Object.freeze([
   'CHANGELOG.md',
@@ -64,6 +67,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
 const INITIALIZED_CORE_FILES = Object.freeze([
   'README.md',
   'SKILL.md',
+  'scripts/stage-transaction.mjs',
   'docs/decisions.md',
   'docs/delivery-report.md',
   'docs/skill-brief.md',

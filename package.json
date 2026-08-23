@@ -1,7 +1,7 @@
 {
   "name": "git-commit-assistant",
   "version": "0.1.0",
-  "description": "Generate Conventional Commit messages from staged Git changes when Codex is asked to draft or create a commit, and commit only after explicit confirmation; not for Git explanations, history review, or history rewriting.",
+  "description": "Generate Conventional Commit messages for staged or current-task Git changes, prepare only task-related hunks for explicit commit requests, and commit only after a second confirmation; not for Git explanations, history review, history rewriting, or combined push/release requests.",
   "private": true,
   "type": "module",
   "engines": {
@@ -17,7 +17,8 @@
     "gate:delivery": "node scripts/delivery-gate.js"
   },
   "files": [
-    "SKILL.md"
+    "SKILL.md",
+    "scripts/stage-transaction.mjs"
   ],
   "license": "Apache-2.0",
   "scaffold": {

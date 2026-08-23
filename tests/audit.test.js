@@ -322,6 +322,36 @@ test('rejects unsafe and non-whitelisted package entries deterministically', asy
   assert.ok(keys.has('PACKAGE_LINK:package:src/linked.js'));
 });
 
+test('uses the initialized archive closed set and requires both runtime files', async (t) => {
+  const root = await createRepository(t);
+  await writeText(root, 'package.json', `${JSON.stringify({
+    name: 'audit-fixture',
+    version: '1.0.0',
+    private: true,
+    scaffold: { mode: 'initialized' },
+    files: ['SKILL.md', 'scripts/stage-transaction.mjs'],
+  }, null, 2)}\n`);
+
+  const allowed = [
+    'package/LICENSE',
+    'package/README.md',
+    'package/package.json',
+    'package/SKILL.md',
+    'package/scripts/stage-transaction.mjs',
+  ].map((entryPath) => ({ path: entryPath, type: 'file', content: Buffer.from('safe\n') }));
+  assert.deepEqual((await auditRepository(root, { packEntries: allowed })).issues, []);
+
+  const forbidden = await auditRepository(root, {
+    packEntries: [...allowed, { path: 'package/scripts/other.mjs', type: 'file', content: Buffer.from('safe\n') }],
+  });
+  assert.ok(issueKeys(forbidden).has('PACKAGE_FILE_FORBIDDEN:package:scripts/other.mjs'));
+
+  const missing = await auditRepository(root, {
+    packEntries: allowed.filter(({ path: entryPath }) => entryPath !== 'package/scripts/stage-transaction.mjs'),
+  });
+  assert.ok(issueKeys(missing).has('PACKAGE_RUNTIME_FILE_MISSING:package:scripts/stage-transaction.mjs'));
+});
+
 test('rejects non-portable npm archive paths', async (t) => {
   const root = await createRepository(t);
   const cases = [

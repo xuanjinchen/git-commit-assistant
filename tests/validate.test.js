@@ -70,6 +70,10 @@ const INITIAL_FILES = [
   'package-lock.json',
   'package.json',
 ];
+const INITIALIZED_RUNTIME_FILES = [
+  'SKILL.md',
+  'scripts/stage-transaction.mjs',
+];
 const SKILL = {
   name: 'example-skill',
   description: 'Create consistent example outputs',
@@ -95,7 +99,7 @@ function packageJson(mode = 'source', skill = SKILL) {
       check: 'npm test && npm run validate',
       'gate:delivery': 'node scripts/delivery-gate.js',
     },
-    files: mode === 'source' ? SOURCE_FILES : ['SKILL.md'],
+    files: mode === 'source' ? SOURCE_FILES : INITIALIZED_RUNTIME_FILES,
     license: skill.license,
     scaffold: { mode, version: '0.1.0' },
   };
@@ -227,6 +231,11 @@ async function createInitializedFixture(overrides = {}) {
     root,
     'SKILL.md',
     `---\nname: "${skill.name}"\ndescription: "${skill.description}"\n---\n\n# ${skill.name}\n`,
+  );
+  await writeText(
+    root,
+    'scripts/stage-transaction.mjs',
+    '#!/usr/bin/env node\nprocess.stdout.write(\'{"schema_version":1,"ok":true,"status":"fixture"}\\n\');\n',
   );
   const renderedSkillName = skill.name.replaceAll('-', '\\-');
   await writeText(root, 'README.md', `# ${renderedSkillName}\n\nObjective: ${skill.description}\n`);
@@ -653,10 +662,49 @@ test('enforces initialized license presence and exact content', async () => {
   assert.ok(issueCodes((await validateRepository(unlicensedRoot)).errors).has('LICENSE_UNEXPECTED'));
 });
 
+test('requires the initialized runtime script and exact two-file publish whitelist', async () => {
+  const valid = packageJson('initialized');
+  assert.deepEqual(valid.files, INITIALIZED_RUNTIME_FILES);
+
+  const missingRoot = await createInitializedFixture();
+  await rm(path.join(missingRoot, 'scripts', 'stage-transaction.mjs'));
+  const missing = (await validateRepository(missingRoot)).errors;
+  assert.ok(missing.some(({ code, path: issuePath }) =>
+    code === 'INITIALIZED_FILE_MISSING' && issuePath === 'scripts/stage-transaction.mjs'));
+
+  for (const files of [
+    ['SKILL.md'],
+    ['scripts/stage-transaction.mjs', 'SKILL.md'],
+    ['SKILL.md', 'scripts/stage-transaction.mjs', 'scripts/other.mjs'],
+    ['SKILL.md', 'scripts'],
+  ]) {
+    const root = await createInitializedFixture();
+    const pkg = packageJson('initialized');
+    pkg.files = files;
+    await writeText(root, 'package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+    assert.ok(issueCodes((await validateRepository(root)).errors).has('PUBLISH_FILES_INVALID'));
+  }
+});
+
+test('validates the initialized runtime script as strict UTF-8 LF text', async () => {
+  const cases = [
+    ['TEXT_INVALID_UTF8', Buffer.from([0xff])],
+    ['TEXT_BOM', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('export {};\n')])],
+    ['TEXT_NUL', Buffer.concat([Buffer.from('export const value = "'), Buffer.from([0]), Buffer.from('";\n')])],
+    ['TEXT_CRLF', Buffer.from('export const value = true;\r\n')],
+  ];
+  for (const [code, content] of cases) {
+    const root = await createInitializedFixture();
+    await writeFile(path.join(root, 'scripts', 'stage-transaction.mjs'), content);
+    assert.ok((await validateRepository(root)).errors.some(({ code: actual, path: issuePath }) =>
+      actual === code && issuePath === 'scripts/stage-transaction.mjs'));
+  }
+});
+
 test('rejects initialized publish paths outside the closed whitelist', async () => {
   const root = await createInitializedFixture();
   const pkg = packageJson('initialized');
-  pkg.files = ['SKILL.md', 'tests', 'evals', '.scaffold/state.json', 'C:/outside.txt'];
+  pkg.files = ['SKILL.md', 'scripts/stage-transaction.mjs', 'tests', 'evals', '.scaffold/state.json', 'C:/outside.txt'];
   await writeText(root, 'package.json', `${JSON.stringify(pkg, null, 2)}\n`);
 
   const codes = issueCodes((await validateRepository(root)).errors);

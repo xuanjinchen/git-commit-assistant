@@ -45,7 +45,7 @@ test('package metadata exposes the deterministic audit without publishing local 
       'src',
       'templates',
     ]
-    : ['SKILL.md']);
+    : ['SKILL.md', 'scripts/stage-transaction.mjs']);
   for (const forbidden of ['tests', '.scaffold', 'evals', 'eval-workspaces']) {
     assert.equal(pkg.files.includes(forbidden), false);
   }
@@ -171,7 +171,9 @@ test('npm dry-run package stays inside the current mode whitelist', async () => 
     assert.ok(entries.includes('docs/mature-skill-development-design.md'));
   } else {
     assert.ok(entries.includes('SKILL.md'));
-    assert.equal(entries.some((entry) => /^(?:src|scripts|templates)(?:\/|$)/u.test(entry)), false);
+    assert.ok(entries.includes('scripts/stage-transaction.mjs'));
+    assert.equal(entries.some((entry) => /^scripts\/(?!stage-transaction\.mjs$)/u.test(entry)), false);
+    assert.equal(entries.some((entry) => /^(?:src|templates)(?:\/|$)/u.test(entry)), false);
   }
   assert.equal(entries.some((entry) => /^(?:tests|\.scaffold|evals?|eval-workspaces)(?:\/|$)/u.test(entry)), false);
   assert.equal(entries.some((entry) => /(?:^|\/)(?:credentials?\.json|\.env(?:\.|$))|\.log$/iu.test(entry)), false);

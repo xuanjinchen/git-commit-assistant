@@ -4,7 +4,7 @@
   "status": "draft",
   "skill": {
     "name": "git-commit-assistant",
-    "description": "Generate Conventional Commit messages from staged Git changes when Codex is asked to draft or create a commit, and commit only after explicit confirmation; not for Git explanations, history review, or history rewriting.",
+    "description": "Generate Conventional Commit messages for staged or current-task Git changes, prepare only task-related hunks for explicit commit requests, and commit only after a second confirmation; not for Git explanations, history review, history rewriting, or combined push/release requests.",
     "license": "Apache-2.0"
   },
   "initialized_at": "2026-08-19",
@@ -17,6 +17,6 @@
     "docs/skill-brief.md": "e7415d1a69a9cb6fdca1939a940e0320d401ee92db91b6fac9b0d050f2bd63d8",
     "evals/evals.json": "f610ed09598b8dede93e981cb2b78412ba595d179d5720f8a24a34d2a9a25fae",
     "package-lock.json": "739d7cb3cbe1016ae0f6f5626e33c9e0a82e41bfd37bbd6ae20ee71f9b9be1c3",
-    "package.json": "28f5d59bbec0005d6ff879619484d4f47089e0d397fefb45be24f6e48f4223fa"
+    "package.json": "9a17bef63d789c401260c73582d3a9fb23277f4e1347e0bcde4154487eaf7a06"
   }
 }
