@@ -3417,9 +3417,28 @@ async function commitWithBoundMessage(repository, context, taskIndex, messageFil
   }
 }
 
-async function pipeConfirmedObjects(repository, context, runtime, includeOid, excludeOid) {
+async function pipeConfirmedObjects(
+  repository,
+  context,
+  runtime,
+  includeOid,
+  excludeOid,
+  claimOwnership = false,
+) {
   const objectDirectory = path.join(context.resourceDirectory, 'objects');
   const mainObjectDirectory = await gitPath(repository, 'objects', runtime);
+  const packDirectory = path.join(mainObjectDirectory, 'pack');
+  const packDirectoryBefore = await captureStableDirectory(
+    packDirectory,
+    () => stopped('OBJECT_IMPORT_FAILED'),
+  );
+  const packEntriesBefore = new Set(await readdir(packDirectory));
+  const { stdout: refsBefore } = await git(repository, [
+    'for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)',
+  ], runtime, {
+    encoding: 'buffer',
+    unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+  });
   const producerArgs = ['pack-objects', '--stdout', '--revs', '--thin'];
   const consumerArgs = ['index-pack', '--stdin', '--fix-thin'];
   const producer = startGitProcess(repository, producerArgs, {
@@ -3437,6 +3456,8 @@ async function pipeConfirmedObjects(repository, context, runtime, includeOid, ex
   // pack bytes 只经真实 stdout→stdin pipe 进入主 ODB；参数数组与 shell:false 保持路径和修订值为数据。
   producer.stdout.pipe(consumer.stdin);
   consumer.stdin.on('error', () => {});
+  const consumerOutput = [];
+  consumer.stdout.on('data', (chunk) => consumerOutput.push(chunk));
   const producerDone = waitForGitProcess(producer);
   const consumerDone = waitForGitProcess(consumer);
   producer.stdin.end(`${includeOid}\n^${excludeOid}\n`);
@@ -3448,6 +3469,70 @@ async function pipeConfirmedObjects(repository, context, runtime, includeOid, ex
       { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
     );
   }
+  const importedOid = Buffer.concat(consumerOutput).toString('utf8').trim().match(
+    /(?:pack|keep)?\s*([0-9a-f]{40}|[0-9a-f]{64})$/u,
+  )?.[1];
+  if (importedOid === undefined) {
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction object pack could not be identified.',
+      { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
+    );
+  }
+  if (!claimOwnership) return null;
+  const packDirectoryAfter = await captureStableDirectory(
+    packDirectory,
+    () => stopped('OBJECT_IMPORT_FAILED'),
+  );
+  if (!evidenceRecordsMatch(packDirectoryBefore, packDirectoryAfter)) {
+    throw stopped('OBJECT_IMPORT_FAILED');
+  }
+  const packPrefix = `pack-${importedOid}`;
+  const matchingNames = (await readdir(packDirectory))
+    .filter((name) => name.startsWith(`${packPrefix}.`));
+  const unexpectedNames = matchingNames.filter((name) =>
+    !['.pack', '.idx', '.rev', '.keep'].some((extension) => name === `${packPrefix}${extension}`));
+  if (unexpectedNames.length > 0 || !matchingNames.includes(`${packPrefix}.pack`)
+    || !matchingNames.includes(`${packPrefix}.idx`)) {
+    throw stopped('OBJECT_IMPORT_FAILED');
+  }
+  const keepName = `${packPrefix}.keep`;
+  if (packEntriesBefore.has(keepName) || matchingNames.includes(keepName)) {
+    throw stopped('OBJECT_IMPORT_FAILED');
+  }
+  const keepBytes = Buffer.from(
+    `git-commit-assistant transaction ${context.state.transaction_id}\n`,
+  );
+  const keepPath = path.join(packDirectory, keepName);
+  await writeFile(keepPath, keepBytes, { flag: 'wx', mode: 0o600 });
+  await chmod(keepPath, 0o600);
+  const ownedNames = [...matchingNames, keepName]
+    .filter((name) => !packEntriesBefore.has(name));
+  const ownedArtifacts = [];
+  for (const name of ownedNames) {
+    const artifact = await readStableOwnedFile(
+      path.join(packDirectory, name),
+      packDirectoryAfter.canonical,
+      () => stopped('OBJECT_IMPORT_FAILED'),
+    );
+    ownedArtifacts.push({
+      name,
+      path: path.join(packDirectory, name),
+      identity: artifact.identity,
+      sha256: artifact.sha256,
+      size: artifact.size,
+    });
+  }
+  // `.keep` 是事务对 pack 的可验证声明；拒绝时只撤销本次新建且身份稳定的同 stem 文件。
+  return {
+    headOid: context.state.binding.head_oid,
+    refsSha256: digest(refsBefore),
+    packDirectory: packDirectoryAfter,
+    packPrefix,
+    keepName,
+    keepSha256: digest(keepBytes),
+    ownedArtifacts,
+  };
 }
 
 async function importConfirmedObjects(repository, context, runtime) {
@@ -3457,12 +3542,13 @@ async function importConfirmedObjects(repository, context, runtime) {
     runtime,
     { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
   );
-  await pipeConfirmedObjects(
+  const importedPack = await pipeConfirmedObjects(
     repository,
     context,
     runtime,
     context.state.binding.task_tree_oid,
     originalHeadTree.trim(),
+    true,
   );
   try {
     await git(repository, [
@@ -3477,6 +3563,7 @@ async function importConfirmedObjects(repository, context, runtime) {
       { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
     );
   }
+  return importedPack;
 }
 
 async function importRecoveryObjects(repository, context, runtime) {
@@ -3499,6 +3586,85 @@ async function importRecoveryObjects(repository, context, runtime) {
       'The confirmed transaction objects could not be verified.',
       { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
     );
+  }
+}
+
+async function currentReferenceTipsSha256(repository, runtime) {
+  const { stdout } = await git(repository, [
+    'for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)',
+  ], runtime, {
+    encoding: 'buffer',
+    unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+  });
+  return digest(stdout);
+}
+
+async function ownedPackArtifactsStillMatch(descriptor, artifacts) {
+  const packDirectory = await captureStableDirectory(
+    descriptor.packDirectory.canonical,
+    () => stopped('OBJECT_IMPORT_CLEANUP_UNPROVEN'),
+  );
+  if (!evidenceRecordsMatch(packDirectory, descriptor.packDirectory)) return false;
+  for (const artifact of artifacts) {
+    let current;
+    try {
+      current = await readStableOwnedFile(
+        artifact.path,
+        descriptor.packDirectory.canonical,
+        () => stopped('OBJECT_IMPORT_CLEANUP_UNPROVEN'),
+      );
+    } catch {
+      return false;
+    }
+    if (!evidenceRecordsMatch(current.identity, artifact.identity)
+      || current.size !== artifact.size
+      || !timingSafeHexMatches(current.sha256, artifact.sha256)) return false;
+  }
+  return true;
+}
+
+function removeVerifiedPackArtifacts(artifacts) {
+  try {
+    const ordered = [...artifacts].sort((left, right) => {
+      const rank = (name) => ['.keep', '.rev', '.idx', '.pack']
+        .findIndex((extension) => name.endsWith(extension));
+      return rank(left.name) - rank(right.name);
+    });
+    for (const artifact of ordered) {
+      const metadata = lstatSync(artifact.path, { bigint: true });
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n
+        || !evidenceRecordsMatch(filesystemEvidence(metadata), artifact.identity)
+        || String(metadata.size) !== artifact.size) return false;
+    }
+    // 最终身份检查与逐项 unlink 间不再让出 JS 执行权；同权限隐蔽 syscall race 不在既定威胁模型内。
+    for (const artifact of ordered) rmSync(artifact.path, { force: false });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function releaseImportedPackRetention(descriptor) {
+  const keep = descriptor.ownedArtifacts.find(({ name }) => name === descriptor.keepName);
+  if (keep === undefined || !timingSafeHexMatches(keep.sha256, descriptor.keepSha256)
+    || !await ownedPackArtifactsStillMatch(descriptor, [keep])) return false;
+  return removeVerifiedPackArtifacts([keep]);
+}
+
+async function withdrawRejectedImportedPack(repository, descriptor, runtime) {
+  try {
+    const { stdout: headOutput } = await git(repository, ['rev-parse', 'HEAD'], runtime, {
+      unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+    });
+    if (headOutput.trim() !== descriptor.headOid
+      || !timingSafeHexMatches(
+        await currentReferenceTipsSha256(repository, runtime),
+        descriptor.refsSha256,
+      )) return false;
+    if (!await ownedPackArtifactsStillMatch(descriptor, descriptor.ownedArtifacts)) return false;
+    return removeVerifiedPackArtifacts(descriptor.ownedArtifacts);
+  } catch {
+    return false;
   }
 }
 
@@ -3719,7 +3885,20 @@ export async function commitTransaction({
   let result;
   let primaryError;
   let commitStarted = false;
+  let importedPack;
+  let rejectedImportCleanup;
   const warnings = [];
+  const cleanupRejectedImport = async () => {
+    if (importedPack === undefined) return true;
+    if (rejectedImportCleanup === undefined) {
+      rejectedImportCleanup = await withdrawRejectedImportedPack(
+        context.repository,
+        importedPack,
+        runtime,
+      );
+    }
+    return rejectedImportCleanup;
+  };
   try {
     context = await verifyCancellationContext({
       repository_root,
@@ -3759,7 +3938,7 @@ export async function commitTransaction({
       await currentBinding(repository, indexPath, runtime),
     );
     await assertTransactionStillConfirmed(repository, context, runtime);
-    await importConfirmedObjects(repository, context, runtime);
+    importedPack = await importConfirmedObjects(repository, context, runtime);
     await assertIndexLockOwned(indexLock);
     assertRepositoryStillConfirmed(
       expectedConfirmation,
@@ -3793,6 +3972,11 @@ export async function commitTransaction({
       { unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'] },
     );
     const actualHead = actualHeadOutput.trim();
+    if (actualHead !== context.state.binding.head_oid
+      && !await releaseImportedPackRetention(importedPack)) {
+      warnings.push('OBJECT_IMPORT_RETENTION_RELEASE_FAILED');
+      result = recoveryRequired(actualHead, warnings, context);
+    }
     // hook 可拒绝或改变待提交 index；恢复决策只信任实际 HEAD/tree，绝不通过 retry、amend 或历史改写纠正。
     if ((attempt.status ?? 0) !== 0 || actualHead === context.state.binding.head_oid) {
       if (actualHead !== context.state.binding.head_oid) {
@@ -3814,6 +3998,7 @@ export async function commitTransaction({
           runtime,
         });
         indexLock = restored.indexLock;
+        const importedPackCleaned = await cleanupRejectedImport();
         throw new StageTransactionError(
           'COMMIT_REJECTED',
           'Git rejected the confirmed commit.',
@@ -3821,7 +4006,10 @@ export async function commitTransaction({
             retained: true,
             transaction_preserved: true,
             transaction_id,
-            repository_changed: repositoryChanged,
+            repository_changed: repositoryChanged || !importedPackCleaned,
+            ...(!importedPackCleaned ? {
+              recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN',
+            } : {}),
             ...(restored.unexpected === null ? {} : {
               unexpected_index: restored.unexpected.path,
               unexpected_index_sha256: restored.unexpected.sha256,
@@ -3829,7 +4017,7 @@ export async function commitTransaction({
           },
         );
       }
-    } else {
+    } else if (result === undefined) {
       const { stdout: actualTreeOutput } = await git(
         repository,
         ['rev-parse', `${actualHead}^{tree}`],
@@ -3912,7 +4100,11 @@ export async function commitTransaction({
         if (observedHead !== context.state.binding.head_oid) {
           result = recoveryRequired(observedHead, warnings, context);
         } else {
-          error.repository_changed ??= false;
+          const importedPackCleaned = await cleanupRejectedImport();
+          error.repository_changed = error.repository_changed === true || !importedPackCleaned;
+          if (!importedPackCleaned) {
+            error.recovery_code ??= 'OBJECT_IMPORT_CLEANUP_UNPROVEN';
+          }
           primaryError = error;
         }
       } catch {
@@ -3921,7 +4113,9 @@ export async function commitTransaction({
         result = recoveryRequired(null, warnings, context);
       }
     } else {
-      error.repository_changed = false;
+      const importedPackCleaned = await cleanupRejectedImport();
+      error.repository_changed = !importedPackCleaned;
+      if (!importedPackCleaned) error.recovery_code ??= 'OBJECT_IMPORT_CLEANUP_UNPROVEN';
       primaryError = error;
     }
   } finally {

@@ -3572,6 +3572,7 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
   const hookSecret = 'hook-secret-must-not-escape-6c54d7';
   await writeFile(hookPath, `#!/bin/sh\nprintf '${hookSecret}\\n' >&2\nexit 1\n`);
   await chmod(hookPath, 0o755);
+  const repositoryBefore = await snapshotRepository(root);
   const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
   const statePath = path.join(path.dirname(fixture.prepared.message_file), 'state.json');
   const stateIdentity = await lstat(statePath, { bigint: true });
@@ -3615,11 +3616,147 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
   assert.equal(stateAfter.message_file_sha256, null);
   assert.equal(stateAfter.ownership.message_file, null);
   await assert.rejects(access(fixture.prepared.message_file), { code: 'ENOENT' });
+  assert.deepEqual(await snapshotRepository(root), repositoryBefore);
   await cancelTransaction({
     repository_root: root,
     transaction_id: fixture.prepared.transaction_id,
     ownership_token: fixture.prepared.ownership_token,
   }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('hook rejection removes only its imported pack and preserves a foreign loose object', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected foreign ODB task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  const foreignBytes = Buffer.from('foreign concurrent ODB bytes\n');
+  const foreignOid = (await runGit(root, ['hash-object', '--stdin'], { input: foreignBytes })).stdout.trim();
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    `printf 'foreign concurrent ODB bytes\\n' | git hash-object -w --stdin >/dev/null`,
+    'exit 29',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const before = await snapshotRepository(root);
+  const packEntries = (objects) => objects.filter(({ path: objectPath }) =>
+    objectPath === 'pack' || objectPath.startsWith('pack/'));
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
+  );
+
+  assert.equal(rejection.transaction_preserved, true);
+  assert.deepEqual(packEntries((await snapshotRepository(root)).objects), packEntries(before.objects));
+  assert.deepEqual(
+    (await runGit(root, ['cat-file', 'blob', foreignOid], { encoding: 'buffer' })).stdout,
+    foreignBytes,
+  );
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: fixture.prepared.transaction_id,
+    ownership_token: fixture.prepared.ownership_token,
+  }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('hook-created ref keeps the imported pack and returns recovery-required rejection', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected referenced pack task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    `git update-ref refs/gca/hook-preserved ${fixture.prepared.task_tree_oid}`,
+    'exit 37',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const before = await snapshotRepository(root);
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
+  );
+
+  assert.equal(rejection.repository_changed, true, JSON.stringify(rejection));
+  assert.equal(rejection.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  assert.equal(rejection.transaction_preserved, true);
+  assert.equal(
+    (await runGit(root, ['rev-parse', 'refs/gca/hook-preserved'])).stdout.trim(),
+    fixture.prepared.task_tree_oid,
+  );
+  assert.notDeepEqual((await snapshotRepository(root)).objects, before.objects);
+});
+
+test('replaced imported-pack keep marker survives fail-closed rejection cleanup', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected replaced keep task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const gitDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-dir'])).stdout.trim(),
+  );
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'git_dir="$(git rev-parse --git-dir)"',
+    'keep=',
+    'for candidate in "$git_dir"/objects/pack/pack-*.keep; do',
+    '  test -e "$candidate" || continue',
+    '  keep="$candidate"',
+    '  break',
+    'done',
+    'test -n "$keep" || exit 91',
+    'mv "$keep" "$git_dir/displaced-transaction.keep"',
+    "printf 'foreign keep bytes\\n' > \"$keep\"",
+    'exit 43',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
+  );
+
+  assert.equal(rejection.repository_changed, true);
+  assert.equal(rejection.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  const keepFiles = (await readdir(path.join(gitDirectory, 'objects', 'pack')))
+    .filter((name) => name.endsWith('.keep'));
+  assert.equal(keepFiles.length, 1);
+  assert.equal(
+    await readFile(path.join(gitDirectory, 'objects', 'pack', keepFiles[0]), 'utf8'),
+    'foreign keep bytes\n',
+  );
+  assert.equal(
+    await readFile(path.join(gitDirectory, 'displaced-transaction.keep'), 'utf8'),
+    `git-commit-assistant transaction ${fixture.prepared.transaction_id}\n`,
+  );
 });
 
 test('hook rejection redacts hook output from direct CLI results', async (t) => {

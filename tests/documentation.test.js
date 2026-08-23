@@ -203,3 +203,14 @@ test('Markdown 内部链接指向存在的仓库文件', () => {
     }
   }
 });
+
+test('Skill 主提示保持在保守 Token 预算内', () => {
+  const source = read('SKILL.md');
+  // 预算算法按 Unicode code point 计数，避免 UTF-16 代理对或字节数造成平台差异。
+  const codepoints = [...source].length;
+  const estimatedTokens = Math.ceil(codepoints / 3);
+  assert.ok(
+    estimatedTokens <= 1800,
+    `SKILL.md: ${codepoints} code points, estimated ${estimatedTokens} tokens (limit 1800)`,
+  );
+});
