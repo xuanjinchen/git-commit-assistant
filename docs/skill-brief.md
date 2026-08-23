@@ -2,7 +2,7 @@
 
 ## Requirement Version
 
-Version 5, revised and confirmed 2026-08-23, is complete. Nineteen independent real-Agent cases and controller snapshots pass against the frozen runtime; recovery diagnostics remain externally isolated and the measured prompt budget is within its limit. Version 4 evidence remains a historical baseline.
+Version 5, revised and confirmed 2026-08-23, is complete. Nineteen independent real-Agent cases and controller snapshots pass against the final frozen runtime; ordinary hook rejection restores the main ODB to baseline, while deterministic foreign-object and reflog regressions fail closed and preserve the owned pack when cleanup cannot be proven. Recovery diagnostics remain externally isolated and the measured prompt budget is within its limit. Version 4 evidence remains a historical baseline.
 
 ## Objective
 
@@ -142,7 +142,7 @@ An active same-privilege adversary that precisely races between two operating-sy
     },
     "scripts": {
       "status": "enabled",
-      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:43b6ac80202b44b2277970fb6d84cb1ead5ff1eb5ecd841cd9a61f4be53c0c97",
+      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:61e9a790a87e994d2be4aeb931a5dcbd4b19001e9168b4178cbe8bc7a06da03c",
       "unblock_condition": ""
     },
     "assets": {
@@ -152,7 +152,7 @@ An active same-privilege adversary that precisely races between two operating-sy
     },
     "implicit-trigger": {
       "status": "enabled",
-      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:2280493dc0c0920d7716e4cee104e6879ea5a35feeff863c6e1b743cff175c66",
+      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:3e6952e34392ed59848389fe2dfbd152154531b53ecd17fdb7cef963b2b84c6d",
       "unblock_condition": ""
     },
     "multi-agent": {

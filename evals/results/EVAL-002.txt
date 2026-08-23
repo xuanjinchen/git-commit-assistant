@@ -3,7 +3,7 @@ EVAL-002 implicit staged-commit assistance evidence
 Status: PASS
 Raw evidence: controller/raw-agent-proposal.md, controller/raw-agent.md, and controller before/proposal/confirmation snapshots from the isolated EVAL-002 fixture. Absolute paths, identities, object IDs, tokens, and temporary paths are omitted.
 SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
-Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
+Transaction script SHA-256: 73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671
 
 Frozen prompt
 
@@ -12,7 +12,7 @@ Frozen prompt
 Phase and runtime observation
 
 - The natural-language request entered the explicit staged-commit workflow without naming the Skill.
-- Repository history supported an English feat(api) subject; the proposal stated only the observed invoice-status change and invented no footer.
+- Repository history supported an English feat(api) subject; the proposal stated only the observed invoice-creation endpoint change and invented no footer.
 - The Agent waited for exact confirmation with the repository unchanged, then created exactly one commit and did not push.
 
 Assertions

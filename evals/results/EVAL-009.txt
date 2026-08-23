@@ -3,7 +3,7 @@ EVAL-009 staged hook-rejection evidence
 Status: PASS
 Raw evidence: controller/raw-agent-proposal.md, controller/raw-agent.md, controller before/proposal/confirmation snapshots, and the retained owned transaction state from the isolated EVAL-009 fixture. Absolute paths, identities, object IDs, ownership data, temporary paths, secret material, and raw hook output are omitted.
 SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
-Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
+Transaction script SHA-256: 73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671
 
 Frozen prompt
 
@@ -11,7 +11,7 @@ Frozen prompt
 
 Phase and runtime observation
 
-- The Agent prepared one staged hunk, displayed the complete Chinese candidate, and waited with the real repository unchanged.
+- The Agent prepared one staged hunk, displayed the complete evidence-limited candidate, and waited with the real repository unchanged.
 - Exact confirmation started one git commit --no-gpg-sign -F process with hooks enabled. The hook rejected it; the runtime did not use --no-verify and did not retry.
 - The owned external message file was removed after failure. Recovery evidence remained in the owned transaction without exposing hook output.
 

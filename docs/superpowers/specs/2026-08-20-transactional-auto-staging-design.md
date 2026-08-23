@@ -196,8 +196,8 @@ Node.js 没有跨平台的 descriptor-bound unlink/rename；仅凭 commit object
 ### 2026-08-23 证据聚合结论
 
 - EVAL-001～EVAL-019 的独立真实 Agent 结论与 controller 快照全部满足冻结 assertion，并绑定最终 `SKILL.md` 与事务脚本摘要。
-- EVAL-007、EVAL-010 只使用 `raw-agent-v2.md`；EVAL-008 只使用 `raw-agent-v3.md` 和 `after-agent-v3.json`。这些 case 的早期 raw 文件只保留为调度诊断，不进入正式证据。
-- EVAL-016 的真实 hook 拒绝路径证明单一 commit 进程、无 `--no-verify`、无重试，以及 HEAD、真实 index、worktree、主 ODB、config 和 hooks 精确恢复到基线；必要诊断只保留在安全外部恢复事务中。
+- EVAL-007、EVAL-008、EVAL-010 和 EVAL-011 只使用各 active fixture 的 `raw-agent.md`；`diagnostics/` 下的归档调度运行不进入正式证据。
+- EVAL-016 的普通真实 hook 拒绝路径证明单一 commit 进程、无 `--no-verify`、无重试，以及 HEAD、真实 index、worktree、主 ODB、config 和 hooks 精确恢复到基线；必要诊断只保留在安全外部恢复事务中。独立确定性回归还证明，拒绝 hook 新增 foreign dependent object/tag 或保留 create-delete reflog 时，运行时以 `OBJECT_IMPORT_CLEANUP_UNPROVEN` fail closed、保留 owned pack 并诚实报告仓库变化；该回归不冒充 EVAL-016 fixture 本身的 Agent 行为。
 - EVAL-017 只使用 `vectors/{head,index,worktree,message,script}` 五个 active vector；`EVAL-017/diagnostics` 下的无效尝试全部排除。五个 vector 均证明旧绑定失效、目标 Git commit 为 0、安全 cancel，并保留控制器制造的变化。
 - EVAL-012 正式证据只到 `awaiting-confirmation`，没有发送确认、取消或提交。EVAL-015 只证明本正式 case 拥有的事务被安全取消；不对两笔历史 EVAL-015 事务、旧 EVAL-012 事务或仓库外 recovery bundle 声称清理。
 - 冻结 `SKILL.md` 按仓库算法测得 1,734/1,800 tokens。十九份脱敏结果文件各自拥有独立 SHA-256，Evidence Contract v1 已进入 ready。

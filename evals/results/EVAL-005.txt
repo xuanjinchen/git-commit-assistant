@@ -1,9 +1,9 @@
 EVAL-005 stale-index confirmation evidence
 
 Status: PASS
-Raw evidence: controller/raw-agent-proposal.md, controller/raw-agent.md, controller/after-proposal.ps1, and before/proposal/index-change/stale-confirmation snapshots from the isolated EVAL-005 fixture. Absolute paths, identities, object IDs, tokens, and temporary paths are omitted.
+Raw evidence: controller/raw-agent.md, controller/after-proposal.ps1, and before/proposal/index-change/stale-confirmation snapshots from the isolated EVAL-005 fixture. Absolute paths, identities, object IDs, tokens, and temporary paths are omitted.
 SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
-Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
+Transaction script SHA-256: 73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671
 
 Frozen prompt
 
@@ -13,7 +13,7 @@ Phase and runtime observation
 
 - The first Agent phase recorded the staged identity, prepared one task hunk, displayed the complete candidate, and waited for confirmation.
 - The controller then changed and retained the real index/worktree state; the recorded index tree no longer matched the proposal binding.
-- The old confirmation returned CONFIRMATION_STALE before Git commit began. The controller-created change remained intact and the old transaction was retained for safe handling.
+- The old confirmation was rejected before Git commit began. The controller-created change remained intact and the owned transaction was safely cancelled.
 
 Assertions
 

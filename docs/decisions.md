@@ -147,8 +147,8 @@ Record requirement interpretations and superseding decisions without rewriting h
       "id": "DEC-018",
       "status": "active",
       "scope": "delivery evidence",
-      "decision": "Close Version 5 as ready only after all nineteen independent Agent/controller cases pass against the final runtime hashes, hook-rejection cleanup restores the main ODB exactly while retaining necessary diagnostics only in the safe external transaction, and the conservative Skill prompt estimate remains within 1,800 tokens.",
-      "evidence": "artifact:evals/results/EVAL-016.txt#sha256:5eda52b0945a2428771be786e7875b3423d63916c6de40d254fe0d2689042b8a; artifact:evals/results/prompt-budget.txt#sha256:7b64f8ce2146ff781f2f5b9e5df6baa8193f7ea214add6b6d36e3e0c08f4fc2b",
+      "decision": "Close Version 5 as ready only after all nineteen independent Agent/controller cases pass against the final runtime hashes, ordinary hook-rejection cleanup restores the main ODB exactly, foreign-object or reflog mutation makes cleanup fail closed with the owned pack preserved, and the conservative Skill prompt estimate remains within 1,800 tokens.",
+      "evidence": "artifact:evals/results/EVAL-016.txt#sha256:62de78037c32dd02bcc38a9f8758fd8a02ba8bc7503b1d455c34eeb789e78f1e; artifact:evals/results/prompt-budget.txt#sha256:7b64f8ce2146ff781f2f5b9e5df6baa8193f7ea214add6b6d36e3e0c08f4fc2b",
       "supersedes": "DEC-017"
     }
   ]
