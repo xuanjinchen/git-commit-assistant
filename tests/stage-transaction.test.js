@@ -718,6 +718,24 @@ test('inspect rejects a linked Git index', async (t) => {
   );
 });
 
+test('inspect rejects a linked repository root without touching its target', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const linkContainer = await createTemporaryRoot(t);
+  const linkedRoot = path.join(linkContainer, 'linked-repository-root');
+  if (!await createDirectoryLinkOrSkip(t, root, linkedRoot)) return;
+  const sentinel = path.join(root, 'outside-sentinel.txt');
+  await writeFile(sentinel, 'preserve linked target bytes\n');
+  const before = await snapshotRepository(root);
+
+  await assert.rejects(
+    inspectRepository({ repository_root: linkedRoot }),
+    ({ code }) => code === 'UNSAFE_GIT_PATH',
+  );
+
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.equal(await readFile(sentinel, 'utf8'), 'preserve linked target bytes\n');
+});
+
 test('inspect rejects linked and dangling index locks', async (t) => {
   for (const dangling of [false, true]) {
     const root = await repositoryWithBaseline(t);
@@ -795,6 +813,31 @@ test('inspect CLI rejects malformed input and extra argv without stderr', async 
   assert.equal(extraArgv.stderr, '');
   assert.equal(JSON.parse(malformed.stdout).error.code, 'PROTOCOL_ERROR');
   assert.equal(JSON.parse(extraArgv.stdout).error.code, 'PROTOCOL_ERROR');
+});
+
+test('CLI exits quietly when stdout closes before its response', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  const script = path.resolve('scripts/stage-transaction.mjs');
+  const child = spawn(process.execPath, [script, 'inspect'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: gitConfigByRepository.get(root),
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const stderr = [];
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  child.stdout.destroy();
+  child.stdin.end(JSON.stringify({ repository_root: root }));
+  const status = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+
+  assert.equal(status, 0);
+  assert.equal(Buffer.concat(stderr).toString('utf8'), '');
 });
 
 test('prepare leaves the real repository unchanged and builds only the selected task tree', async (t) => {
@@ -3463,26 +3506,37 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
     root,
     (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
   );
-  await writeFile(hookPath, '#!/bin/sh\nexit 1\n');
+  const hookSecret = 'hook-secret-must-not-escape-6c54d7';
+  await writeFile(hookPath, `#!/bin/sh\nprintf '${hookSecret}\\n' >&2\nexit 1\n`);
   await chmod(hookPath, 0o755);
   const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
   const statePath = path.join(path.dirname(fixture.prepared.message_file), 'state.json');
   const stateIdentity = await lstat(statePath, { bigint: true });
   const messageIdentity = await lstat(fixture.prepared.message_file, { bigint: true });
   let stateDuringCommit;
+  const commitCalls = [];
+  let rejection;
 
   await assert.rejects(
     commitPrepared(root, fixture, {
       spawnGit: (repositoryRoot, args, options) => {
         if (args[0] === 'commit') {
+          commitCalls.push([...args]);
           stateDuringCommit = JSON.parse(readFileSync(statePath, 'utf8'));
         }
         return spawnRealGit(repositoryRoot, args, options);
       },
     }),
-    ({ code }) => code === 'COMMIT_FAILED',
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
   );
 
+  assert.deepEqual(commitCalls, [[
+    'commit', '--no-gpg-sign', '-F', fixture.prepared.message_file,
+  ]]);
+  assert.equal(JSON.stringify(rejection).includes(hookSecret), false);
   assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
   assert.equal(stateDuringCommit.message_file_sha256, fixture.confirmation.message_sha256);
   assert.deepEqual(stateDuringCommit.ownership.message_file, {
@@ -3497,6 +3551,62 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
   assert.equal(stateAfter.message_file_sha256, null);
   assert.equal(stateAfter.ownership.message_file, null);
   await assert.rejects(access(fixture.prepared.message_file), { code: 'ENOENT' });
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: fixture.prepared.transaction_id,
+    ownership_token: fixture.prepared.ownership_token,
+  }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('hook rejection preserves and restores an observable real index rewrite', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected rejected index rewrite\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'git_dir="$(git rev-parse --git-dir)"',
+    'rm -f "$git_dir/index.lock"',
+    'unset GIT_INDEX_FILE',
+    "printf 'hook worktree bytes\\n' > hook-real-index.txt",
+    'git add -- hook-real-index.txt',
+    'exit 23',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const originalIndex = await readIndexBytes(root);
+  const headBefore = (await runGit(root, ['rev-parse', 'HEAD'])).stdout.trim();
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  const commitCalls = [];
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      spawnGit: (repositoryRoot, args, options) => {
+        if (args[0] === 'commit') commitCalls.push([...args]);
+        return spawnRealGit(repositoryRoot, args, options);
+      },
+    }),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
+  );
+
+  assert.equal(commitCalls.length, 1);
+  assert.equal((await runGit(root, ['rev-parse', 'HEAD'])).stdout.trim(), headBefore);
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  assert.deepEqual(await readIndexBytes(root), originalIndex);
+  assert.equal(await readFile(path.join(root, 'hook-real-index.txt'), 'utf8'), 'hook worktree bytes\n');
+  assert.equal(path.basename(rejection.unexpected_index), 'unexpected.index');
+  assert.match(rejection.unexpected_index_sha256, /^[0-9a-f]{64}$/u);
+  assert.match((await runGit(root, ['ls-files', '--', 'hook-real-index.txt'], {
+    env: { GIT_INDEX_FILE: rejection.unexpected_index },
+  })).stdout, /^hook-real-index\.txt\n$/u);
   await cancelTransaction({
     repository_root: root,
     transaction_id: fixture.prepared.transaction_id,
@@ -3638,7 +3748,7 @@ test('hook barrier preserves original hook order arguments edits exits and confi
 
     await assert.rejects(
       commitPrepared(root, fixture),
-      ({ code }) => code === 'COMMIT_FAILED',
+      ({ code }) => code === 'COMMIT_REJECTED',
     );
 
     assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);

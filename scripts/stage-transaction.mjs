@@ -135,6 +135,16 @@ async function resolveOwnedRepository(repositoryRoot, runtime) {
   if (typeof repositoryRoot !== 'string' || repositoryRoot.length === 0) {
     throw new StageTransactionError('NOT_GIT_REPOSITORY', 'Repository root is required.');
   }
+  let requestedMetadata;
+  try {
+    requestedMetadata = await lstat(path.resolve(repositoryRoot));
+  } catch {
+    throw new StageTransactionError('NOT_GIT_REPOSITORY', 'The requested path is not a Git repository.');
+  }
+  // 调用方提供的所有权根不能先经 link/junction 换指后再被 canonicalize 为可信仓库。
+  if (!requestedMetadata.isDirectory() || requestedMetadata.isSymbolicLink()) {
+    throw new StageTransactionError('UNSAFE_GIT_PATH', 'The repository root is not an ordinary directory.');
+  }
   const requestedRoot = await resolveExistingPath(repositoryRoot);
   let topLevel;
   let gitDir;
@@ -1268,6 +1278,7 @@ const TRANSACTION_ARTIFACT_NAMES = new Set([
   'snapshots',
   'task.index',
 ]);
+const OPTIONAL_TRANSACTION_ARTIFACT_NAMES = new Set(['unexpected.index']);
 
 async function captureTransactionArtifacts(resourceDirectory, failure) {
   const resource = await captureStableDirectory(resourceDirectory, failure);
@@ -1278,8 +1289,9 @@ async function captureTransactionArtifacts(resourceDirectory, failure) {
     throw failure();
   }
   const artifacts = directNames.filter((name) => !['message.txt', 'state.json'].includes(name));
-  if (artifacts.length !== TRANSACTION_ARTIFACT_NAMES.size
-    || artifacts.some((name) => !TRANSACTION_ARTIFACT_NAMES.has(name))) {
+  if (artifacts.some((name) =>
+    !TRANSACTION_ARTIFACT_NAMES.has(name) && !OPTIONAL_TRANSACTION_ARTIFACT_NAMES.has(name))
+    || [...TRANSACTION_ARTIFACT_NAMES].some((name) => !artifacts.includes(name))) {
     throw failure();
   }
 
@@ -2230,6 +2242,7 @@ export async function prepareTransaction({
           original_index_sha256: digest(await readFile(transaction.originalIndex)),
           task_index_sha256: digest(await readFile(transaction.taskIndex)),
           recovery_index_sha256: digest(await readFile(transaction.recoveryIndex)),
+          unexpected_index_sha256: null,
           recovery_patch_sha256: digest(recoveryPatch),
           worktree: worktreeEvidence,
         },
@@ -2305,6 +2318,8 @@ function parseOwnedState(bytes, transactionId) {
     || !SHA256_PATTERN.test(state.state_mac_sha256)
     || (state.message_file_sha256 !== null
       && !SHA256_PATTERN.test(state.message_file_sha256))
+    || (state.files?.unexpected_index_sha256 !== null
+      && !SHA256_PATTERN.test(state.files?.unexpected_index_sha256))
     || !Array.isArray(state.ownership?.tree)
     || !hasFilesystemEvidence(state.ownership?.transaction_directory)
     || !hasFilesystemEvidence(state.ownership?.resource_directory)
@@ -2336,6 +2351,13 @@ function assertStateFileEvidence(state, artifacts) {
       || entry.sha256 !== state.files[digestName]) {
       throw ownershipInvalid();
     }
+  }
+  const unexpected = byPath.get('unexpected.index');
+  if (state.files.unexpected_index_sha256 === null) {
+    if (unexpected !== undefined) throw ownershipInvalid();
+  } else if (unexpected?.type !== 'file'
+    || unexpected.sha256 !== state.files.unexpected_index_sha256) {
+    throw ownershipInvalid();
   }
   if (byPath.get('objects')?.type !== 'directory'
     || byPath.get('snapshots')?.type !== 'directory') {
@@ -2826,6 +2848,7 @@ async function updateRetainedState(context, ownershipToken, {
       if (entry?.type !== 'file' || !SHA256_PATTERN.test(entry.sha256)) throw ownershipInvalid();
       nextState.files[digestName] = entry.sha256;
     }
+    nextState.files.unexpected_index_sha256 = byPath.get('unexpected.index')?.sha256 ?? null;
     nextState.ownership.tree = artifacts.entries;
   }
   nextState.message_file_sha256 = message?.sha256 ?? null;
@@ -3467,6 +3490,96 @@ async function stableIndexFile(indexPath) {
   return readStableOwnedFile(indexPath, parent.canonical, () => stopped('CONFIRMATION_STALE'));
 }
 
+async function preserveUnexpectedIndex(context, ownershipToken, unexpectedIndex) {
+  const unexpectedPath = path.join(context.resourceDirectory, 'unexpected.index');
+  await writeFile(unexpectedPath, unexpectedIndex.bytes, { flag: 'wx', mode: 0o600 });
+  await chmod(unexpectedPath, 0o600);
+  const preserved = await readStableOwnedFile(
+    unexpectedPath,
+    context.resourceIdentity.canonical,
+    ownershipInvalid,
+  );
+  if (!timingSafeHexMatches(preserved.sha256, unexpectedIndex.sha256)) throw ownershipInvalid();
+  // 先把 hook 的意外 index 纳入 token/HMAC 闭集，后续恢复失败也不会丢失可验证证据。
+  await updateRetainedState(context, ownershipToken, {
+    message: context.message,
+    refreshArtifacts: true,
+  });
+  return { path: unexpectedPath, sha256: preserved.sha256 };
+}
+
+async function restoreIndexAfterRejectedCommit({
+  repository,
+  context,
+  ownershipToken,
+  indexPath,
+  originalIndex,
+  indexLock,
+  runtime,
+}) {
+  const currentIndex = await stableIndexFile(indexPath);
+  if (timingSafeHexMatches(currentIndex.sha256, context.state.binding.index_sha256)) {
+    return { indexLock, unexpected: null };
+  }
+
+  const unexpected = await preserveUnexpectedIndex(context, ownershipToken, currentIndex);
+  await releaseOwnedIndexLock(indexLock, runtime);
+  let restoreLock;
+  try {
+    restoreLock = await acquireIndexLock(
+      repository,
+      await gitPath(repository, 'index.lock', runtime),
+      context.state.transaction_id,
+      context.state.token_sha256,
+    );
+    const beforeRestore = await stableIndexFile(indexPath);
+    if (!evidenceRecordsMatch(beforeRestore.identity, currentIndex.identity)
+      || !timingSafeHexMatches(beforeRestore.sha256, currentIndex.sha256)) {
+      throw stopped('CONFIRMATION_STALE');
+    }
+    // 工作区是 hook 的不可信输出；这里只在新取得的自有 lock 中恢复确认前 index 字节。
+    await restoreLock.handle.truncate(0);
+    await writeAll(restoreLock.handle, originalIndex.bytes, 0, originalIndex.bytes.length);
+    await restoreLock.handle.truncate(originalIndex.bytes.length);
+    await restoreLock.handle.sync();
+    const restoredBytes = await readExactFileHandle(restoreLock.handle, originalIndex.bytes.length);
+    if (!timingSafeHexMatches(digest(restoredBytes), context.state.binding.index_sha256)) {
+      throw stopped('INDEX_RESTORE_FAILED');
+    }
+    const finalUnexpected = await stableIndexFile(indexPath);
+    if (!evidenceRecordsMatch(finalUnexpected.identity, currentIndex.identity)
+      || !timingSafeHexMatches(finalUnexpected.sha256, currentIndex.sha256)) {
+      throw stopped('CONFIRMATION_STALE');
+    }
+    if (!finishOwnedIndexLockOperation(restoreLock, 'install', indexPath)) {
+      throw stopped('INDEX_LOCK_OWNERSHIP_LOST');
+    }
+    restoreLock.installed = true;
+    await restoreLock.handle.close();
+    restoreLock.closed = true;
+    const installed = await stableIndexFile(indexPath);
+    if (!timingSafeHexMatches(installed.sha256, context.state.binding.index_sha256)) {
+      throw stopped('INDEX_RESTORE_FAILED');
+    }
+    return { indexLock: restoreLock, unexpected };
+  } catch (error) {
+    await releaseOwnedIndexLock(restoreLock, runtime);
+    throw new StageTransactionError(
+      'COMMIT_REJECTED',
+      'Git rejected the confirmed commit and the original index could not be restored safely.',
+      {
+        retained: true,
+        transaction_preserved: true,
+        transaction_id: context.state.transaction_id,
+        repository_changed: true,
+        unexpected_index: unexpected.path,
+        unexpected_index_sha256: unexpected.sha256,
+        recovery_code: error instanceof StageTransactionError ? error.code : 'INDEX_RESTORE_FAILED',
+      },
+    );
+  }
+}
+
 async function installRecoveryIndex({
   repository,
   context,
@@ -3648,10 +3761,28 @@ export async function commitTransaction({
       if (actualHead !== context.state.binding.head_oid) {
         result = recoveryRequired(actualHead, warnings, context);
       } else {
+        const restored = await restoreIndexAfterRejectedCommit({
+          repository,
+          context,
+          ownershipToken: ownership_token,
+          indexPath,
+          originalIndex,
+          indexLock,
+          runtime,
+        });
+        indexLock = restored.indexLock;
         throw new StageTransactionError(
-          'COMMIT_FAILED',
+          'COMMIT_REJECTED',
           'Git rejected the confirmed commit.',
-          { retained: true, transaction_preserved: true, transaction_id },
+          {
+            retained: true,
+            transaction_preserved: true,
+            transaction_id,
+            ...(restored.unexpected === null ? {} : {
+              unexpected_index: restored.unexpected.path,
+              unexpected_index_sha256: restored.unexpected.sha256,
+            }),
+          },
         );
       }
     } else {
@@ -3737,7 +3868,7 @@ export async function commitTransaction({
         if (observedHead !== context.state.binding.head_oid) {
           result = recoveryRequired(observedHead, warnings, context);
         } else {
-          error.repository_changed = false;
+          error.repository_changed ??= false;
           primaryError = error;
         }
       } catch {
@@ -3888,6 +4019,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (process.argv[2] === LOOSE_OBJECT_HELPER_COMMAND) {
     process.exitCode = await runLooseObjectHelper();
   } else {
+    // 管道消费者提前关闭 stdout 属于正常终止，CLI 不应为 EPIPE 输出内部 stack。
+    process.stdout.on('error', (error) => {
+      if (error?.code === 'EPIPE') {
+        process.exitCode = 0;
+        return;
+      }
+      throw error;
+    });
     await runCli();
   }
 }
