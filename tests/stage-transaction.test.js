@@ -3400,6 +3400,69 @@ test('rejects unsafe message files without starting commit', async (t) => {
   }
 });
 
+test('requires canonical LF message bytes before starting Git', async (t) => {
+  for (const [name, bytes] of [
+    ['no final LF', Buffer.from('feat: missing terminal LF')],
+    ['repeated final LF', Buffer.from('feat: repeated terminal LF\n\n')],
+    ['CRLF', Buffer.from('feat: CRLF serialization\r\n')],
+  ]) {
+    await t.test(name, async (subtest) => {
+      const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+      const gitCalls = [];
+      await writeFile(prepared.message_file, bytes, { flag: 'wx', mode: 0o600 });
+      await chmod(prepared.message_file, 0o600);
+
+      await assert.rejects(
+        commitTransaction({
+          repository_root: root,
+          transaction_id: prepared.transaction_id,
+          ownership_token: prepared.ownership_token,
+          message_file: prepared.message_file,
+          confirmation: { ...prepared.binding, message_sha256: sha256(bytes) },
+        }, {
+          temporaryRoot,
+          spawnGit: (repositoryRoot, args, options) => {
+            gitCalls.push(args);
+            return spawnRealGit(repositoryRoot, args, options);
+          },
+        }),
+        ({ code }) => code === 'MESSAGE_FILE_INVALID',
+      );
+
+      assert.deepEqual(gitCalls, []);
+      await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+    });
+  }
+
+  await t.test('exactly one terminal LF', async (subtest) => {
+    const { root, prepared, temporaryRoot } = await preparedFixture(subtest);
+    const bytes = Buffer.from('feat: canonical terminal LF\n');
+    const gitCalls = [];
+    await writeFile(prepared.message_file, bytes, { flag: 'wx', mode: 0o600 });
+    await chmod(prepared.message_file, 0o600);
+
+    const result = await commitTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+      message_file: prepared.message_file,
+      confirmation: { ...prepared.binding, message_sha256: sha256(bytes) },
+    }, {
+      temporaryRoot,
+      spawnGit: (repositoryRoot, args, options) => {
+        gitCalls.push(args);
+        return spawnRealGit(repositoryRoot, args, options);
+      },
+    });
+
+    assert.equal(result.status, 'committed');
+    assert.deepEqual(gitCalls.filter((args) => args[0] === 'commit'), [[
+      'commit', '--no-gpg-sign', '-F', prepared.message_file,
+    ]]);
+    await assert.rejects(access(prepared.message_file), { code: 'ENOENT' });
+  });
+});
+
 test('message replacement at commit delegation cannot create an unconfirmed commit', async (t) => {
   for (const mutation of ['replacement', 'in-place rewrite']) {
     await t.test(mutation, async (subtest) => {

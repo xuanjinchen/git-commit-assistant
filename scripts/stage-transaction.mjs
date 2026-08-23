@@ -2766,7 +2766,11 @@ function assertCommitMessageContent(message) {
   } catch {
     throw stopped('MESSAGE_FILE_INVALID');
   }
-  if (text.trim().length === 0) throw stopped('MESSAGE_FILE_INVALID');
+  // Git 会补齐缺失末尾 LF；在启动 Git 前拒绝非规范字节，确保消息 barrier 校验同一序列化。
+  if (text.trim().length === 0
+    || text.includes('\r')
+    || !text.endsWith('\n')
+    || text.endsWith('\n\n')) throw stopped('MESSAGE_FILE_INVALID');
   return text;
 }
 
