@@ -2,6 +2,8 @@
 
 Version 4 evidence is a historical baseline. Version 5 delivery is ready: EVAL-001 through EVAL-019 independently pass against the final frozen runtime, ordinary hook rejection restores the main ODB to baseline, foreign-object or reflog mutation makes imported-pack cleanup fail closed, and the prompt budget is 1,734/1,800.
 
+On 2026-08-24, Version 5 was globally installed at the logical path `$CODEX_HOME/skills/git-commit-assistant`. Its layout is exactly `SKILL.md` and `scripts/stage-transaction.mjs`; the respective SHA-256 values are `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and `73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671`. Each installed runtime file is byte-for-byte equal to its repository counterpart. The installed `inspect` smoke test exited 0, produced one-line JSON, and left its repository snapshot unchanged. Version 5 is implemented, evaluated, and installed; it has passed the Task 8 final review and the independent Task 9 installation review. This status wording correction remains subject to scoped re-review and documentation commit; the controller performs the final branch push only after those steps.
+
 <!-- scaffold-contract:delivery-report:v1 -->
 ```json
 {

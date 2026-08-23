@@ -3,7 +3,7 @@
 ## 状态
 
 - 日期：2026-08-20；威胁模型修订确认于 2026-08-23
-- 状态：Version 5 实现与真实 Agent 证据已闭环，等待最终安装和终审
+- 状态：Version 5 已实现、评测、安装，并已通过 Task 8 final review 和 Task 9 独立安装审查；本次状态措辞修正待 scoped re-review 验证与文档提交，之后由主控执行最终分支 push
 - 受众：Skill 维护者与评测人员
 - 技术级别：高级
 - 关联 Skill：`git-commit-assistant`
@@ -190,6 +190,13 @@ Node.js 没有跨平台的 descriptor-bound unlink/rename；仅凭 commit object
 ```
 
 全局安装目录必须同时包含两项运行时文件。安装后分别验证仓库版与安装版的 SHA-256。README 使用中文说明 Node.js 22+ 依赖、自动暂存授权、取消恢复、限制和卸载方式。
+
+### 2026-08-24 安装验证
+
+- 全局安装使用逻辑路径 `$CODEX_HOME/skills/git-commit-assistant`，目录布局精确为 `SKILL.md` 和 `scripts/stage-transaction.mjs`。
+- `SKILL.md` 的 SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`；`scripts/stage-transaction.mjs` 的 SHA-256 为 `73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671`。安装版与仓库版逐文件相等。
+- 安装版 `inspect` smoke test 以 exit 0 完成，stdout 为单行 JSON，且仓库 snapshot 保持不变。
+- Version 5 已实现、评测并安装，且已通过 Task 8 final review 和 Task 9 独立安装审查。本次状态措辞修正待 scoped re-review 验证与文档提交；之后由主控执行最终分支 push。
 
 ## 测试与评测
 
