@@ -3442,6 +3442,9 @@ async function pipeConfirmedObjects(
     () => stopped('OBJECT_IMPORT_FAILED'),
   );
   const packEntriesBefore = new Set(await readdir(packDirectory));
+  // import 前绑定全主 ODB 对象集与 reflog；拒绝清理只能撤回除此 owned pack 外的唯一增量。
+  const objectIdsBefore = await currentObjectIds(repository, runtime);
+  const reflogStateSha256 = await currentReflogStateSha256(repository, runtime);
   const { stdout: refsBefore } = await git(repository, [
     'for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)',
   ], runtime, {
@@ -3585,10 +3588,32 @@ async function pipeConfirmedObjects(
       { repository_changed: true, recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' },
     );
   }
+  const index = ownedArtifacts.find(({ name }) => name === `${packPrefix}.idx`);
+  const importedObjectIds = index === undefined
+    ? []
+    : await objectIdsFromPack(repository, index.path, runtime);
+  const expectedObjectIdsSha256 = objectIdsSha256([...objectIdsBefore, ...importedObjectIds]);
+  if (importedObjectIds.length === 0
+    || !timingSafeHexMatches(
+      objectIdsSha256(await currentObjectIds(repository, runtime)),
+      expectedObjectIdsSha256,
+    )
+    || !timingSafeHexMatches(
+      await currentReflogStateSha256(repository, runtime),
+      reflogStateSha256,
+    )) {
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'Foreign repository objects or reflogs changed while importing the confirmed transaction.',
+      { repository_changed: true, recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' },
+    );
+  }
   // index-pack 原子创建带唯一 claim 的 `.keep`；只在无同 stem 既有条目时建立可撤销所有权。
   const descriptor = {
     headOid: context.state.binding.head_oid,
     refsSha256: digest(refsBefore),
+    expectedObjectIdsSha256,
+    reflogStateSha256,
     packDirectory: packDirectoryAfter,
     packPrefix,
     keepName,
@@ -3665,6 +3690,79 @@ async function currentReferenceTipsSha256(repository, runtime) {
   return digest(stdout);
 }
 
+function objectIdsSha256(objectIds) {
+  return digest([...new Set(objectIds)].sort());
+}
+
+async function currentObjectIds(repository, runtime) {
+  const { stdout } = await git(repository, [
+    'cat-file', '--batch-all-objects', '--batch-check=%(objectname)',
+  ], runtime, {
+    unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+  });
+  const objectIds = stdout.split(/\r?\n/u).filter(Boolean);
+  if (objectIds.some((oid) => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid))) {
+    throw stopped('OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  }
+  return [...new Set(objectIds)].sort();
+}
+
+async function objectIdsFromPack(repository, indexPath, runtime) {
+  const { stdout } = await git(repository, ['verify-pack', '-v', indexPath], runtime, {
+    unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+  });
+  return [...new Set(stdout.split(/\r?\n/u)
+    .map((line) => line.match(/^([0-9a-f]{40}|[0-9a-f]{64})\s/u)?.[1])
+    .filter(Boolean))].sort();
+}
+
+async function currentReflogStateSha256(repository, runtime) {
+  const logsPath = await gitPath(repository, 'logs', runtime);
+  let rootMetadata;
+  try {
+    rootMetadata = await lstat(logsPath, { bigint: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return digest({ exists: false });
+    throw stopped('OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  }
+  const failure = () => stopped('OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  const root = await captureStableDirectory(logsPath, failure);
+  if (!evidenceRecordsMatch(filesystemEvidence(rootMetadata), root)) throw failure();
+  const entries = [];
+  async function visit(candidate, relative) {
+    const metadata = await lstat(candidate, { bigint: true }).catch(() => {
+      throw failure();
+    });
+    if (metadata.isSymbolicLink()) throw failure();
+    if (metadata.isDirectory()) {
+      const directory = await captureStableDirectory(candidate, failure);
+      if (!isWithin(directory.canonical, root.canonical)) throw failure();
+      entries.push({ path: relative, type: 'directory', ...filesystemEvidence(directory) });
+      for (const name of (await readdir(candidate)).sort()) {
+        await visit(path.join(candidate, name), `${relative}/${name}`);
+      }
+      if (!evidenceRecordsMatch(directory, await captureStableDirectory(candidate, failure))) {
+        throw failure();
+      }
+      return;
+    }
+    if (!metadata.isFile()) throw failure();
+    const file = await readStableOwnedFile(candidate, root.canonical, failure);
+    entries.push({
+      path: relative,
+      type: 'file',
+      ...file.identity,
+      size: file.size,
+      sha256: file.sha256,
+    });
+  }
+  for (const name of (await readdir(logsPath)).sort()) {
+    await visit(path.join(logsPath, name), name);
+  }
+  if (!evidenceRecordsMatch(root, await captureStableDirectory(logsPath, failure))) throw failure();
+  return digest({ exists: true, root: filesystemEvidence(root), entries });
+}
+
 async function ownedPackArtifactsStillMatch(descriptor, artifacts) {
   const packDirectory = await captureStableDirectory(
     descriptor.packDirectory.canonical,
@@ -3738,21 +3836,36 @@ async function releaseImportedPackRetention(descriptor, runtime) {
   return removeVerifiedPackArtifacts([keep]);
 }
 
+async function rejectedImportStateStillMatches(repository, descriptor, runtime) {
+  const { stdout: headOutput } = await git(repository, ['rev-parse', 'HEAD'], runtime, {
+    unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
+  });
+  return headOutput.trim() === descriptor.headOid
+    && timingSafeHexMatches(
+      await currentReferenceTipsSha256(repository, runtime),
+      descriptor.refsSha256,
+    )
+    && timingSafeHexMatches(
+      objectIdsSha256(await currentObjectIds(repository, runtime)),
+      descriptor.expectedObjectIdsSha256,
+    )
+    && timingSafeHexMatches(
+      await currentReflogStateSha256(repository, runtime),
+      descriptor.reflogStateSha256,
+    );
+}
+
 async function withdrawRejectedImportedPack(repository, descriptor, runtime) {
   try {
-    const { stdout: headOutput } = await git(repository, ['rev-parse', 'HEAD'], runtime, {
-      unsetEnv: ['GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
-    });
-    if (headOutput.trim() !== descriptor.headOid
-      || !timingSafeHexMatches(
-        await currentReferenceTipsSha256(repository, runtime),
-        descriptor.refsSha256,
-      )) return false;
+    if (!await rejectedImportStateStillMatches(repository, descriptor, runtime)) return false;
     if (!await ownedPackArtifactsStillMatch(descriptor, descriptor.ownedArtifacts)) return false;
     await runtime.beforeOwnedPackFinalRemoval?.({
       operation: 'withdraw',
       artifacts: descriptor.ownedArtifacts,
     });
+    // callback 后紧邻同步 unlink 再证明一次；可观察 foreign object/reflog 一律保留完整 pack 图。
+    if (!await rejectedImportStateStillMatches(repository, descriptor, runtime)) return false;
+    if (!await ownedPackArtifactsStillMatch(descriptor, descriptor.ownedArtifacts)) return false;
     return removeVerifiedPackArtifacts(descriptor.ownedArtifacts);
   } catch {
     return false;

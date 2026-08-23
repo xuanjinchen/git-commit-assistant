@@ -140,7 +140,7 @@ Record requirement interpretations and superseding decisions without rewriting h
       "status": "superseded",
       "scope": "delivery evidence",
       "decision": "Keep Version 5 delivery draft when raw evidence contradicts an assertion or the frozen runtime exceeds the prompt budget; do not convert partial evidence into a ready contract. EVAL-016 fails diagnostic-only recovery isolation because a retained unreachable diagnostic pack also changed the main ODB, and the frozen Skill measures 1,891 tokens against a 1,800-token limit.",
-      "evidence": "artifact:evals/results/EVAL-016.txt#sha256:b8ec3c81554cbc612cd390097149458ebaf763f3980b96d74dabe50bfdbec6a4; artifact:evals/results/prompt-budget.txt#sha256:1ff050f76d9c7b56ec2ca0db81f48368a5de37690808da07ff1719b030bf7b5c",
+      "evidence": "Historical draft review on 2026-08-23 recorded that the then-current EVAL-016 diagnostic run contradicted recovery isolation and that the then-frozen Skill exceeded the 1,800-token budget. Those superseded bytes were not preserved as current Evidence Contract artifacts.",
       "supersedes": null
     },
     {

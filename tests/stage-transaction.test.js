@@ -3607,6 +3607,8 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
   ]]);
   assert.equal(rejection.message.includes(hookSecret), false);
   assert.equal(JSON.stringify(rejection).includes(hookSecret), false);
+  assert.equal(rejection.repository_changed, false);
+  assert.equal(rejection.recovery_code, undefined);
   assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
   assert.equal(stateDuringCommit.message_file_sha256, fixture.confirmation.message_sha256);
   assert.deepEqual(stateDuringCommit.ownership.message_file, {
@@ -3629,7 +3631,7 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
   }, { temporaryRoot: fixture.temporaryRoot });
 });
 
-test('hook rejection removes only its imported pack and preserves a foreign loose object', async (t) => {
+test('hook-created loose object keeps the imported pack and reports cleanup unproven', async (t) => {
   const root = await repositoryWithBaseline(t);
   await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected foreign ODB task\nline 3\n');
   const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
@@ -3661,7 +3663,9 @@ test('hook rejection removes only its imported pack and preserves a foreign loos
   );
 
   assert.equal(rejection.transaction_preserved, true);
-  assert.deepEqual(packEntries((await snapshotRepository(root)).objects), packEntries(before.objects));
+  assert.equal(rejection.repository_changed, true, JSON.stringify(rejection));
+  assert.equal(rejection.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  assert.notDeepEqual(packEntries((await snapshotRepository(root)).objects), packEntries(before.objects));
   assert.deepEqual(
     (await runGit(root, ['cat-file', 'blob', foreignOid], { encoding: 'buffer' })).stdout,
     foreignBytes,
@@ -3671,6 +3675,94 @@ test('hook rejection removes only its imported pack and preserves a foreign loos
     transaction_id: fixture.prepared.transaction_id,
     ownership_token: fixture.prepared.ownership_token,
   }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('hook-created orphan commit and tag keep their imported-pack dependency readable', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected dependent object task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const gitDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-dir'])).stdout.trim(),
+  );
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  const hookObjectIdsPath = path.join(gitDirectory, 'hook-dependent-object-ids');
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'tree="$(git write-tree)" || exit 81',
+    'commit="$(printf \'hook dependent commit\\n\' | git commit-tree "$tree")" || exit 82',
+    'tag="$(printf \'object %s\\ntype commit\\ntag hook-dependent\\ntagger Fixture Tester <tester@example.invalid> 0 +0000\\n\\nhook dependent tag\\n\' "$commit" | git mktag)" || exit 83',
+    'printf \'%s\\n%s\\n%s\\n\' "$tree" "$commit" "$tag" > "$(git rev-parse --git-path hook-dependent-object-ids)"',
+    'exit 79',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const before = await snapshotRepository(root);
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
+  );
+
+  assert.equal(rejection.repository_changed, true, JSON.stringify(rejection));
+  assert.equal(rejection.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  assert.equal(rejection.transaction_preserved, true);
+  const [treeOid, commitOid, tagOid] = (await readFile(hookObjectIdsPath, 'utf8')).trim().split('\n');
+  assert.equal(treeOid, fixture.prepared.task_tree_oid);
+  assert.equal((await runGit(root, ['rev-parse', `${commitOid}^{tree}`])).stdout.trim(), treeOid);
+  assert.equal((await runGit(root, ['rev-parse', `${tagOid}^{tree}`])).stdout.trim(), treeOid);
+  assert.notDeepEqual((await snapshotRepository(root)).objects, before.objects);
+});
+
+test('hook create-delete ref reflog keeps the imported pack and reports repository change', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected reflog task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  const reflogPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'logs/refs/gca/transient'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    `git update-ref --create-reflog refs/gca/transient ${fixture.prepared.task_tree_oid} || exit 85`,
+    'rm -f "$(git rev-parse --git-path refs/gca/transient)" || exit 86',
+    'exit 87',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const before = await snapshotRepository(root);
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
+  );
+
+  assert.equal(rejection.repository_changed, true, JSON.stringify(rejection));
+  assert.equal(rejection.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  assert.equal(rejection.transaction_preserved, true);
+  assert.equal((await runGit(root, [
+    'show-ref', '--verify', '--quiet', 'refs/gca/transient',
+  ], { allowFailure: true })).status, 1);
+  assert.equal((await readFile(reflogPath, 'utf8')).includes(fixture.prepared.task_tree_oid), true);
+  await runGit(root, ['cat-file', '-e', `${fixture.prepared.task_tree_oid}^{tree}`]);
+  assert.notDeepEqual((await snapshotRepository(root)).objects, before.objects);
 });
 
 test('hook-created ref keeps the imported pack and returns recovery-required rejection', async (t) => {
