@@ -130,7 +130,7 @@ Agent 只能从 manifest 中选择 hunk 标识，不能向脚本提供任意补�
 - 相关工作区路径、模式和内容 SHA-256；
 - 任务树标识；
 - 事务脚本 SHA-256；
-- 完整候选消息 SHA-256。
+- 完整候选消息按 UTF-8、无 BOM、恰好一个末尾 LF 序列化后的 SHA-256；Agent 先将所有换行规范为 LF，移除末尾 LF，再追加一个 LF。这个末尾 LF 是文件序列化，不是对用户可见消息的编辑。
 
 本文的 commit handoff 指脚本把已认证的 task index 与 message 交给唯一 Git 进程，并在 commit object 创建前通过代理 barrier 完成可观察复验的阶段；它不是 fd-bound 所有权转移，也不构成对已排除主动对抗的绝对证明。在该阶段的定义检查点观察到绑定变化会使确认失效：Git 尚未启动时取消旧事务并从只读检查重新开始；Git 已启动时由代理拒绝创建 commit object，等待该唯一进程退出并验证实际 HEAD，再安全清理或保留恢复事务。脚本不假装可以撤销父进程已经读取的状态，而是验证实际新 HEAD/tree、保留 hook 影响和恢复证据，并在无法证明安全恢复时返回 `COMMIT_CREATED_RECOVERY_REQUIRED`。
 

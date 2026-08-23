@@ -75,7 +75,7 @@ Record requirement interpretations and superseding decisions without rewriting h
       "id": "DEC-009",
       "status": "active",
       "scope": "commit execution",
-      "decision": "Use only one Git process with argv equivalent to git commit --no-gpg-sign -F <temp>, after writing the exact confirmed message through a safe file API to one unique temporary file outside the repository; always remove that file and never retry.",
+      "decision": "Use only one Git process with argv equivalent to git commit --no-gpg-sign -F <temp>, after canonicalizing the complete confirmed message to UTF-8 without a BOM and exactly one terminal LF, writing those exact bytes through a safe file API to one unique temporary file outside the repository, and hashing those same bytes for confirmation; always remove that file and never retry.",
       "evidence": "2026-08-20 final fix wave addresses review findings on exact execution and temporary-file lifecycle.",
       "supersedes": "DEC-007"
     },
