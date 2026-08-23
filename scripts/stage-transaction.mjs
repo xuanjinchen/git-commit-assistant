@@ -31,6 +31,9 @@ import { deflateSync } from 'node:zlib';
 const SCHEMA_VERSION = 1;
 const LOOSE_OBJECT_HELPER_COMMAND = '__loose-object-helper';
 const LOOSE_OBJECT_HELPER_AUTH_ENV = 'GIT_COMMIT_ASSISTANT_INTERNAL_HELPER_AUTH';
+const LOOSE_OBJECT_HELPER_TRANSACTION_AUTH_ENV =
+  'GIT_COMMIT_ASSISTANT_INTERNAL_TRANSACTION_AUTH';
+const HELPER_AUTHORIZATION_FILE = 'helper-auth.json';
 
 class StageTransactionError extends Error {
   constructor(code, message, details = {}) {
@@ -849,6 +852,12 @@ function helperAuthenticationTag(capability, value) {
     .digest('hex');
 }
 
+function helperTransactionAuthorizationTag(transactionAuthorization, value) {
+  return createHmac('sha256', Buffer.from(transactionAuthorization, 'utf8'))
+    .update(canonicalJson(value))
+    .digest('hex');
+}
+
 function createHelperAuthentication(transaction, objectIdentity, oid, capability) {
   const authentication = {
     type: 'authenticate',
@@ -895,7 +904,7 @@ async function materializeLooseObject(repository, transaction, oid, objectBytes,
     oid,
     helperCapability,
   );
-  // helper 先认证一次性 capability、IPC 父进程和三层事务 identity；认证前不得创建 prefix 或改权限。
+  // helper 先认证事务 capability、一次性 IPC capability 和三层 identity；认证前不得创建 prefix 或改权限。
   const child = spawn(
     process.execPath,
     [fileURLToPath(import.meta.url), LOOSE_OBJECT_HELPER_COMMAND, oid],
@@ -905,6 +914,7 @@ async function materializeLooseObject(repository, transaction, oid, objectBytes,
       env: {
         ...process.env,
         [LOOSE_OBJECT_HELPER_AUTH_ENV]: helperCapability,
+        [LOOSE_OBJECT_HELPER_TRANSACTION_AUTH_ENV]: transaction.helperAuthorizationToken,
       },
       stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
     },
@@ -1054,7 +1064,62 @@ function helperAuthorizationFields(message) {
   };
 }
 
-async function authenticateLooseObjectHelper(capability, oid) {
+function helperTransactionAuthorizationFields(value) {
+  return {
+    schema_version: value?.schema_version,
+    transaction_id: value?.transaction_id,
+    helper_token_sha256: value?.helper_token_sha256,
+    transaction_directory: value?.transaction_directory,
+    resource_directory: value?.resource_directory,
+    object_directory: value?.object_directory,
+  };
+}
+
+async function authenticateLooseObjectTransaction(transactionAuthorization) {
+  const objectIdentity = await helperDirectoryIdentity('.', true);
+  const resourceIdentity = await helperDirectoryIdentity('..', true);
+  const transactionIdentity = await helperDirectoryIdentity(path.join('..', '..'), true);
+  const failure = () => new Error('Loose object helper transaction authentication failed.');
+  const authorizationFile = await readStableOwnedFile(
+    path.join('..', HELPER_AUTHORIZATION_FILE),
+    resourceIdentity.canonical,
+    failure,
+  );
+  let authorization;
+  try {
+    authorization = JSON.parse(authorizationFile.bytes.toString('utf8'));
+  } catch {
+    throw failure();
+  }
+  const fields = helperTransactionAuthorizationFields(authorization);
+  const expectedMode = process.platform === 'win32' ? 0o666 : 0o600;
+  const expectedBytes = Buffer.from(`${canonicalJson(authorization)}\n`);
+  if (authorization === null || Array.isArray(authorization)
+    || typeof authorization !== 'object'
+    || !authorizationFile.bytes.equals(expectedBytes)
+    || authorizationFile.identity.mode !== expectedMode
+    || fields.schema_version !== SCHEMA_VERSION
+    || !TRANSACTION_ID_PATTERN.test(fields.transaction_id ?? '')
+    || !timingSafeHexMatches(
+      fields.helper_token_sha256,
+      digest(Buffer.from(transactionAuthorization, 'utf8')),
+    )
+    || !timingSafeHexMatches(
+      authorization.authorization_sha256,
+      helperTransactionAuthorizationTag(transactionAuthorization, fields),
+    )
+    || !hasSameDirectoryIdentity(objectIdentity, fields.object_directory)
+    || !hasSameDirectoryIdentity(resourceIdentity, fields.resource_directory)
+    || !hasSameDirectoryIdentity(transactionIdentity, fields.transaction_directory)
+    || path.dirname(objectIdentity.canonical) !== resourceIdentity.canonical
+    || path.dirname(resourceIdentity.canonical) !== transactionIdentity.canonical) {
+    throw failure();
+  }
+  return { objectIdentity, resourceIdentity, transactionIdentity };
+}
+
+async function authenticateLooseObjectHelper(capability, transactionAuthorization, oid) {
+  const trusted = await authenticateLooseObjectTransaction(transactionAuthorization);
   const command = await receiveHelperInstruction('authenticate');
   const fields = helperAuthenticationFields(command);
   if (fields.oid !== oid || fields.parent_pid !== process.ppid
@@ -1065,14 +1130,9 @@ async function authenticateLooseObjectHelper(capability, oid) {
     throw new Error('Loose object helper authentication failed.');
   }
 
-  const objectIdentity = await helperDirectoryIdentity('.', true);
-  const resourceIdentity = await helperDirectoryIdentity('..', true);
-  const transactionIdentity = await helperDirectoryIdentity(path.join('..', '..'), true);
-  if (!hasSameDirectoryIdentity(objectIdentity, fields.object_directory)
-    || !hasSameDirectoryIdentity(resourceIdentity, fields.resource_directory)
-    || !hasSameDirectoryIdentity(transactionIdentity, fields.transaction_directory)
-    || path.dirname(objectIdentity.canonical) !== resourceIdentity.canonical
-    || path.dirname(resourceIdentity.canonical) !== transactionIdentity.canonical) {
+  if (!hasSameDirectoryIdentity(trusted.objectIdentity, fields.object_directory)
+    || !hasSameDirectoryIdentity(trusted.resourceIdentity, fields.resource_directory)
+    || !hasSameDirectoryIdentity(trusted.transactionIdentity, fields.transaction_directory)) {
     throw new Error('Loose object helper transaction identity changed.');
   }
 
@@ -1080,9 +1140,9 @@ async function authenticateLooseObjectHelper(capability, oid) {
     type: 'event',
     phase: 'authenticated',
     oid,
-    object_directory: objectIdentity,
-    resource_directory: resourceIdentity,
-    transaction_directory: transactionIdentity,
+    object_directory: trusted.objectIdentity,
+    resource_directory: trusted.resourceIdentity,
+    transaction_directory: trusted.transactionIdentity,
   });
   const authorization = await receiveHelperInstruction('authorize-prefix');
   const authorizationFields = helperAuthorizationFields(authorization);
@@ -1247,16 +1307,19 @@ async function publishLooseObjectFromAnchoredCwd(oid, compressed) {
 async function runLooseObjectHelper() {
   const oid = process.argv[3];
   const helperCapability = process.env[LOOSE_OBJECT_HELPER_AUTH_ENV];
+  const transactionAuthorization = process.env[LOOSE_OBJECT_HELPER_TRANSACTION_AUTH_ENV];
   delete process.env[LOOSE_OBJECT_HELPER_AUTH_ENV];
+  delete process.env[LOOSE_OBJECT_HELPER_TRANSACTION_AUTH_ENV];
   let prefixHandle;
   let failureCode = 'HELPER_AUTHENTICATION_FAILED';
   try {
     if (!process.connected || process.argv.length !== 4
       || !/^[0-9a-f]{64}$/u.test(helperCapability ?? '')
+      || !/^[0-9a-f]{64}$/u.test(transactionAuthorization ?? '')
       || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid ?? '')) {
       throw new Error('Loose object helper received an invalid object ID.');
     }
-    await authenticateLooseObjectHelper(helperCapability, oid);
+    await authenticateLooseObjectHelper(helperCapability, transactionAuthorization, oid);
     failureCode = 'HELPER_PROTOCOL_FAILED';
     const start = receiveHelperInstruction('start');
     const anchored = await anchorLooseObjectPrefix(oid);
@@ -1409,6 +1472,7 @@ async function readStableOwnedFile(candidate, parentCanonical, failure) {
 }
 
 const TRANSACTION_ARTIFACT_NAMES = new Set([
+  HELPER_AUTHORIZATION_FILE,
   'objects',
   'original.index',
   'recovery.index',
@@ -1486,6 +1550,42 @@ function stateMac(state, ownershipToken) {
   return createHmac('sha256', Buffer.from(ownershipToken, 'utf8'))
     .update(canonicalJson(stateWithoutMac(state)))
     .digest('hex');
+}
+
+async function writeHelperTransactionAuthorization(repository, transaction) {
+  const objectIdentity = await captureExternalDirectoryIdentity(
+    repository,
+    transaction.objectDirectory,
+  );
+  const fields = {
+    schema_version: SCHEMA_VERSION,
+    transaction_id: transaction.id,
+    helper_token_sha256: digest(Buffer.from(transaction.helperAuthorizationToken, 'utf8')),
+    transaction_directory: transaction.directoryIdentity,
+    resource_directory: transaction.resourceIdentity,
+    object_directory: objectIdentity,
+  };
+  const authorization = {
+    ...fields,
+    authorization_sha256: helperTransactionAuthorizationTag(
+      transaction.helperAuthorizationToken,
+      fields,
+    ),
+  };
+  // 先验授权槽由最终 ownership capability 派生密钥认证；父进程自签 IPC 不能替代该持久可信根。
+  await withTransactionMutation(
+    repository,
+    transaction,
+    [transaction.helperAuthorizationFile],
+    async () => {
+      await writeFile(
+        transaction.helperAuthorizationFile,
+        `${canonicalJson(authorization)}\n`,
+        { flag: 'wx', mode: 0o600 },
+      );
+      await chmod(transaction.helperAuthorizationFile, 0o600);
+    },
+  );
 }
 
 async function writeInitialOwnedState(repository, transaction, state, ownershipToken) {
@@ -1578,7 +1678,12 @@ async function createTransactionDirectory(repository, runtime) {
     transactionRoot,
     () => stopped('UNSAFE_GIT_PATH'),
   );
-  const transactionId = randomUUID();
+    const transactionId = randomUUID();
+    const ownershipToken = randomBytes(32).toString('hex');
+    const helperAuthorizationToken = helperTransactionAuthorizationTag(ownershipToken, {
+      type: 'helper-transaction-authority',
+      transaction_id: transactionId,
+    });
   const directory = path.join(transactionRoot, transactionId);
   await assertExternalTransactionPath(repository, directory);
   let transaction;
@@ -1594,6 +1699,8 @@ async function createTransactionDirectory(repository, runtime) {
     }
     transaction = {
       id: transactionId,
+      ownershipToken,
+      helperAuthorizationToken,
       directory,
       directoryIdentity,
       mainObjectDirectory,
@@ -1616,6 +1723,7 @@ async function createTransactionDirectory(repository, runtime) {
       recoveryIndex: path.join(resourceDirectory, 'recovery.index'),
       objectDirectory: path.join(resourceDirectory, 'objects'),
       snapshotDirectory: path.join(resourceDirectory, 'snapshots'),
+      helperAuthorizationFile: path.join(resourceDirectory, HELPER_AUTHORIZATION_FILE),
       stateFile: path.join(resourceDirectory, 'state.json'),
       messageFile: path.join(resourceDirectory, 'message.txt'),
     };
@@ -2233,6 +2341,7 @@ export async function prepareTransaction({
       [transaction.objectDirectory],
       () => mkdir(transaction.objectDirectory, { mode: 0o700 }),
     );
+    await writeHelperTransactionAuthorization(repository, transaction);
     await withTransactionMutation(
       repository,
       transaction,
@@ -2317,7 +2426,7 @@ export async function prepareTransaction({
         transaction.recoveryIndex,
         runtime,
       );
-      const ownershipToken = randomBytes(32).toString('hex');
+      const { ownershipToken } = transaction;
       const binding = {
         repository_sha256: digest(Buffer.from(repository.root)),
         manifest_sha256: manifest.manifest_sha256,

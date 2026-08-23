@@ -13,6 +13,7 @@ import {
   readFile,
   readlink,
   readdir,
+  realpath,
   rename,
   rm,
   stat,
@@ -869,6 +870,89 @@ test('foreign IPC hidden helper launch is rejected before cwd mutation', async (
     oid,
   }]);
   assert.deepEqual(await readdir(workingDirectory), []);
+});
+
+test('foreign IPC cannot self-issue authorization for an existing transaction', async (t) => {
+  const { root, prepared, temporaryRoot } = await preparedFixture(t);
+  const objectDirectory = await findTransactionObjectDirectory(temporaryRoot);
+  const existingEntries = await readdir(objectDirectory);
+  const prefix = Array.from({ length: 256 }, (_, value) => value.toString(16).padStart(2, '0'))
+    .find((candidate) => !existingEntries.includes(candidate));
+  assert.notEqual(prefix, undefined);
+  const oid = `${prefix}${'c'.repeat(38)}`;
+  const capability = 'a'.repeat(64);
+  const randomTransactionToken = 'b'.repeat(64);
+  const directoryIdentity = async (candidate) => {
+    const metadata = await lstat(candidate);
+    return {
+      dev: metadata.dev,
+      ino: metadata.ino,
+      canonical: path.normalize(await realpath(candidate)),
+    };
+  };
+  const authentication = {
+    type: 'authenticate',
+    oid,
+    parent_pid: process.pid,
+    transaction_directory: await directoryIdentity(path.join(objectDirectory, '..', '..')),
+    resource_directory: await directoryIdentity(path.join(objectDirectory, '..')),
+    object_directory: await directoryIdentity(objectDirectory),
+  };
+  // 刻意使用外部父进程自选密钥生成完整协议，证明消息自洽不能替代真实事务 capability。
+  authentication.authentication_sha256 = createHmac('sha256', Buffer.from(capability, 'hex'))
+    .update(canonicalJson(authentication))
+    .digest('hex');
+  const authorization = {
+    type: 'authorize-prefix',
+    oid,
+    authentication_sha256: authentication.authentication_sha256,
+  };
+  authorization.authorization_sha256 = createHmac('sha256', Buffer.from(capability, 'hex'))
+    .update(canonicalJson(authorization))
+    .digest('hex');
+
+  const script = path.resolve('scripts/stage-transaction.mjs');
+  const child = spawn(process.execPath, [script, '__loose-object-helper', oid], {
+    cwd: objectDirectory,
+    env: {
+      ...process.env,
+      GIT_COMMIT_ASSISTANT_INTERNAL_HELPER_AUTH: capability,
+      GIT_COMMIT_ASSISTANT_INTERNAL_TRANSACTION_AUTH: randomTransactionToken,
+    },
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+  });
+  const stdout = [];
+  const stderr = [];
+  const messages = [];
+  child.stdout.on('data', (chunk) => stdout.push(chunk));
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  child.on('message', (message) => {
+    messages.push(message);
+    if (message?.phase === 'authenticated') child.send(authorization);
+    if (message?.phase === 'prefix-ready') child.kill();
+  });
+  child.send(authentication);
+  child.stdin.end();
+
+  const status = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+
+  assert.equal(status, 1);
+  assert.equal(Buffer.concat(stdout).toString('utf8'), '');
+  assert.equal(Buffer.concat(stderr).toString('utf8'), '');
+  assert.deepEqual(messages, [{
+    type: 'failure',
+    code: 'HELPER_AUTHENTICATION_FAILED',
+    oid,
+  }]);
+  assert.deepEqual(await readdir(objectDirectory), existingEntries);
+  assert.equal((await cancelTransaction({
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+  }, { temporaryRoot })).status, 'cancelled');
 });
 
 test('CLI exits quietly when stdout closes before its response', async (t) => {
