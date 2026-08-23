@@ -3657,6 +3657,161 @@ test('hook rejection preserves and restores an observable real index rewrite', a
   }, { temporaryRoot: fixture.temporaryRoot });
 });
 
+test('post-read index rewrite preserves newer bytes and authenticated rejection evidence', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected post-read rewrite\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  const indexPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index'])).stdout.trim(),
+  );
+  const indexLock = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'git_dir="$(git rev-parse --git-dir)"',
+    'rm -f "$git_dir/index.lock"',
+    'unset GIT_INDEX_FILE',
+    "printf 'hook pre-restore worktree bytes\\n' > pre-restore.txt",
+    'git add -- pre-restore.txt',
+    'exit 41',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const originalIndex = await readIndexBytes(root);
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  const alternateIndex = path.join(fixture.temporaryRoot, 'post-read.index');
+  const displacedRestoreLock = path.join(fixture.temporaryRoot, 'displaced-post-read.lock');
+  const foreignLockBytes = Buffer.from('foreign post-read lock bytes\n');
+  let initialUnexpectedIndex;
+  let newerIndex;
+  let rejection;
+  let boundaryReached = false;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      beforeOwnedIndexLockFinalOperation: async ({ operation, lockPath }) => {
+        if (operation !== 'install' || boundaryReached) return;
+        boundaryReached = true;
+        initialUnexpectedIndex = await readFile(indexPath);
+        await writeFile(path.join(root, 'post-restore.txt'), 'post-restore worktree bytes\n');
+        await writeFile(alternateIndex, initialUnexpectedIndex, { flag: 'wx' });
+        await runGit(root, ['add', '--', 'post-restore.txt'], {
+          env: { GIT_INDEX_FILE: alternateIndex },
+        });
+        newerIndex = await readFile(alternateIndex);
+        await writeFile(indexPath, newerIndex);
+        await rename(lockPath, displacedRestoreLock);
+        await writeFile(lockPath, foreignLockBytes, { flag: 'wx' });
+      },
+    }),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED'
+        && error.retained === true
+        && error.transaction_preserved === true;
+    },
+  );
+
+  assert.equal(boundaryReached, true);
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  assert.notDeepEqual(newerIndex, originalIndex);
+  assert.deepEqual(await readIndexBytes(root), newerIndex);
+  assert.deepEqual(await readFile(indexLock), foreignLockBytes);
+  await access(displacedRestoreLock);
+  assert.equal(await readFile(path.join(root, 'pre-restore.txt'), 'utf8'),
+    'hook pre-restore worktree bytes\n');
+  assert.equal(await readFile(path.join(root, 'post-restore.txt'), 'utf8'),
+    'post-restore worktree bytes\n');
+  assert.equal(rejection.repository_changed, true);
+  assert.equal(rejection.recovery_code, 'CONFIRMATION_STALE');
+  assert.deepEqual(await readFile(rejection.unexpected_index), initialUnexpectedIndex);
+  assert.equal(rejection.unexpected_index_sha256, sha256(initialUnexpectedIndex));
+  const state = JSON.parse(await readFile(
+    path.join(path.dirname(fixture.prepared.message_file), 'state.json'),
+    'utf8',
+  ));
+  assert.equal(state.files.unexpected_index_sha256, sha256(initialUnexpectedIndex));
+  assert.equal(state.ownership.tree.find(({ path: ownedPath }) =>
+    ownedPath === 'unexpected.index')?.sha256, sha256(initialUnexpectedIndex));
+});
+
+test('rejected restore install preserves a foreign lock and rewritten index', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected rejected restore install\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  const indexLock = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'git_dir="$(git rev-parse --git-dir)"',
+    'rm -f "$git_dir/index.lock"',
+    'unset GIT_INDEX_FILE',
+    "printf 'restore install worktree bytes\\n' > restore-install.txt",
+    'git add -- restore-install.txt',
+    'exit 43',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const originalIndex = await readIndexBytes(root);
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  const displacedRestoreLock = path.join(fixture.temporaryRoot, 'displaced-restore-install.lock');
+  const foreignLockBytes = Buffer.from('foreign restore install lock bytes\n');
+  let rejection;
+  let boundaryReached = false;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      beforeOwnedIndexLockFinalOperation: async ({ operation, lockPath }) => {
+        if (operation !== 'install' || boundaryReached) return;
+        boundaryReached = true;
+        await rename(lockPath, displacedRestoreLock);
+        await writeFile(lockPath, foreignLockBytes, { flag: 'wx' });
+      },
+    }),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED'
+        && error.retained === true
+        && error.transaction_preserved === true;
+    },
+  );
+
+  const rewrittenIndex = await readIndexBytes(root);
+  assert.equal(boundaryReached, true);
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  assert.notDeepEqual(rewrittenIndex, originalIndex);
+  assert.deepEqual(await readFile(indexLock), foreignLockBytes);
+  await access(displacedRestoreLock);
+  assert.equal(await readFile(path.join(root, 'restore-install.txt'), 'utf8'),
+    'restore install worktree bytes\n');
+  assert.equal(rejection.repository_changed, true);
+  assert.equal(rejection.recovery_code, 'INDEX_LOCK_OWNERSHIP_LOST');
+  assert.deepEqual(await readFile(rejection.unexpected_index), rewrittenIndex);
+  assert.equal(rejection.unexpected_index_sha256, sha256(rewrittenIndex));
+  const state = JSON.parse(await readFile(
+    path.join(path.dirname(fixture.prepared.message_file), 'state.json'),
+    'utf8',
+  ));
+  assert.equal(state.files.unexpected_index_sha256, sha256(rewrittenIndex));
+  assert.equal(state.ownership.tree.find(({ path: ownedPath }) =>
+    ownedPath === 'unexpected.index')?.sha256, sha256(rewrittenIndex));
+});
+
 test('foreign unexpected index cannot enter the authenticated recovery closure', async (t) => {
   const root = await repositoryWithBaseline(t);
   await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected foreign recovery evidence\nline 3\n');

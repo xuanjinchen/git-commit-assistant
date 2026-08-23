@@ -3572,6 +3572,11 @@ async function restoreIndexAfterRejectedCommit({
     if (!timingSafeHexMatches(digest(restoredBytes), context.state.binding.index_sha256)) {
       throw stopped('INDEX_RESTORE_FAILED');
     }
+    // 最终安装边界必须先于 real index 复验，边界内可观察的用户或 hook 写入才不会被旧快照覆盖。
+    await runtime.beforeOwnedIndexLockFinalOperation?.({
+      operation: 'install',
+      lockPath: restoreLock.path,
+    });
     const finalUnexpected = await stableIndexFile(indexPath);
     if (!evidenceRecordsMatch(finalUnexpected.identity, currentIndex.identity)
       || !timingSafeHexMatches(finalUnexpected.sha256, currentIndex.sha256)) {
