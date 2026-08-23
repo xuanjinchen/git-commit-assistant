@@ -141,7 +141,7 @@ async function resolveOwnedRepository(repositoryRoot, runtime) {
   } catch {
     throw new StageTransactionError('NOT_GIT_REPOSITORY', 'The requested path is not a Git repository.');
   }
-  // 调用方提供的所有权根不能先经 link/junction 换指后再被 canonicalize 为可信仓库。
+  // 本检查点仍可观察为 link/junction 的调用方根不能被 canonicalize 为可信仓库。
   if (!requestedMetadata.isDirectory() || requestedMetadata.isSymbolicLink()) {
     throw new StageTransactionError('UNSAFE_GIT_PATH', 'The repository root is not an ordinary directory.');
   }
@@ -2834,6 +2834,7 @@ async function writeOwnedStateInPlace(context, nextState, ownershipToken) {
 async function updateRetainedState(context, ownershipToken, {
   message,
   refreshArtifacts = false,
+  unexpectedIndex,
 }) {
   const nextState = structuredClone(context.state);
   if (refreshArtifacts) {
@@ -2848,7 +2849,19 @@ async function updateRetainedState(context, ownershipToken, {
       if (entry?.type !== 'file' || !SHA256_PATTERN.test(entry.sha256)) throw ownershipInvalid();
       nextState.files[digestName] = entry.sha256;
     }
-    nextState.files.unexpected_index_sha256 = byPath.get('unexpected.index')?.sha256 ?? null;
+    const unexpected = byPath.get('unexpected.index');
+    const authenticatedUnexpected = nextState.files.unexpected_index_sha256;
+    if (authenticatedUnexpected === null && unexpected !== undefined) {
+      // optional 工件只能由刚保存 real index 的调用点授权，通用 refresh 不认领同名 foreign bytes。
+      if (unexpectedIndex === undefined
+        || unexpected.sha256 !== unexpectedIndex.sha256
+        || !evidenceRecordsMatch(unexpected, unexpectedIndex.identity)) throw ownershipInvalid();
+      nextState.files.unexpected_index_sha256 = unexpected.sha256;
+    } else if (authenticatedUnexpected !== null) {
+      if (unexpected?.sha256 !== authenticatedUnexpected) throw ownershipInvalid();
+    } else if (unexpectedIndex !== undefined) {
+      throw ownershipInvalid();
+    }
     nextState.ownership.tree = artifacts.entries;
   }
   nextState.message_file_sha256 = message?.sha256 ?? null;
@@ -3504,8 +3517,20 @@ async function preserveUnexpectedIndex(context, ownershipToken, unexpectedIndex)
   await updateRetainedState(context, ownershipToken, {
     message: context.message,
     refreshArtifacts: true,
+    unexpectedIndex: preserved,
   });
-  return { path: unexpectedPath, sha256: preserved.sha256 };
+  return { path: unexpectedPath, sha256: preserved.sha256, identity: preserved.identity };
+}
+
+async function repositoryChangedAfterCommitAttempt(repository, context, indexPath, runtime) {
+  try {
+    const current = await currentBinding(repository, indexPath, runtime);
+    return ['head_oid', 'index_sha256', 'index_tree_oid', 'manifest_sha256', 'worktree_state_sha256']
+      .some((key) => !canonicalFieldMatches(context.state.binding[key], current[key]));
+  } catch {
+    // commit 已启动后无法完成只读复验时必须保守报告变化，而非仅凭 HEAD 猜测未变。
+    return true;
+  }
 }
 
 async function restoreIndexAfterRejectedCommit({
@@ -3522,10 +3547,11 @@ async function restoreIndexAfterRejectedCommit({
     return { indexLock, unexpected: null };
   }
 
-  const unexpected = await preserveUnexpectedIndex(context, ownershipToken, currentIndex);
-  await releaseOwnedIndexLock(indexLock, runtime);
+  let unexpected;
   let restoreLock;
   try {
+    unexpected = await preserveUnexpectedIndex(context, ownershipToken, currentIndex);
+    await releaseOwnedIndexLock(indexLock, runtime);
     restoreLock = await acquireIndexLock(
       repository,
       await gitPath(repository, 'index.lock', runtime),
@@ -3569,11 +3595,13 @@ async function restoreIndexAfterRejectedCommit({
       'Git rejected the confirmed commit and the original index could not be restored safely.',
       {
         retained: true,
-        transaction_preserved: true,
+        transaction_preserved: false,
         transaction_id: context.state.transaction_id,
         repository_changed: true,
-        unexpected_index: unexpected.path,
-        unexpected_index_sha256: unexpected.sha256,
+        ...(unexpected === undefined ? {} : {
+          unexpected_index: unexpected.path,
+          unexpected_index_sha256: unexpected.sha256,
+        }),
         recovery_code: error instanceof StageTransactionError ? error.code : 'INDEX_RESTORE_FAILED',
       },
     );
@@ -3761,6 +3789,12 @@ export async function commitTransaction({
       if (actualHead !== context.state.binding.head_oid) {
         result = recoveryRequired(actualHead, warnings, context);
       } else {
+        const repositoryChanged = await repositoryChangedAfterCommitAttempt(
+          repository,
+          context,
+          indexPath,
+          runtime,
+        );
         const restored = await restoreIndexAfterRejectedCommit({
           repository,
           context,
@@ -3778,6 +3812,7 @@ export async function commitTransaction({
             retained: true,
             transaction_preserved: true,
             transaction_id,
+            repository_changed: repositoryChanged,
             ...(restored.unexpected === null ? {} : {
               unexpected_index: restored.unexpected.path,
               unexpected_index_sha256: restored.unexpected.sha256,

@@ -3536,6 +3536,7 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
   assert.deepEqual(commitCalls, [[
     'commit', '--no-gpg-sign', '-F', fixture.prepared.message_file,
   ]]);
+  assert.equal(rejection.message.includes(hookSecret), false);
   assert.equal(JSON.stringify(rejection).includes(hookSecret), false);
   assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
   assert.equal(stateDuringCommit.message_file_sha256, fixture.confirmation.message_sha256);
@@ -3556,6 +3557,47 @@ test('hook rejection removes the message and leaves a cancellable transaction', 
     transaction_id: fixture.prepared.transaction_id,
     ownership_token: fixture.prepared.ownership_token,
   }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('hook rejection redacts hook output from direct CLI results', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected CLI rejection\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  });
+  t.after(() => rm(prepared.transaction_directory, { recursive: true, force: true }));
+  const message = 'feat: reject through CLI\n';
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const hookSecret = 'cli-hook-secret-must-not-escape-884bd1';
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, `#!/bin/sh\nprintf '${hookSecret}\\n' >&2\nexit 31\n`);
+  await chmod(hookPath, 0o755);
+
+  const cli = await runCli('commit', {
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+    message_file: prepared.message_file,
+    confirmation: {
+      ...prepared.binding,
+      message_sha256: sha256(Buffer.from(message)),
+    },
+  });
+  const response = JSON.parse(cli.stdout);
+
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '');
+  assert.equal(cli.stdout.includes(hookSecret), false);
+  assert.equal(response.error.description.includes(hookSecret), false);
+  assert.equal(response.error.code, 'COMMIT_REJECTED');
 });
 
 test('hook rejection preserves and restores an observable real index rewrite', async (t) => {
@@ -3598,6 +3640,7 @@ test('hook rejection preserves and restores an observable real index rewrite', a
   );
 
   assert.equal(commitCalls.length, 1);
+  assert.equal(rejection.repository_changed, true);
   assert.equal((await runGit(root, ['rev-parse', 'HEAD'])).stdout.trim(), headBefore);
   assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
   assert.deepEqual(await readIndexBytes(root), originalIndex);
@@ -3612,6 +3655,109 @@ test('hook rejection preserves and restores an observable real index rewrite', a
     transaction_id: fixture.prepared.transaction_id,
     ownership_token: fixture.prepared.ownership_token,
   }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('foreign unexpected index cannot enter the authenticated recovery closure', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected foreign recovery evidence\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  const resourceDirectory = path.dirname(fixture.prepared.message_file);
+  const foreignUnexpected = path.join(resourceDirectory, 'unexpected.index');
+  const foreignBytes = Buffer.from('foreign recovery evidence must stay unauthenticated\n');
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'git_dir="$(git rev-parse --git-dir)"',
+    'rm -f "$git_dir/index.lock"',
+    'unset GIT_INDEX_FILE',
+    "printf 'foreign hook worktree\\n' > foreign-hook.txt",
+    'git add -- foreign-hook.txt',
+    `printf 'foreign recovery evidence must stay unauthenticated\\n' > "${foreignUnexpected.replaceAll('\\', '/')}"`,
+    'exit 29',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const originalIndex = await readIndexBytes(root);
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED' && error.transaction_preserved === false;
+    },
+  );
+
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  assert.notDeepEqual(await readIndexBytes(root), originalIndex);
+  assert.deepEqual(await readFile(foreignUnexpected), foreignBytes);
+  const state = JSON.parse(await readFile(path.join(resourceDirectory, 'state.json'), 'utf8'));
+  assert.equal(state.files.unexpected_index_sha256, null);
+  assert.equal(state.ownership.tree.some(({ path: ownedPath }) =>
+    ownedPath === 'unexpected.index'), false);
+  assert.equal(rejection.repository_changed, true);
+});
+
+test('foreign index lock preserves the rewritten index and authenticated recovery evidence', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected foreign lock recovery\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  const indexLock = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'index.lock'])).stdout.trim(),
+  );
+  const foreignLockBytes = Buffer.from('foreign index lock must survive\n');
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'git_dir="$(git rev-parse --git-dir)"',
+    'rm -f "$git_dir/index.lock"',
+    'unset GIT_INDEX_FILE',
+    "printf 'foreign lock worktree\\n' > foreign-lock.txt",
+    'git add -- foreign-lock.txt',
+    "printf 'foreign index lock must survive\\n' > \"$git_dir/index.lock\"",
+    'exit 37',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  const originalIndex = await readIndexBytes(root);
+  const countBefore = (await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim();
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED'
+        && error.retained === true
+        && error.transaction_preserved === true;
+    },
+  );
+
+  const rewrittenIndex = await readIndexBytes(root);
+  assert.equal((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim(), countBefore);
+  assert.notDeepEqual(rewrittenIndex, originalIndex);
+  assert.deepEqual(await readFile(indexLock), foreignLockBytes);
+  assert.equal(rejection.repository_changed, true);
+  assert.equal(rejection.recovery_code, 'INDEX_LOCKED');
+  assert.match(rejection.unexpected_index_sha256, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(await readFile(rejection.unexpected_index), rewrittenIndex);
+  const state = JSON.parse(await readFile(
+    path.join(path.dirname(fixture.prepared.message_file), 'state.json'),
+    'utf8',
+  ));
+  assert.equal(state.files.unexpected_index_sha256, sha256(rewrittenIndex));
+  assert.equal(state.ownership.tree.find(({ path: ownedPath }) =>
+    ownedPath === 'unexpected.index')?.sha256, sha256(rewrittenIndex));
 });
 
 test('commit-msg hook runs once and the result reports the actual commit subject', async (t) => {
