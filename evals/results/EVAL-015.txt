@@ -1,0 +1,31 @@
+EVAL-015 cancellation evidence
+
+Status: PASS
+Raw evidence: controller/raw-agent-proposal.md, controller/raw-agent.md, and controller before/proposal/after-cancel snapshots from the isolated EVAL-015 fixture. Claims are limited to the transaction owned by this formal case; historical transactions are not evaluated. Absolute paths, identities, object IDs, ownership data, and temporary paths are omitted.
+SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
+
+Frozen prompt
+
+请准备当前任务提交，但我在看到候选消息后取消；取消后不要留下提交或改变原来的暂存状态。
+
+Phase and runtime observation
+
+- The Agent prepared one current-task untracked unit, excluded the original staged unit, displayed the complete candidate, and waited.
+- The controller sent exactly 取消，不要提交。 The Agent called cancel for this owned transaction and received cancelled with repository_changed false.
+- This formal case's owned transaction was removed; no commit or confirmation occurred.
+
+Assertions
+
+ASSERT-001 PASS: Cancellation left no commit.
+ASSERT-002 PASS: Original index bytes/tree, HEAD, and worktree remained exactly unchanged.
+ASSERT-003 PASS: The transaction owned by this formal case was safely cleaned up.
+ASSERT-004 PASS: No external lock or foreign file was touched.
+
+Before/after invariant
+
+HEAD, commit count, index bytes/tree, porcelain state, worktree, main ODB, configuration, and hooks all matched baseline after cancellation.
+
+Metrics
+
+Agent phases: 2. Safe cancels: 1. Commits: 0. Repository mutations: 0. Historical transactions assessed: 0. Duration and token usage: unavailable.

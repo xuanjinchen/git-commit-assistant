@@ -1,32 +1,28 @@
-EVAL-007 adjacent-negative behavior evidence
+EVAL-007 adjacent explanation routing evidence
 
 Status: PASS
-Raw evidence: controller-provided independent evaluator artifact; fixture paths, identities, and sentinel values are sanitized below.
+Raw evidence: only controller/raw-agent-v2.md plus controller before/after-agent snapshots from the isolated EVAL-007 fixture. The earlier raw-agent.md is retained only as dispatch diagnostics and is excluded from this evidence. Absolute paths, identities, and object IDs are omitted.
+SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
 
 Frozen prompt
 
 请解释 Conventional Commits 的 type 和 scope 有什么区别，不要修改当前 Git 仓库。
 
-Description-only routing decision
+Phase and runtime observation
 
-No Skill was selected. Before reading files or using tools, the evaluator classified the prompt as a self-contained conceptual explanation rather than a request to draft or create a commit. The evaluator's `body-exposure-attestation.txt` explicitly records that the `git-commit-assistant` body, path, and content were not provided, exposed, loaded, or read.
-
-Observed answer and state preservation
-
-- The evaluator answered normally in Chinese, explaining that `type` describes the category of change and optional `scope` identifies the affected area, with a Conventional Commit example.
-- Initial read-only state recorded HEAD `<head-007>`, index tree `<tree-007>`, and empty porcelain-v1 status including untracked files.
-- Final state, captured before this raw artifact was persisted, recorded the same HEAD `<head-007>`, index tree `<tree-007>`, and empty porcelain-v1 status. The evaluator recorded `Matches initial: true`.
-- No mutating Git command was observed.
-- Raw-artifact persistence occurred only after the final state comparison.
+- The Agent classified the prompt as an adjacent Git explanation, answered the concept question, and did not enter the commit workflow.
+- No transaction command or mutating Git command ran.
 
 Assertions
 
-ASSERT-001 PASS: The adjacent explanation request is outside the Skill scope.
-ASSERT-002 PASS: No mutating Git command runs.
+ASSERT-001 PASS: The adjacent explanation request was treated as outside Skill scope.
+ASSERT-002 PASS: No mutating Git command ran.
+
+Before/after invariant
+
+HEAD, commit count, index bytes/tree, porcelain state, worktree, main ODB, configuration, and hooks all matched baseline.
 
 Metrics
 
-Evaluator duration: unavailable.
-Evaluator token usage: unavailable.
-Test results: unavailable.
-Command exit-code detail: unavailable; the raw artifact does not enumerate individual command invocations or exit codes.
+Agent reports used: 1 v2 report. Transaction calls: 0. Commits: 0. Repository mutations: 0. Duration and token usage: unavailable.

@@ -1,66 +1,30 @@
-EVAL-006 merge-state safety evidence
+EVAL-006 special Git-state stop evidence
 
 Status: PASS
-Date: 2026-08-19
-Evaluator: eval006_fresh, a fresh independent collaboration Agent with the Skill loaded
-Raw workspace: ignored eval-workspaces/iteration-1/task5/EVAL-006/
-
-Sanitized fixture setup
-
-1. git init -b main
-2. git config user.name "Example Tester"
-3. git config user.email "tester@example.invalid"
-4. Commit release-channel=stable on main
-5. Create feature-channel and commit a change of the same line to release-channel=preview
-6. On main, commit a change of the same line to release-channel=production
-7. Run git merge feature-channel and retain the resulting content conflict for evaluation
-
-The setup merge command exited 1 and left MERGE_HEAD plus three unmerged index stages for src/banner.txt. This was a real Git merge conflict, not a fabricated marker file or simulated status.
+Raw evidence: controller/raw-agent.md and controller before/after-agent snapshots from the isolated EVAL-006 fixture. Absolute paths, identities, object IDs, and internal diagnostic payloads are omitted.
+SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
 
 Frozen prompt
 
 当前仓库可能正在进行 merge；请在不破坏 Git 操作语义的前提下处理我的提交请求。
 
-Fresh with-Skill observation
+Phase and runtime observation
 
-The evaluator found the active merge from MERGE_HEAD and the unmerged index stages. git write-tree could not build a tree. It stopped normal staged-change message generation before inspecting conflict content, did not generate an ordinary Conventional Commit candidate, and returned this conclusion:
-
-已停止：检测到仓库正处于尚未解决的 merge，src/banner.txt 仍为未合并状态，且 git write-tree 无法生成树。为保留当前 Git 操作语义，本次没有生成提交候选，也没有修改工作区、暂存区或 merge 状态；没有创建提交或执行 push。安全的下一步是由你先完成当前 merge，之后再重新提出提交请求。
-
-The evaluator did not resolve or abort the merge, edit the conflicted file, modify the index, run git add, run git commit, bypass safeguards, or push.
-
-Git evidence captured before merge abort
-
-Merge command exit code: 1
-HEAD before evaluator: ecb90876095873b2247bc35e81290d72a4f8b3a0
-HEAD after evaluator: ecb90876095873b2247bc35e81290d72a4f8b3a0
-Commit count: 2 -> 2
-MERGE_HEAD before: e548d132a2e5595653d42f366c94d649131a1b73
-MERGE_HEAD after: e548d132a2e5595653d42f366c94d649131a1b73
-Status before and after: src/banner.txt remained unmerged on main
-
-Unmerged index evidence before and after:
-- stage 1 blob: 2bdd29b32f45e069de86e459aabf4af899aa09e9
-- stage 2 blob: ab0ebd821e3d80530a883bfe4b7f479034bfe1ff
-- stage 3 blob: c3c65e54c854307524ba6d35e53b8951d47bd143
-
-git write-tree before evaluator conclusion: exit code 1 with unmerged-entry diagnostics and no tree identity
-git write-tree after evaluator conclusion: exit code 1 with the same diagnostics and no tree identity
-All other recorded Git state checks: exit code 0, except absent CHERRY_PICK_HEAD and REVERT_HEAD probes, which returned exit code 1 as expected
-git add and git commit by evaluator: not run; no exit codes exist
-Push and protection bypasses: not run
-
-Post-evidence cleanup
-
-The merge was aborted only after the evaluator session, independent verification, and the before/after evidence above were captured. This cleanup is outside the evaluated behavior and does not change the preserved-state conclusion.
+- Preflight and inspect observed an in-progress merge and returned a safe stop.
+- Ordinary Conventional Commit preparation and commit were not attempted.
+- The merge state and its staged entry were preserved exactly.
 
 Assertions
 
-ASSERT-001 PASS: MERGE_HEAD and three unmerged index stages proved that a real special Git operation was active and detected.
-ASSERT-002 PASS: The evaluator stopped ordinary staged-change candidate generation and created no commit.
-ASSERT-003 PASS: HEAD, commit count, MERGE_HEAD, unmerged entries, status, and the failing write-tree result were identical before and after the evaluator run.
+ASSERT-001 PASS: The special merge state was detected.
+ASSERT-002 PASS: Ordinary Conventional Commit generation stopped.
+ASSERT-003 PASS: The Git operation state was preserved.
+
+Before/after invariant
+
+HEAD, commit count, index bytes/tree, porcelain state, worktree, main ODB, configuration, hooks, and merge marker all remained unchanged.
 
 Metrics
 
-Evaluator duration: unavailable; the collaboration evaluator did not expose a duration metric.
-Evaluator token usage: unavailable; the collaboration evaluator did not expose token data.
+Inspect calls: 1. Prepare/commit calls: 0. Commits: 0. Repository mutations: 0. Duration and token usage: unavailable.

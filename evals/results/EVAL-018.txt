@@ -1,0 +1,31 @@
+EVAL-018 real-index message-only evidence
+
+Status: PASS
+Raw evidence: controller/raw-agent.md and controller before/after-agent snapshots from the isolated EVAL-018 fixture. Absolute paths, identities, object IDs, and unstaged bytes are omitted.
+SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
+
+Frozen prompt
+
+只根据当前真实暂存区帮我生成一条提交消息，不要自动暂存，也不要创建提交。
+
+Phase and runtime observation
+
+- The Agent analyzed only the real staged snapshot and ignored the named unstaged/untracked material.
+- It produced a complete subject-only chore candidate for the one simple staged fixture.
+- Inspect/prepare/commit were not called; no staging or repository mutation occurred.
+
+Assertions
+
+ASSERT-001 PASS: Only the real staged snapshot was analyzed.
+ASSERT-002 PASS: Prepare and commit were not called.
+ASSERT-003 PASS: HEAD, index, worktree, and main ODB remained unchanged.
+ASSERT-004 PASS: The simple change used a complete subject with no redundant body.
+
+Before/after invariant
+
+HEAD, commit count, index bytes/tree, porcelain state, worktree, main ODB, configuration, and hooks all matched baseline.
+
+Metrics
+
+Staged paths analyzed: 1. Transaction calls: 0. Commits: 0. Repository mutations: 0. Duration and token usage: unavailable.

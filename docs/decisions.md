@@ -134,6 +134,22 @@ Record requirement interpretations and superseding decisions without rewriting h
       "decision": "Clarify only the concurrency-related guarantees of DEC-004, DEC-014, and DEC-015 with portable cooperative concurrency: stop when a bound or protected content, identity, path, ownership, or metadata change is observable at a defined validation or recovery checkpoint, and preserve foreign state when ownership is uncertain. Do not claim protection against a deliberately hostile same-privilege process that races inside an individual filesystem-syscall gap and uses native APIs to erase every observable trace; do not add a platform-native helper for that residual risk. Hooks remain untrusted, observable hook mutations and post-commit actual HEAD/tree verification remain in scope, and all non-concurrency safeguards in those decisions remain unchanged.",
       "evidence": "User approved the review-driven portable threat-model revision on 2026-08-23 after independent Round 4 review demonstrated that Node.js lacks cross-platform descriptor-bound unlink/rename and that child-visible path, identity, and timestamp barriers alone cannot prove which tree the parent Git process loaded after hooks before commit-object creation.",
       "supersedes": null
+    },
+    {
+      "id": "DEC-017",
+      "status": "superseded",
+      "scope": "delivery evidence",
+      "decision": "Keep Version 5 delivery draft when raw evidence contradicts an assertion or the frozen runtime exceeds the prompt budget; do not convert partial evidence into a ready contract. EVAL-016 fails diagnostic-only recovery isolation because a retained unreachable diagnostic pack also changed the main ODB, and the frozen Skill measures 1,891 tokens against a 1,800-token limit.",
+      "evidence": "artifact:evals/results/EVAL-016.txt#sha256:b8ec3c81554cbc612cd390097149458ebaf763f3980b96d74dabe50bfdbec6a4; artifact:evals/results/prompt-budget.txt#sha256:1ff050f76d9c7b56ec2ca0db81f48368a5de37690808da07ff1719b030bf7b5c",
+      "supersedes": null
+    },
+    {
+      "id": "DEC-018",
+      "status": "active",
+      "scope": "delivery evidence",
+      "decision": "Close Version 5 as ready only after all nineteen independent Agent/controller cases pass against the final runtime hashes, hook-rejection cleanup restores the main ODB exactly while retaining necessary diagnostics only in the safe external transaction, and the conservative Skill prompt estimate remains within 1,800 tokens.",
+      "evidence": "artifact:evals/results/EVAL-016.txt#sha256:5eda52b0945a2428771be786e7875b3423d63916c6de40d254fe0d2689042b8a; artifact:evals/results/prompt-budget.txt#sha256:7b64f8ce2146ff781f2f5b9e5df6baa8193f7ea214add6b6d36e3e0c08f4fc2b",
+      "supersedes": "DEC-017"
     }
   ]
 }

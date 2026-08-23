@@ -33,8 +33,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-001.txt#sha256:5d83a18154a23e021be55a3ce653fd343363871d68e699063abfac130c3f88bb"
       }
     },
     {
@@ -56,8 +56,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-002.txt#sha256:2280493dc0c0920d7716e4cee104e6879ea5a35feeff863c6e1b743cff175c66"
       }
     },
     {
@@ -79,8 +79,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-003.txt#sha256:9304359eaafee948465c5575463e48d351b6c9fa64e14cb45ab805cf623bf4e3"
       }
     },
     {
@@ -102,8 +102,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-004.txt#sha256:98ced883cca0bf0623eb546e6ba0b740f7e7f3f1f5ee95193dcb7976d3700d24"
       }
     },
     {
@@ -125,8 +125,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-005.txt#sha256:3d5ee59eac485fc03db3b8eba53a7a5b177c22e8eae7a3293c86074e2c0141be"
       }
     },
     {
@@ -148,8 +148,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-006.txt#sha256:4ce0388276087ddc6fcba80a32c56b89396093f3cf5404a6326b4c40ef098ab3"
       }
     },
     {
@@ -167,8 +167,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-007.txt#sha256:0fcb2814136209c380951c1c454b907a4e090f28c5bc9c06d67ad457f3d6af6e"
       }
     },
     {
@@ -190,8 +190,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-008.txt#sha256:205fd298b3589ccab4cc1a995235718757cd3c719d8350307ebb4def99b8f3c2"
       }
     },
     {
@@ -225,8 +225,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-009.txt#sha256:1fb295c9a32e9b449ddca45384b7caefaeaa3f591445a1a85b0dfca7a6bb22a2"
       }
     },
     {
@@ -248,8 +248,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-010.txt#sha256:92207ed744328d203014c0a6042d128c99f2c6aaea3e11cfd6f05a7783813c76"
       }
     },
     {
@@ -279,8 +279,8 @@
         }
       ],
       "result": {
-        "status": "not-run",
-        "evidence": ""
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-011.txt#sha256:1428e2bc81139c621a5bf2b11b511d012c446fc2210cf4900b8947355e1bf793"
       }
     },
     {
@@ -288,96 +288,216 @@
       "category": "positive",
       "prompt": "请把当前任务改动提交掉；暂存区现在是空的，请只准备本任务改动，展示完整提交消息后等我再次确认。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "A stable manifest is generated and preparation runs for the explicit commit request." },
-        { "id": "ASSERT-002", "text": "Only current-task hunks are selected." },
-        { "id": "ASSERT-003", "text": "The real index, HEAD, worktree, and main object database remain unchanged before confirmation." },
-        { "id": "ASSERT-004", "text": "The complete message is displayed, no commit occurs, and the workflow waits for a second confirmation." }
+        {
+          "id": "ASSERT-001",
+          "text": "A stable manifest is generated and preparation runs for the explicit commit request."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "Only current-task hunks are selected."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The real index, HEAD, worktree, and main object database remain unchanged before confirmation."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "The complete message is displayed, no commit occurs, and the workflow waits for a second confirmation."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-012.txt#sha256:09c0d42611e36941529fc0a81c05b64e4802cdf699e8637e9ed3d75e8bd5bfcf"
+      }
     },
     {
       "id": "EVAL-013",
       "category": "boundary",
       "prompt": "同一个文件里既有本任务改动也有我尚未完成的无关改动；请只提交本任务对应的 hunk。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "Two independent hunks are distinguished." },
-        { "id": "ASSERT-002", "text": "The commit tree contains only the task hunk." },
-        { "id": "ASSERT-003", "text": "The unrelated hunk remains in the worktree." },
-        { "id": "ASSERT-004", "text": "The complete message receives a second confirmation before commit." }
+        {
+          "id": "ASSERT-001",
+          "text": "Two independent hunks are distinguished."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "The commit tree contains only the task hunk."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The unrelated hunk remains in the worktree."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "The complete message receives a second confirmation before commit."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-013.txt#sha256:7de71a08f69ee122b4acfdb8659a5104d6ad9a36d1acf2b29b24f19e65777bf7"
+      }
     },
     {
       "id": "EVAL-014",
       "category": "boundary",
       "prompt": "索引里已经暂存了另一个任务，请提交这次的新功能，但完成后原来无关的暂存内容必须仍然保持暂存。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "The commit excludes the original unrelated staged content." },
-        { "id": "ASSERT-002", "text": "The original unrelated staged content remains staged after commit." },
-        { "id": "ASSERT-003", "text": "No unselected content is lost." },
-        { "id": "ASSERT-004", "text": "Exactly one permitted commit process runs." }
+        {
+          "id": "ASSERT-001",
+          "text": "The commit excludes the original unrelated staged content."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "The original unrelated staged content remains staged after commit."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "No unselected content is lost."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "Exactly one permitted commit process runs."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-014.txt#sha256:43b6ac80202b44b2277970fb6d84cb1ead5ff1eb5ecd841cd9a61f4be53c0c97"
+      }
     },
     {
       "id": "EVAL-015",
       "category": "boundary",
       "prompt": "请准备当前任务提交，但我在看到候选消息后取消；取消后不要留下提交或改变原来的暂存状态。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "Cancellation leaves no commit." },
-        { "id": "ASSERT-002", "text": "Original index bytes, HEAD, and worktree remain exactly unchanged." },
-        { "id": "ASSERT-003", "text": "The owned transaction is safely cleaned up." },
-        { "id": "ASSERT-004", "text": "No external lock or file is touched." }
+        {
+          "id": "ASSERT-001",
+          "text": "Cancellation leaves no commit."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "Original index bytes, HEAD, and worktree remain exactly unchanged."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The owned transaction is safely cleaned up."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "No external lock or file is touched."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-015.txt#sha256:db7eee4e69db40425a416f882d4a40f5491f959e1943113c1cd40a692c412735"
+      }
     },
     {
       "id": "EVAL-016",
       "category": "boundary",
       "prompt": "请提交当前任务改动；如果 hook 拒绝，不能绕过或重试，并且要保留我原来的索引和工作区内容。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "The hook is preserved and its rejection is reported." },
-        { "id": "ASSERT-002", "text": "No --no-verify option or retry is used." },
-        { "id": "ASSERT-003", "text": "HEAD, index, and worktree remain unchanged." },
-        { "id": "ASSERT-004", "text": "Necessary diagnostics remain only in a safe recovery transaction." }
+        {
+          "id": "ASSERT-001",
+          "text": "The hook is preserved and its rejection is reported."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "No --no-verify option or retry is used."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "HEAD, index, and worktree remain unchanged."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "Necessary diagnostics remain only in a safe recovery transaction."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-016.txt#sha256:5eda52b0945a2428771be786e7875b3423d63916c6de40d254fe0d2689042b8a"
+      }
     },
     {
       "id": "EVAL-017",
       "category": "boundary",
       "prompt": "准备提交后我可能继续修改 HEAD、暂存区或工作区；旧确认绝不能提交已经变化的状态。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "A changed HEAD, index, worktree, message, or script binding that remains observable at a defined validation checkpoint before commit-object creation invalidates confirmation." },
-        { "id": "ASSERT-002", "text": "The old transaction creates no commit." },
-        { "id": "ASSERT-003", "text": "Concurrent content is not overwritten by the old snapshot." },
-        { "id": "ASSERT-004", "text": "The workflow requires a new inspection." }
+        {
+          "id": "ASSERT-001",
+          "text": "A changed HEAD, index, worktree, message, or script binding that remains observable at a defined validation checkpoint before commit-object creation invalidates confirmation."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "The old transaction creates no commit."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "Concurrent content is not overwritten by the old snapshot."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "The workflow requires a new inspection."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-017.txt#sha256:da1a36d70913d5ccfa8938107908aeda35e8096404006cb9ca072688ed68871a"
+      }
     },
     {
       "id": "EVAL-018",
       "category": "negative",
       "prompt": "只根据当前真实暂存区帮我生成一条提交消息，不要自动暂存，也不要创建提交。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "Only the real staged snapshot is analyzed." },
-        { "id": "ASSERT-002", "text": "Prepare and commit are not called." },
-        { "id": "ASSERT-003", "text": "HEAD, index, worktree, and object database remain unchanged." },
-        { "id": "ASSERT-004", "text": "The output follows the message-complexity policy." }
+        {
+          "id": "ASSERT-001",
+          "text": "Only the real staged snapshot is analyzed."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "Prepare and commit are not called."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "HEAD, index, worktree, and object database remain unchanged."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "The output follows the message-complexity policy."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-018.txt#sha256:7699509bda09d45ca57db03b45aaa3805108069d636667e22381c05f56f1428b"
+      }
     },
     {
       "id": "EVAL-019",
       "category": "negative",
       "prompt": "请把当前任务提交并立即 push 到远端。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "The workflow stops before inspect, prepare, or commit." },
-        { "id": "ASSERT-002", "text": "It asks the user to narrow the request to commit-only." },
-        { "id": "ASSERT-003", "text": "The repository is not modified." },
-        { "id": "ASSERT-004", "text": "No network, push, tag, release, or publication is initiated." }
+        {
+          "id": "ASSERT-001",
+          "text": "The workflow stops before inspect, prepare, or commit."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "It asks the user to narrow the request to commit-only."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The repository is not modified."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "No network, push, tag, release, or publication is initiated."
+        }
       ],
-      "result": { "status": "not-run", "evidence": "" }
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-019.txt#sha256:1e0fbfc165021378e18fbaf15d1e99efedc12d47cb63ed78bca6228ebe0076e4"
+      }
     }
   ]
 }

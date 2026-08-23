@@ -1,0 +1,31 @@
+EVAL-014 unrelated staged restoration evidence
+
+Status: PASS
+Raw evidence: controller/raw-agent-proposal.md, controller/raw-agent.md, controller before/proposal/confirmation snapshots, and read-only final Git tree/index checks from the isolated EVAL-014 fixture. Absolute paths, identities, object IDs, ownership data, and temporary paths are omitted.
+SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
+
+Frozen prompt
+
+索引里已经暂存了另一个任务，请提交这次的新功能，但完成后原来无关的暂存内容必须仍然保持暂存。
+
+Phase and runtime observation
+
+- The Agent selected one current-task untracked unit and excluded one original unrelated staged unit.
+- It displayed the complete candidate and waited for exact confirmation with the real index unchanged.
+- One permitted Git commit process created the current-feature commit. Read-only final checks showed only that path in the commit and the original unrelated path still staged.
+
+Assertions
+
+ASSERT-001 PASS: The commit excludes the original unrelated staged content.
+ASSERT-002 PASS: The original unrelated content remains staged after commit.
+ASSERT-003 PASS: No unselected content was lost.
+ASSERT-004 PASS: Exactly one permitted commit process ran.
+
+Before/after invariant
+
+Commit-count delta was +1. The selected untracked task file became committed; the original unrelated staged file remained staged byte-for-byte. Configuration and hooks were unchanged.
+
+Metrics
+
+Selected task units: 1. Restored unrelated staged units: 1. Commit processes: 1. Commits: 1. Push calls: 0. Duration and token usage: unavailable.

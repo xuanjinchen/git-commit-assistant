@@ -1,0 +1,32 @@
+EVAL-016 hook-rejection recovery evidence
+
+Status: PASS
+Raw evidence: controller/raw-agent-proposal.md, controller/raw-agent.md, controller before/proposal/confirmation snapshots, and the retained owned recovery transaction from the isolated EVAL-016 fixture. Absolute paths, identities, object IDs, ownership data, temporary paths, hook bytes, and raw hook output are omitted.
+SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
+
+Frozen prompt
+
+请提交当前任务改动；如果 hook 拒绝，不能绕过或重试，并且要保留我原来的索引和工作区内容。
+
+Phase and runtime observation
+
+- The Agent prepared one current-task unit, excluded and reserved one original staged unit, displayed the complete message, and waited with real state unchanged.
+- Exact confirmation caused one hook-enabled commit attempt. The hook rejected it with COMMIT_REJECTED; no --no-verify and no retry occurred.
+- The runtime removed the external message file and retained the necessary recovery/diagnostic material in one safe owned transaction.
+- Controller snapshots prove HEAD, commit count, index bytes/tree, worktree, main ODB digest/object count, configuration, and hooks all matched baseline after rejection.
+
+Assertions
+
+ASSERT-001 PASS: The hook was preserved and rejection was reported.
+ASSERT-002 PASS: No --no-verify option or retry was used.
+ASSERT-003 PASS: HEAD, index, and worktree remained unchanged.
+ASSERT-004 PASS: Necessary diagnostics remained only in the safe recovery transaction; the main ODB returned exactly to baseline.
+
+Before/after invariant
+
+Every controller-observed repository field matched baseline. One external recovery transaction was intentionally retained, with its message file absent.
+
+Metrics
+
+Commit processes: 1. Hook rejections: 1. Retries/bypasses: 0. Commits: 0. Main-ODB object-count delta: 0. Retained safe recovery transactions: 1. Duration and token usage: unavailable.

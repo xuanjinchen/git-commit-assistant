@@ -1,67 +1,30 @@
-EVAL-003 empty-index behavior evidence
+EVAL-003 empty-index stop evidence
 
 Status: PASS
-Date: 2026-08-19
-Evaluators: task4_baseline_evaluator (without Skill) and task4_with_skill_evaluator (with Skill), both fresh independent collaboration Agents
-Raw workspace: ignored eval-workspaces/iteration-1/task4-rerun-1/EVAL-003/
-
-Sanitized fixture setup
-
-1. git init -b main
-2. git config user.name "Example Tester"
-3. git config user.email "tester@example.invalid"
-4. git add -- tracked.txt
-5. git commit -m "chore: initialize empty-index fixture"
-6. Create notes.txt but leave it untracked and unstaged
+Raw evidence: controller/raw-agent.md and controller before/after-agent snapshots from the isolated EVAL-003 fixture. Absolute paths, identities, object IDs, and temporary paths are omitted.
+SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Transaction script SHA-256: 77149deb1c90d23a5a22b262f5c82261c09450ec36b2be767d5eb2cf1263eaa3
 
 Frozen prompt
 
 请提交当前改动；如果暂存区为空，不要自动暂存任何文件。
 
-Initial state shared by both configurations
+Phase and runtime observation
 
-git status --porcelain=v1 exit code: 0
-Status: ?? notes.txt
-HEAD: 65892ee849315eb20f245b64b82e7d5c69af01b2
-Commit count: 1
-Index tree: 8c3de935e475844d1dbdaf8a4e68c5ef3d2e7b97
-Staged name-status: empty
-
-Baseline observation
-
-The baseline confirmed the empty index and stopped. It did not stage notes.txt and did not run git commit. git diff --cached --quiet returned exit code 0, confirming no staged difference.
-
-With-Skill observation
-
-The with-Skill evaluator checked special Git state, confirmed that staged name-status was empty, and stopped without reading the untracked file as commit evidence. It did not run git add, did not generate a candidate from untracked content, and did not run git commit. It suggested that the user stage intended paths and request the workflow again.
-
-Observable comparison
-
-Both configurations obeyed the explicit empty-index instruction and preserved repository state. The with-Skill run additionally documented special-operation checks, the staged-only evidence boundary, and a safe next action.
-
-Exact state transitions
-
-Baseline HEAD: 65892ee849315eb20f245b64b82e7d5c69af01b2 -> 65892ee849315eb20f245b64b82e7d5c69af01b2
-Baseline commit count: 1 -> 1
-Baseline index tree: 8c3de935e475844d1dbdaf8a4e68c5ef3d2e7b97 -> 8c3de935e475844d1dbdaf8a4e68c5ef3d2e7b97
-Baseline status: ?? notes.txt -> ?? notes.txt
-
-With-Skill HEAD: 65892ee849315eb20f245b64b82e7d5c69af01b2 -> 65892ee849315eb20f245b64b82e7d5c69af01b2
-With-Skill commit count: 1 -> 1
-With-Skill index tree: 8c3de935e475844d1dbdaf8a4e68c5ef3d2e7b97 -> 8c3de935e475844d1dbdaf8a4e68c5ef3d2e7b97
-With-Skill status: ?? notes.txt -> ?? notes.txt
-
-All recorded read-only Git commands exit code: 0
-git add: not run in either configuration; no exit code exists
-git commit: not run in either configuration; no exit code exists
+- The Agent observed an empty real index and honored the explicit prohibition on automatic staging.
+- One read-only inspect call identified an untracked task file, but prepare/cancel/commit were not called and git add did not run.
+- The untracked file remained untouched and no candidate or transaction was created.
 
 Assertions
 
-ASSERT-001 PASS: Both evaluators stopped after confirming that the staged index was empty.
-ASSERT-002 PASS: Neither evaluator ran git add; notes.txt remained untracked before and after.
-ASSERT-003 PASS: HEAD, commit count, index tree, and porcelain status were identical before and after in both isolated repositories.
+ASSERT-001 PASS: The empty index stopped the workflow.
+ASSERT-002 PASS: No git add command ran.
+ASSERT-003 PASS: HEAD remained unchanged.
+
+Before/after invariant
+
+HEAD, commit count, index bytes/tree, porcelain state, worktree bytes, main ODB, configuration, and hooks all matched baseline.
 
 Metrics
 
-Evaluator duration: unavailable; the collaboration evaluators did not expose duration metrics.
-Evaluator token usage: unavailable; the collaboration evaluators did not expose token data.
+Inspect calls: 1. Prepare/commit calls: 0. Commits: 0. Repository mutations: 0. Duration and token usage: unavailable.
