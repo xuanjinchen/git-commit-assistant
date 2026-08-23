@@ -87,7 +87,7 @@ async function runCli(command, input, options = {}) {
   const script = path.resolve('scripts/stage-transaction.mjs');
   const repositoryRoot = input?.repository_root;
   const child = spawn(process.execPath, [script, command, ...(options.argv ?? [])], {
-    cwd: path.resolve('.'),
+    cwd: options.cwd ?? path.resolve('.'),
     env: {
       ...process.env,
       GIT_CONFIG_NOSYSTEM: '1',
@@ -573,7 +573,7 @@ test('manifest records three diff layers and atomic file changes', async (t) => 
   assert.ok(manifest.units.every(({ patch_sha256 }) => /^[0-9a-f]{64}$/u.test(patch_sha256)));
 });
 
-test('adjacent changed lines form one atomic text hunk', async (t) => {
+test('adjacent changed lines form one contiguous text hunk', async (t) => {
   const root = await repositoryWithBaseline(t);
   await writeFile(path.join(root, 'feature.txt'), 'line 1\nchanged 2\nchanged 3\n');
 
@@ -815,6 +815,62 @@ test('inspect CLI rejects malformed input and extra argv without stderr', async 
   assert.equal(JSON.parse(extraArgv.stdout).error.code, 'PROTOCOL_ERROR');
 });
 
+test('direct hidden helper argv is rejected as an unknown public command without cwd mutation', async (t) => {
+  const workingDirectory = await mkdtemp(path.join(os.tmpdir(), 'git-commit-assistant-direct-helper-'));
+  t.after(() => rm(workingDirectory, { recursive: true, force: true }));
+  const oid = 'a'.repeat(40);
+
+  const result = await runCli('__loose-object-helper', {}, {
+    argv: [oid],
+    cwd: workingDirectory,
+  });
+  const response = JSON.parse(result.stdout);
+
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr, '');
+  assert.equal(result.stdout.split('\n').length, 2);
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'PROTOCOL_ERROR');
+  assert.deepEqual(await readdir(workingDirectory), []);
+});
+
+test('foreign IPC hidden helper launch is rejected before cwd mutation', async (t) => {
+  const workingDirectory = await mkdtemp(path.join(os.tmpdir(), 'git-commit-assistant-foreign-helper-'));
+  t.after(() => rm(workingDirectory, { recursive: true, force: true }));
+  const script = path.resolve('scripts/stage-transaction.mjs');
+  const oid = 'b'.repeat(40);
+  const child = spawn(process.execPath, [script, '__loose-object-helper', oid], {
+    cwd: workingDirectory,
+    env: { ...process.env },
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+  });
+  const stdout = [];
+  const stderr = [];
+  const messages = [];
+  child.stdout.on('data', (chunk) => stdout.push(chunk));
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  child.on('message', (message) => {
+    messages.push(message);
+    if (message?.type !== 'failure') child.kill();
+  });
+  child.stdin.end();
+
+  const status = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+
+  assert.equal(status, 1);
+  assert.equal(Buffer.concat(stdout).toString('utf8'), '');
+  assert.equal(Buffer.concat(stderr).toString('utf8'), '');
+  assert.deepEqual(messages, [{
+    type: 'failure',
+    code: 'HELPER_AUTHENTICATION_FAILED',
+    oid,
+  }]);
+  assert.deepEqual(await readdir(workingDirectory), []);
+});
+
 test('CLI exits quietly when stdout closes before its response', async (t) => {
   const root = await repositoryWithBaseline(t);
   const script = path.resolve('scripts/stage-transaction.mjs');
@@ -879,6 +935,32 @@ test('prepare leaves the real repository unchanged and builds only the selected 
   await assert.rejects(
     readExternalTreeFile(root, prepared.task_tree_oid, 'untracked.txt', objectDirectory),
   );
+});
+
+test('prepare canonicalizes selected unit IDs in manifest order and returns schema version', async (t) => {
+  const root = await repositoryForPreparation(t);
+  const temporaryRoot = await createTemporaryRoot(t);
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.filter((unit) =>
+    unit.view === 'head_to_worktree'
+    && unit.path === 'feature.txt'
+    && [2, 9].includes(unit.new_range.start));
+  assert.equal(selected.length, 2);
+  const callerOrder = selected.map(({ unit_id }) => unit_id).reverse();
+  const selectedSet = new Set(callerOrder);
+  const manifestOrder = manifest.units
+    .filter(({ unit_id }) => selectedSet.has(unit_id))
+    .map(({ unit_id }) => unit_id);
+  assert.notDeepEqual(callerOrder, manifestOrder);
+
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: callerOrder,
+  }, { temporaryRoot });
+
+  assert.equal(prepared.schema_version, 1);
+  assert.deepEqual(prepared.binding.selected_unit_ids, manifestOrder);
 });
 
 test('prepare rejects a derived transaction directory that collides with the repository', async (t) => {
@@ -4671,6 +4753,58 @@ test('persistent post-commit HEAD read failure still returns recovery evidence',
   ));
   assert.equal(result.transaction_preserved, true);
   assert.equal(Number((await runGit(root, ['rev-list', '--count', 'HEAD'])).stdout.trim()), countBefore + 1);
+});
+
+test('commit recovery-required CLI result uses a non-success exit code', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected CLI recovery\nline 3\n');
+  const manifest = await inspectRepository({ repository_root: root });
+  const selected = manifest.units.find((unit) => unit.view === 'head_to_worktree');
+  const prepared = await prepareTransaction({
+    repository_root: root,
+    manifest,
+    selected_unit_ids: [selected.unit_id],
+  });
+  t.after(async () => {
+    await cancelTransaction({
+      repository_root: root,
+      transaction_id: prepared.transaction_id,
+      ownership_token: prepared.ownership_token,
+    }).catch(() => {});
+  });
+  const message = 'feat: require CLI recovery\n';
+  await writeFile(prepared.message_file, message, { flag: 'wx', mode: 0o600 });
+  await chmod(prepared.message_file, 0o600);
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    "printf 'hook-created\\n' > hook-created.txt",
+    'git add -- hook-created.txt',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+
+  const cli = await runCli('commit', {
+    repository_root: root,
+    transaction_id: prepared.transaction_id,
+    ownership_token: prepared.ownership_token,
+    message_file: prepared.message_file,
+    confirmation: {
+      ...prepared.binding,
+      message_sha256: sha256(Buffer.from(message)),
+    },
+  });
+  const response = JSON.parse(cli.stdout);
+
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '');
+  assert.equal(cli.stdout.split('\n').length, 2);
+  assert.equal(response.ok, false);
+  assert.equal(response.status, 'commit_created_recovery_required');
+  assert.equal(response.code, 'COMMIT_CREATED_RECOVERY_REQUIRED');
 });
 
 test('commit CLI emits one safe JSON line and removes its message file', async (t) => {

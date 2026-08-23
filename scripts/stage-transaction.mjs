@@ -30,6 +30,7 @@ import { deflateSync } from 'node:zlib';
 
 const SCHEMA_VERSION = 1;
 const LOOSE_OBJECT_HELPER_COMMAND = '__loose-object-helper';
+const LOOSE_OBJECT_HELPER_AUTH_ENV = 'GIT_COMMIT_ASSISTANT_INTERNAL_HELPER_AUTH';
 
 class StageTransactionError extends Error {
   constructor(code, message, details = {}) {
@@ -521,14 +522,14 @@ function stopped(code, message = 'The staging transaction stopped safely.') {
 
 function validateSelection(manifest, selectedIds) {
   const units = Array.isArray(manifest?.units) ? manifest.units : [];
-  const byId = new Map(units.map((unit) => [unit.unit_id, unit]));
   if (!Array.isArray(selectedIds) || selectedIds.length === 0
     || new Set(selectedIds).size !== selectedIds.length) {
     throw stopped('SELECTION_INVALID');
   }
-  const selected = selectedIds.map((id) => byId.get(id));
-  if (selected.some((unit) => unit === undefined
-    || !['head_to_worktree', 'untracked'].includes(unit.view))) {
+  const selectedSet = new Set(selectedIds);
+  const selected = units.filter((unit) => selectedSet.has(unit.unit_id));
+  if (selected.length !== selectedIds.length || selected.some((unit) =>
+    !['head_to_worktree', 'untracked'].includes(unit.view))) {
     throw stopped('SELECTION_UNKNOWN_OR_UNSELECTABLE');
   }
   for (let left = 0; left < selected.length; left += 1) {
@@ -842,6 +843,39 @@ function validateHelperEvent(message, phase, oid) {
   return message;
 }
 
+function helperAuthenticationTag(capability, value) {
+  return createHmac('sha256', Buffer.from(capability, 'hex'))
+    .update(canonicalJson(value))
+    .digest('hex');
+}
+
+function createHelperAuthentication(transaction, objectIdentity, oid, capability) {
+  const authentication = {
+    type: 'authenticate',
+    oid,
+    parent_pid: process.pid,
+    transaction_directory: transaction.directoryIdentity,
+    resource_directory: transaction.resourceIdentity,
+    object_directory: objectIdentity,
+  };
+  return {
+    ...authentication,
+    authentication_sha256: helperAuthenticationTag(capability, authentication),
+  };
+}
+
+function createHelperAuthorization(authentication, capability) {
+  const authorization = {
+    type: 'authorize-prefix',
+    oid: authentication.oid,
+    authentication_sha256: authentication.authentication_sha256,
+  };
+  return {
+    ...authorization,
+    authorization_sha256: helperAuthenticationTag(capability, authorization),
+  };
+}
+
 async function coordinateLooseObjectHelper(runtime, event, child, monitor) {
   const terminate = () => terminateHelper(child, monitor);
   await runtime.coordinateLooseObjectHelper?.(event, { pid: child.pid, terminate });
@@ -854,13 +888,24 @@ async function materializeLooseObject(repository, transaction, oid, objectBytes,
     repository,
     transaction.objectDirectory,
   );
-  // helper 必须先把 prefix 锚定为 cwd 并持有目录句柄；稳定 ready 复核前绝不发送对象 bytes。
+  const helperCapability = randomBytes(32).toString('hex');
+  const authentication = createHelperAuthentication(
+    transaction,
+    objectIdentity,
+    oid,
+    helperCapability,
+  );
+  // helper 先认证一次性 capability、IPC 父进程和三层事务 identity；认证前不得创建 prefix 或改权限。
   const child = spawn(
     process.execPath,
     [fileURLToPath(import.meta.url), LOOSE_OBJECT_HELPER_COMMAND, oid],
     {
       cwd: transaction.objectDirectory,
       windowsHide: true,
+      env: {
+        ...process.env,
+        [LOOSE_OBJECT_HELPER_AUTH_ENV]: helperCapability,
+      },
       stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
     },
   );
@@ -868,6 +913,22 @@ async function materializeLooseObject(repository, transaction, oid, objectBytes,
   const stderr = [];
   child.stderr.on('data', (chunk) => stderr.push(chunk));
   try {
+    await sendHelperInstruction(child, monitor, authentication);
+    const authenticated = validateHelperEvent(await monitor.next(), 'authenticated', oid);
+    if (!hasSameDirectoryIdentity(authenticated.object_directory, objectIdentity)
+      || !hasSameDirectoryIdentity(authenticated.resource_directory, transaction.resourceIdentity)
+      || !hasSameDirectoryIdentity(
+        authenticated.transaction_directory,
+        transaction.directoryIdentity,
+      )) {
+      throw stopped('TRANSACTION_IDENTITY_CHANGED');
+    }
+    await assertTransactionGeometry(repository, transaction, [transaction.objectDirectory]);
+    await sendHelperInstruction(
+      child,
+      monitor,
+      createHelperAuthorization(authentication, helperCapability),
+    );
     const prefixReady = validateHelperEvent(await monitor.next(), 'prefix-ready', oid);
     const prefixPath = path.join(transaction.objectDirectory, oid.slice(0, 2));
     await assertTransactionGeometry(
@@ -972,6 +1033,67 @@ function sendInternalHelperMessage(message) {
       else reject(error);
     });
   });
+}
+
+function helperAuthenticationFields(message) {
+  return {
+    type: message?.type,
+    oid: message?.oid,
+    parent_pid: message?.parent_pid,
+    transaction_directory: message?.transaction_directory,
+    resource_directory: message?.resource_directory,
+    object_directory: message?.object_directory,
+  };
+}
+
+function helperAuthorizationFields(message) {
+  return {
+    type: message?.type,
+    oid: message?.oid,
+    authentication_sha256: message?.authentication_sha256,
+  };
+}
+
+async function authenticateLooseObjectHelper(capability, oid) {
+  const command = await receiveHelperInstruction('authenticate');
+  const fields = helperAuthenticationFields(command);
+  if (fields.oid !== oid || fields.parent_pid !== process.ppid
+    || !timingSafeHexMatches(
+      command.authentication_sha256,
+      helperAuthenticationTag(capability, fields),
+    )) {
+    throw new Error('Loose object helper authentication failed.');
+  }
+
+  const objectIdentity = await helperDirectoryIdentity('.', true);
+  const resourceIdentity = await helperDirectoryIdentity('..', true);
+  const transactionIdentity = await helperDirectoryIdentity(path.join('..', '..'), true);
+  if (!hasSameDirectoryIdentity(objectIdentity, fields.object_directory)
+    || !hasSameDirectoryIdentity(resourceIdentity, fields.resource_directory)
+    || !hasSameDirectoryIdentity(transactionIdentity, fields.transaction_directory)
+    || path.dirname(objectIdentity.canonical) !== resourceIdentity.canonical
+    || path.dirname(resourceIdentity.canonical) !== transactionIdentity.canonical) {
+    throw new Error('Loose object helper transaction identity changed.');
+  }
+
+  await sendInternalHelperMessage({
+    type: 'event',
+    phase: 'authenticated',
+    oid,
+    object_directory: objectIdentity,
+    resource_directory: resourceIdentity,
+    transaction_directory: transactionIdentity,
+  });
+  const authorization = await receiveHelperInstruction('authorize-prefix');
+  const authorizationFields = helperAuthorizationFields(authorization);
+  if (authorizationFields.oid !== oid
+    || authorizationFields.authentication_sha256 !== command.authentication_sha256
+    || !timingSafeHexMatches(
+      authorization.authorization_sha256,
+      helperAuthenticationTag(capability, authorizationFields),
+    )) {
+    throw new Error('Loose object helper authorization failed.');
+  }
 }
 
 async function readLooseObjectHelperInput(command) {
@@ -1124,11 +1246,18 @@ async function publishLooseObjectFromAnchoredCwd(oid, compressed) {
 
 async function runLooseObjectHelper() {
   const oid = process.argv[3];
+  const helperCapability = process.env[LOOSE_OBJECT_HELPER_AUTH_ENV];
+  delete process.env[LOOSE_OBJECT_HELPER_AUTH_ENV];
   let prefixHandle;
+  let failureCode = 'HELPER_AUTHENTICATION_FAILED';
   try {
-    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid ?? '')) {
+    if (!process.connected || process.argv.length !== 4
+      || !/^[0-9a-f]{64}$/u.test(helperCapability ?? '')
+      || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(oid ?? '')) {
       throw new Error('Loose object helper received an invalid object ID.');
     }
+    await authenticateLooseObjectHelper(helperCapability, oid);
+    failureCode = 'HELPER_PROTOCOL_FAILED';
     const start = receiveHelperInstruction('start');
     const anchored = await anchorLooseObjectPrefix(oid);
     prefixHandle = anchored.directoryHandle;
@@ -1151,7 +1280,7 @@ async function runLooseObjectHelper() {
     return 0;
   } catch {
     try {
-      await sendInternalHelperMessage({ type: 'failure', oid });
+      await sendInternalHelperMessage({ type: 'failure', code: failureCode, oid });
     } catch {
       // 父进程已退出时只需让 helper 非零结束，不能再尝试任何路径清理。
     }
@@ -2192,7 +2321,7 @@ export async function prepareTransaction({
       const binding = {
         repository_sha256: digest(Buffer.from(repository.root)),
         manifest_sha256: manifest.manifest_sha256,
-        selected_unit_ids: [...selected_unit_ids],
+        selected_unit_ids: selected.map(({ unit_id }) => unit_id),
         head_oid: manifest.head_oid,
         index_sha256: manifest.index_sha256,
         index_tree_oid: manifest.index_tree_oid,
@@ -2258,6 +2387,7 @@ export async function prepareTransaction({
       };
       await writeInitialOwnedState(repository, transaction, state, ownershipToken);
       return {
+        schema_version: SCHEMA_VERSION,
         status: 'prepared',
         transaction_id: transaction.id,
         transaction_directory: transaction.directory,
@@ -4437,6 +4567,7 @@ async function runCli() {
     } else if (command === 'commit') {
       const committed = await commitTransaction(request);
       writeCliResult({ ok: committed.status === 'committed', ...committed });
+      process.exitCode = committed.status === 'committed' ? 0 : 1;
     } else {
       const prepared = await prepareTransaction(request);
       writeCliResult({ ok: true, ...prepared });
@@ -4465,7 +4596,7 @@ async function runCli() {
 
 // 仅直接执行脚本时启用单行 JSON CLI；作为模块导入不会读取 stdin 或写输出。
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  if (process.argv[2] === LOOSE_OBJECT_HELPER_COMMAND) {
+  if (process.argv[2] === LOOSE_OBJECT_HELPER_COMMAND && process.connected) {
     process.exitCode = await runLooseObjectHelper();
   } else {
     // 管道消费者提前关闭 stdout 属于正常终止，CLI 不应为 EPIPE 输出内部 stack。

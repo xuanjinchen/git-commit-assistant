@@ -10,7 +10,7 @@
 
 ## 安装
 
-将完整的 `git-commit-assistant` 目录复制到 Codex Skill 根目录。目录结构必须保持如下形式：
+先准备一个只包含两个运行时文件的 `git-commit-assistant-runtime` 目录，再把这两个文件复制到 Codex Skill 根目录。不要从开发仓库递归复制整个目录。安装后的结构必须保持如下形式：
 
 ```text
 git-commit-assistant/
@@ -19,11 +19,15 @@ git-commit-assistant/
     └── stage-transaction.mjs
 ```
 
-例如，在 PowerShell 中将目录复制到默认位置：
+例如，在 PowerShell 中从已裁剪的 runtime 目录只复制这两个文件：
 
 ```powershell
 $skillRoot = Join-Path $env:USERPROFILE '.codex\skills'
-Copy-Item -Recurse -LiteralPath '.\git-commit-assistant' -Destination $skillRoot
+$runtimeSource = Resolve-Path '.\git-commit-assistant-runtime'
+$installRoot = Join-Path $skillRoot 'git-commit-assistant'
+New-Item -ItemType Directory -Force -Path (Join-Path $installRoot 'scripts') | Out-Null
+Copy-Item -LiteralPath (Join-Path $runtimeSource 'SKILL.md') -Destination (Join-Path $installRoot 'SKILL.md')
+Copy-Item -LiteralPath (Join-Path $runtimeSource 'scripts\stage-transaction.mjs') -Destination (Join-Path $installRoot 'scripts\stage-transaction.mjs')
 ```
 
 本项目不会写入 Codex 配置、Git 配置或 Git 钩子。

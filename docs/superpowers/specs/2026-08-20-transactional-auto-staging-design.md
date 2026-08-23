@@ -3,7 +3,7 @@
 ## 状态
 
 - 日期：2026-08-20；威胁模型修订确认于 2026-08-23
-- 状态：Version 5 已实现、评测、安装，并已通过 Task 8 final review 和 Task 9 独立安装审查；本次状态措辞修正待 scoped re-review 验证与文档提交，之后由主控执行最终分支 push
+- 状态：Task 9 scoped 安装/文档复核与文档提交 `3120993` 已完成；whole-branch helper 修复会改变脚本摘要，更新安装/hash 验证、whole-branch re-review 与维护者 push 仍待完成
 - 受众：Skill 维护者与评测人员
 - 技术级别：高级
 - 关联 Skill：`git-commit-assistant`
@@ -194,15 +194,15 @@ Node.js 没有跨平台的 descriptor-bound unlink/rename；仅凭 commit object
 ### 2026-08-24 安装验证
 
 - 全局安装使用逻辑路径 `$CODEX_HOME/skills/git-commit-assistant`，目录布局精确为 `SKILL.md` 和 `scripts/stage-transaction.mjs`。
-- `SKILL.md` 的 SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`；`scripts/stage-transaction.mjs` 的 SHA-256 为 `73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671`。安装版与仓库版逐文件相等。
+- Task 9 安装时，`SKILL.md` 的 SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`，`scripts/stage-transaction.mjs` 的 SHA-256 为 `73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671`；当时安装版与仓库版逐文件相等。
 - 安装版 `inspect` smoke test 以 exit 0 完成，stdout 为单行 JSON，且仓库 snapshot 保持不变。
-- Version 5 已实现、评测并安装，且已通过 Task 8 final review 和 Task 9 独立安装审查。本次状态措辞修正待 scoped re-review 验证与文档提交；之后由主控执行最终分支 push。
+- Task 9 scoped 安装/文档复核已通过，文档提交 `3120993` 已完成。whole-branch review 后的 helper 授权修复改变仓库脚本字节，因此更新安装/hash 验证、whole-branch re-review 与维护者 push 仍待完成。
 
 ## 测试与评测
 
 ### 2026-08-23 证据聚合结论
 
-- EVAL-001～EVAL-019 的独立真实 Agent 结论与 controller 快照全部满足冻结 assertion，并绑定最终 `SKILL.md` 与事务脚本摘要。
+- EVAL-001～EVAL-019 的独立真实 Agent 结论与 controller 快照全部满足冻结 assertion，并绑定 Task 8 冻结的 `SKILL.md` 与事务脚本摘要；whole-branch helper 修复后的新脚本摘要不由这些历史 artifacts 证明。
 - EVAL-007、EVAL-008、EVAL-010 和 EVAL-011 只使用各 active fixture 的 `raw-agent.md`；`diagnostics/` 下的归档调度运行不进入正式证据。
 - EVAL-016 的普通真实 hook 拒绝路径证明单一 commit 进程、无 `--no-verify`、无重试，以及 HEAD、真实 index、worktree、主 ODB、config 和 hooks 精确恢复到基线；必要诊断只保留在安全外部恢复事务中。独立确定性回归还证明，拒绝 hook 新增 foreign dependent object/tag 或保留 create-delete reflog 时，运行时以 `OBJECT_IMPORT_CLEANUP_UNPROVEN` fail closed、保留 owned pack 并诚实报告仓库变化；该回归不冒充 EVAL-016 fixture 本身的 Agent 行为。
 - EVAL-017 只使用 `vectors/{head,index,worktree,message,script}` 五个 active vector；`EVAL-017/diagnostics` 下的无效尝试全部排除。五个 vector 均证明旧绑定失效、目标 Git commit 为 0、安全 cancel，并保留控制器制造的变化。
