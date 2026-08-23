@@ -2531,7 +2531,12 @@ test('commits selected hunks and restores unrelated staged changes', async (t) =
   assert.deepEqual(
     gitCalls.filter(({ command }) => command === 'index-pack').map(({ args }) => args),
     [
-      ['index-pack', '--stdin', '--fix-thin'],
+      [
+        'index-pack',
+        '--stdin',
+        '--fix-thin',
+        `--keep=git-commit-assistant transaction ${prepared.transaction_id}`,
+      ],
       ['index-pack', '--stdin', '--fix-thin'],
     ],
   );
@@ -3757,6 +3762,193 @@ test('replaced imported-pack keep marker survives fail-closed rejection cleanup'
     await readFile(path.join(gitDirectory, 'displaced-transaction.keep'), 'utf8'),
     `git-commit-assistant transaction ${fixture.prepared.transaction_id}\n`,
   );
+});
+
+for (const objectFormat of ['sha1', 'sha256']) {
+  test(`reject cleanup parses the atomic index-pack keep output for ${objectFormat}`, async (t) => {
+    const root = await createGitRepository(t, `${objectFormat}-rejected-import`, objectFormat);
+    await writeFile(path.join(root, 'feature.txt'), 'line 1\nline 2\nline 3\n');
+    await runGit(root, ['add', '--', 'feature.txt']);
+    await runGit(root, ['commit', '-m', `${objectFormat} baseline`]);
+    await writeFile(path.join(root, 'feature.txt'), `line 1\nselected ${objectFormat} import\nline 3\n`);
+    const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+      unit.view === 'head_to_worktree'));
+    const hookPath = path.resolve(
+      root,
+      (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+    );
+    await writeFile(hookPath, '#!/bin/sh\nexit 47\n');
+    await chmod(hookPath, 0o755);
+    const before = await snapshotRepository(root);
+    const indexPackCalls = [];
+
+    await assert.rejects(
+      commitPrepared(root, fixture, {
+        spawnGit: (repositoryRoot, args, options) => {
+          if (args[0] === 'index-pack') indexPackCalls.push([...args]);
+          return spawnRealGit(repositoryRoot, args, options);
+        },
+      }),
+      ({ code }) => code === 'COMMIT_REJECTED',
+    );
+
+    assert.deepEqual(indexPackCalls, [[
+      'index-pack',
+      '--stdin',
+      '--fix-thin',
+      `--keep=git-commit-assistant transaction ${fixture.prepared.transaction_id}`,
+    ]]);
+    assert.deepEqual(await snapshotRepository(root), before);
+  });
+}
+
+test('pre-existing imported pack and keep fail closed without starting commit', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected pre-existing pack\nline 3\n');
+  const first = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    `git update-ref refs/gca/pre-existing-pack ${first.prepared.task_tree_oid}`,
+    'exit 53',
+    '',
+  ].join('\n'));
+  await chmod(hookPath, 0o755);
+  await assert.rejects(
+    commitPrepared(root, first),
+    ({ code, recovery_code: recoveryCode }) =>
+      code === 'COMMIT_REJECTED' && recoveryCode === 'OBJECT_IMPORT_CLEANUP_UNPROVEN',
+  );
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: first.prepared.transaction_id,
+    ownership_token: first.prepared.ownership_token,
+  }, { temporaryRoot: first.temporaryRoot });
+  await runGit(root, ['update-ref', '-d', 'refs/gca/pre-existing-pack']);
+  const packDirectory = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'objects/pack'])).stdout.trim(),
+  );
+  const packBefore = await snapshotObjects(root);
+  const keepName = (await readdir(packDirectory)).find((name) => name.endsWith('.keep'));
+  assert.equal(typeof keepName, 'string');
+  const keepBefore = await readFile(path.join(packDirectory, keepName));
+
+  const second = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  await writeFile(hookPath, '#!/bin/sh\nexit 59\n');
+  await chmod(hookPath, 0o755);
+  const commitCalls = [];
+  let rejection;
+  await assert.rejects(
+    commitPrepared(root, second, {
+      spawnGit: (repositoryRoot, args, options) => {
+        if (args[0] === 'commit') commitCalls.push([...args]);
+        return spawnRealGit(repositoryRoot, args, options);
+      },
+    }),
+    (error) => {
+      rejection = error;
+      return error.code === 'OBJECT_IMPORT_FAILED';
+    },
+  );
+
+  assert.equal(rejection.repository_changed, true);
+  assert.equal(rejection.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  assert.equal(rejection.transaction_preserved, true);
+  assert.deepEqual(commitCalls, []);
+  assert.deepEqual(await snapshotObjects(root), packBefore);
+  assert.deepEqual(await readFile(path.join(packDirectory, keepName)), keepBefore);
+});
+
+test('descriptor-before-return import failure remains honest and retained', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected descriptor failure\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const before = await snapshotObjects(root);
+  const commitCalls = [];
+  let boundaryReached = false;
+  let failure;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      afterImportedPackClaim: async () => {
+        boundaryReached = true;
+        throw new Error('injected descriptor construction failure');
+      },
+      spawnGit: (repositoryRoot, args, options) => {
+        if (args[0] === 'commit') commitCalls.push([...args]);
+        return spawnRealGit(repositoryRoot, args, options);
+      },
+    }),
+    (error) => {
+      failure = error;
+      return error.code === 'OBJECT_IMPORT_FAILED';
+    },
+  );
+
+  assert.equal(boundaryReached, true);
+  assert.equal(failure.repository_changed, true);
+  assert.equal(failure.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  assert.equal(failure.transaction_preserved, true);
+  assert.deepEqual(commitCalls, []);
+  assert.notDeepEqual(await snapshotObjects(root), before);
+  await cancelTransaction({
+    repository_root: root,
+    transaction_id: fixture.prepared.transaction_id,
+    ownership_token: fixture.prepared.ownership_token,
+  }, { temporaryRoot: fixture.temporaryRoot });
+});
+
+test('same-length in-place keep rewrite is rehashed at the final unlink boundary', async (t) => {
+  const root = await repositoryWithBaseline(t);
+  await writeFile(path.join(root, 'feature.txt'), 'line 1\nselected final digest task\nline 3\n');
+  const fixture = await prepareCommitCase(t, root, (units) => units.find((unit) =>
+    unit.view === 'head_to_worktree'));
+  const hookPath = path.resolve(
+    root,
+    (await runGit(root, ['rev-parse', '--git-path', 'hooks/pre-commit'])).stdout.trim(),
+  );
+  await writeFile(hookPath, '#!/bin/sh\nexit 61\n');
+  await chmod(hookPath, 0o755);
+  let boundaryReached = false;
+  let rewrittenKeep;
+  let rewrittenBytes;
+  let rejection;
+
+  await assert.rejects(
+    commitPrepared(root, fixture, {
+      beforeOwnedPackFinalRemoval: async ({ artifacts }) => {
+        boundaryReached = true;
+        rewrittenKeep = artifacts.find(({ name }) => name.endsWith('.keep'))?.path;
+        assert.equal(typeof rewrittenKeep, 'string');
+        rewrittenBytes = await readFile(rewrittenKeep);
+        rewrittenBytes[0] ^= 0x01;
+        const handle = await open(rewrittenKeep, 'r+');
+        try {
+          await handle.write(rewrittenBytes, 0, rewrittenBytes.length, 0);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      },
+    }),
+    (error) => {
+      rejection = error;
+      return error.code === 'COMMIT_REJECTED';
+    },
+  );
+
+  assert.equal(boundaryReached, true);
+  assert.equal(rejection.repository_changed, true);
+  assert.equal(rejection.recovery_code, 'OBJECT_IMPORT_CLEANUP_UNPROVEN');
+  assert.equal(rejection.transaction_preserved, true);
+  assert.deepEqual(await readFile(rewrittenKeep), rewrittenBytes);
 });
 
 test('hook rejection redacts hook output from direct CLI results', async (t) => {

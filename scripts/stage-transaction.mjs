@@ -1,6 +1,14 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { fstatSync, lstatSync, renameSync, rmSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import {
   chmod,
   copyFile,
@@ -3424,6 +3432,7 @@ async function pipeConfirmedObjects(
   includeOid,
   excludeOid,
   claimOwnership = false,
+  importState,
 ) {
   const objectDirectory = path.join(context.resourceDirectory, 'objects');
   const mainObjectDirectory = await gitPath(repository, 'objects', runtime);
@@ -3441,6 +3450,13 @@ async function pipeConfirmedObjects(
   });
   const producerArgs = ['pack-objects', '--stdout', '--revs', '--thin'];
   const consumerArgs = ['index-pack', '--stdin', '--fix-thin'];
+  const keepClaim = `git-commit-assistant transaction ${context.state.transaction_id}`;
+  if (claimOwnership) {
+    // 从 index-pack 首次可能写入起保留未决状态；descriptor 尚未返回也不能误报仓库未变。
+    importState.mayHaveChanged = true;
+    importState.ownershipUnresolved = true;
+    consumerArgs.push(`--keep=${keepClaim}`);
+  }
   const producer = startGitProcess(repository, producerArgs, {
     env: cleanGitEnvironment({
       GIT_OBJECT_DIRECTORY: objectDirectory,
@@ -3469,51 +3485,89 @@ async function pipeConfirmedObjects(
       { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
     );
   }
-  const importedOid = Buffer.concat(consumerOutput).toString('utf8').trim().match(
-    /(?:pack|keep)?\s*([0-9a-f]{40}|[0-9a-f]{64})$/u,
+  const consumerResult = Buffer.concat(consumerOutput).toString('utf8').trim();
+  const importedOid = consumerResult.match(
+    claimOwnership
+      ? /^keep\t([0-9a-f]{40}|[0-9a-f]{64})$/u
+      : /^(?:pack|keep)\t([0-9a-f]{40}|[0-9a-f]{64})$/u,
   )?.[1];
   if (importedOid === undefined) {
     throw new StageTransactionError(
       'OBJECT_IMPORT_FAILED',
       'The confirmed transaction object pack could not be identified.',
-      { retained: true, transaction_preserved: true, transaction_id: context.state.transaction_id },
+      {
+        retained: true,
+        transaction_preserved: true,
+        transaction_id: context.state.transaction_id,
+        repository_changed: claimOwnership,
+        ...(claimOwnership ? { recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' } : {}),
+      },
     );
   }
   if (!claimOwnership) return null;
+  const packPrefix = `pack-${importedOid}`;
+  const keepName = `${packPrefix}.keep`;
+  try {
+    await runtime.afterImportedPackClaim?.({
+      packDirectory,
+      packPrefix,
+      keepPath: path.join(packDirectory, keepName),
+    });
+  } catch {
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction object pack ownership could not be verified.',
+      {
+        retained: true,
+        transaction_preserved: true,
+        transaction_id: context.state.transaction_id,
+        repository_changed: true,
+        recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN',
+      },
+    );
+  }
   const packDirectoryAfter = await captureStableDirectory(
     packDirectory,
-    () => stopped('OBJECT_IMPORT_FAILED'),
+    () => new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction object pack ownership could not be verified.',
+      { repository_changed: true, recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' },
+    ),
   );
   if (!evidenceRecordsMatch(packDirectoryBefore, packDirectoryAfter)) {
-    throw stopped('OBJECT_IMPORT_FAILED');
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction object pack ownership could not be verified.',
+      { repository_changed: true, recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' },
+    );
   }
-  const packPrefix = `pack-${importedOid}`;
   const matchingNames = (await readdir(packDirectory))
+    .filter((name) => name.startsWith(`${packPrefix}.`));
+  const preExistingNames = [...packEntriesBefore]
     .filter((name) => name.startsWith(`${packPrefix}.`));
   const unexpectedNames = matchingNames.filter((name) =>
     !['.pack', '.idx', '.rev', '.keep'].some((extension) => name === `${packPrefix}${extension}`));
-  if (unexpectedNames.length > 0 || !matchingNames.includes(`${packPrefix}.pack`)
+  if (preExistingNames.length > 0 || unexpectedNames.length > 0
+    || !matchingNames.includes(`${packPrefix}.pack`)
     || !matchingNames.includes(`${packPrefix}.idx`)) {
-    throw stopped('OBJECT_IMPORT_FAILED');
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction object pack ownership could not be verified.',
+      { repository_changed: true, recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' },
+    );
   }
-  const keepName = `${packPrefix}.keep`;
-  if (packEntriesBefore.has(keepName) || matchingNames.includes(keepName)) {
-    throw stopped('OBJECT_IMPORT_FAILED');
-  }
-  const keepBytes = Buffer.from(
-    `git-commit-assistant transaction ${context.state.transaction_id}\n`,
-  );
-  const keepPath = path.join(packDirectory, keepName);
-  await writeFile(keepPath, keepBytes, { flag: 'wx', mode: 0o600 });
-  await chmod(keepPath, 0o600);
-  const ownedNames = [...matchingNames, keepName]
-    .filter((name) => !packEntriesBefore.has(name));
+  const keepBytes = Buffer.from(`${keepClaim}\n`);
+  const ownedNames = [...matchingNames];
   const ownedArtifacts = [];
   for (const name of ownedNames) {
     const artifact = await readStableOwnedFile(
       path.join(packDirectory, name),
       packDirectoryAfter.canonical,
-      () => stopped('OBJECT_IMPORT_FAILED'),
+      () => new StageTransactionError(
+        'OBJECT_IMPORT_FAILED',
+        'The confirmed transaction object pack ownership could not be verified.',
+        { repository_changed: true, recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' },
+      ),
     );
     ownedArtifacts.push({
       name,
@@ -3523,8 +3577,16 @@ async function pipeConfirmedObjects(
       size: artifact.size,
     });
   }
-  // `.keep` 是事务对 pack 的可验证声明；拒绝时只撤销本次新建且身份稳定的同 stem 文件。
-  return {
+  const keep = ownedArtifacts.find(({ name }) => name === keepName);
+  if (keep === undefined || !timingSafeHexMatches(keep.sha256, digest(keepBytes))) {
+    throw new StageTransactionError(
+      'OBJECT_IMPORT_FAILED',
+      'The confirmed transaction object pack ownership could not be verified.',
+      { repository_changed: true, recovery_code: 'OBJECT_IMPORT_CLEANUP_UNPROVEN' },
+    );
+  }
+  // index-pack 原子创建带唯一 claim 的 `.keep`；只在无同 stem 既有条目时建立可撤销所有权。
+  const descriptor = {
     headOid: context.state.binding.head_oid,
     refsSha256: digest(refsBefore),
     packDirectory: packDirectoryAfter,
@@ -3533,9 +3595,12 @@ async function pipeConfirmedObjects(
     keepSha256: digest(keepBytes),
     ownedArtifacts,
   };
+  importState.descriptor = descriptor;
+  importState.ownershipUnresolved = false;
+  return descriptor;
 }
 
-async function importConfirmedObjects(repository, context, runtime) {
+async function importConfirmedObjects(repository, context, runtime, importState) {
   const { stdout: originalHeadTree } = await git(
     repository,
     ['rev-parse', `${context.state.binding.head_oid}^{tree}`],
@@ -3549,6 +3614,7 @@ async function importConfirmedObjects(repository, context, runtime) {
     context.state.binding.task_tree_oid,
     originalHeadTree.trim(),
     true,
+    importState,
   );
   try {
     await git(repository, [
@@ -3624,30 +3690,51 @@ async function ownedPackArtifactsStillMatch(descriptor, artifacts) {
 }
 
 function removeVerifiedPackArtifacts(artifacts) {
+  const handles = [];
   try {
     const ordered = [...artifacts].sort((left, right) => {
-      const rank = (name) => ['.keep', '.rev', '.idx', '.pack']
+      const rank = (name) => ['.rev', '.idx', '.pack', '.keep']
         .findIndex((extension) => name.endsWith(extension));
       return rank(left.name) - rank(right.name);
     });
     for (const artifact of ordered) {
-      const metadata = lstatSync(artifact.path, { bigint: true });
-      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n
+      const fd = openSync(artifact.path, 'r');
+      handles.push(fd);
+      const openedBefore = fstatSync(fd, { bigint: true });
+      const bytes = readFileSync(fd);
+      const openedAfter = fstatSync(fd, { bigint: true });
+      const onPath = lstatSync(artifact.path, { bigint: true });
+      if ([openedBefore, openedAfter, onPath].some((metadata) =>
+        !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n
         || !evidenceRecordsMatch(filesystemEvidence(metadata), artifact.identity)
-        || String(metadata.size) !== artifact.size) return false;
+        || String(metadata.size) !== artifact.size)
+        || !timingSafeHexMatches(digest(bytes), artifact.sha256)) return false;
     }
-    // 最终身份检查与逐项 unlink 间不再让出 JS 执行权；同权限隐蔽 syscall race 不在既定威胁模型内。
+    // 最终阶段在稳定句柄上同步复算摘要，随后不让出 JS 执行权；同长度原位改写也不能越过 unlink 边界。
     for (const artifact of ordered) rmSync(artifact.path, { force: false });
     return true;
   } catch {
     return false;
+  } finally {
+    for (const fd of handles) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 删除结论已 fail closed；关闭失败不允许转而删除或覆盖任何路径。
+      }
+    }
   }
 }
 
-async function releaseImportedPackRetention(descriptor) {
+async function releaseImportedPackRetention(descriptor, runtime) {
   const keep = descriptor.ownedArtifacts.find(({ name }) => name === descriptor.keepName);
   if (keep === undefined || !timingSafeHexMatches(keep.sha256, descriptor.keepSha256)
     || !await ownedPackArtifactsStillMatch(descriptor, [keep])) return false;
+  try {
+    await runtime.beforeOwnedPackFinalRemoval?.({ operation: 'release', artifacts: [keep] });
+  } catch {
+    return false;
+  }
   return removeVerifiedPackArtifacts([keep]);
 }
 
@@ -3662,6 +3749,10 @@ async function withdrawRejectedImportedPack(repository, descriptor, runtime) {
         descriptor.refsSha256,
       )) return false;
     if (!await ownedPackArtifactsStillMatch(descriptor, descriptor.ownedArtifacts)) return false;
+    await runtime.beforeOwnedPackFinalRemoval?.({
+      operation: 'withdraw',
+      artifacts: descriptor.ownedArtifacts,
+    });
     return removeVerifiedPackArtifacts(descriptor.ownedArtifacts);
   } catch {
     return false;
@@ -3887,13 +3978,20 @@ export async function commitTransaction({
   let commitStarted = false;
   let importedPack;
   let rejectedImportCleanup;
+  const importState = {
+    mayHaveChanged: false,
+    ownershipUnresolved: false,
+    descriptor: undefined,
+  };
   const warnings = [];
   const cleanupRejectedImport = async () => {
-    if (importedPack === undefined) return true;
+    const descriptor = importedPack ?? importState.descriptor;
+    if (descriptor === undefined) return !importState.mayHaveChanged;
+    if (importState.ownershipUnresolved) return false;
     if (rejectedImportCleanup === undefined) {
       rejectedImportCleanup = await withdrawRejectedImportedPack(
         context.repository,
-        importedPack,
+        descriptor,
         runtime,
       );
     }
@@ -3938,7 +4036,7 @@ export async function commitTransaction({
       await currentBinding(repository, indexPath, runtime),
     );
     await assertTransactionStillConfirmed(repository, context, runtime);
-    importedPack = await importConfirmedObjects(repository, context, runtime);
+    importedPack = await importConfirmedObjects(repository, context, runtime, importState);
     await assertIndexLockOwned(indexLock);
     assertRepositoryStillConfirmed(
       expectedConfirmation,
@@ -3973,7 +4071,7 @@ export async function commitTransaction({
     );
     const actualHead = actualHeadOutput.trim();
     if (actualHead !== context.state.binding.head_oid
-      && !await releaseImportedPackRetention(importedPack)) {
+      && !await releaseImportedPackRetention(importedPack, runtime)) {
       warnings.push('OBJECT_IMPORT_RETENTION_RELEASE_FAILED');
       result = recoveryRequired(actualHead, warnings, context);
     }
@@ -4114,7 +4212,7 @@ export async function commitTransaction({
       }
     } else {
       const importedPackCleaned = await cleanupRejectedImport();
-      error.repository_changed = !importedPackCleaned;
+      error.repository_changed = error.repository_changed === true || !importedPackCleaned;
       if (!importedPackCleaned) error.recovery_code ??= 'OBJECT_IMPORT_CLEANUP_UNPROVEN';
       primaryError = error;
     }
