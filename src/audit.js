@@ -441,7 +441,9 @@ function validatePackageEntries(entries, initialized, addIssue, scanContent) {
       continue;
     }
     const location = safeLocation('package', relativePath);
-    present.add(relativePath);
+    const ordinaryFile = entry?.type === undefined || entry.type === 'file';
+    // required runtime 只有作为普通文件入包才有效，目录或链接不能伪造其存在。
+    if (ordinaryFile) present.add(relativePath);
     const segments = relativePath.split('/');
     const [topLevel] = segments;
     if (entry?.type === 'symlink' || entry?.type === 'hardlink') {
@@ -465,7 +467,7 @@ function validatePackageEntries(entries, initialized, addIssue, scanContent) {
       || relativePath.toLowerCase().endsWith('.log')))) {
       addIssue('PACKAGE_FILE_FORBIDDEN', location);
     }
-    if ((entry?.type === undefined || entry.type === 'file') && entry?.content !== undefined) {
+    if (ordinaryFile && entry?.content !== undefined) {
       scanContent(entry.content, location);
     }
   }

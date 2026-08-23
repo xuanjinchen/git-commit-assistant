@@ -345,6 +345,7 @@ function validateLock(pkg, lock, errors) {
     && lock.version === pkg.version
     && lockRoot.name === pkg.name
     && lockRoot.version === pkg.version
+    && lockRoot.description === pkg.description
     && lockRoot.license === pkg.license
     && sameJson(lockRoot.engines, pkg.engines)
     && DEPENDENCY_KEYS.every((key) => sameJson(lockRoot[key], pkg[key]));

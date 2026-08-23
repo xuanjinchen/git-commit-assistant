@@ -350,6 +350,13 @@ test('uses the initialized archive closed set and requires both runtime files', 
     packEntries: allowed.filter(({ path: entryPath }) => entryPath !== 'package/scripts/stage-transaction.mjs'),
   });
   assert.ok(issueKeys(missing).has('PACKAGE_RUNTIME_FILE_MISSING:package:scripts/stage-transaction.mjs'));
+
+  const directory = await auditRepository(root, {
+    packEntries: allowed.map((entry) => entry.path === 'package/scripts/stage-transaction.mjs'
+      ? { path: 'package/scripts/stage-transaction.mjs/', type: 'directory' }
+      : entry),
+  });
+  assert.ok(issueKeys(directory).has('PACKAGE_RUNTIME_FILE_MISSING:package:scripts/stage-transaction.mjs'));
 });
 
 test('rejects non-portable npm archive paths', async (t) => {

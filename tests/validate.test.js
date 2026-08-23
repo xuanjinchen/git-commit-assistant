@@ -115,6 +115,7 @@ function lockJson(packageValue) {
       '': {
         name: packageValue.name,
         version: packageValue.version,
+        description: packageValue.description,
         license: packageValue.license,
         engines: packageValue.engines,
       },
@@ -463,6 +464,15 @@ test('reports invalid state and package-lock metadata', async () => {
   const codes = issueCodes((await validateRepository(root)).errors);
   assert.ok(codes.has('STATE_INVALID'));
   assert.ok(codes.has('PACKAGE_LOCK_MISMATCH'));
+});
+
+test('requires the lock root description to match package metadata', async () => {
+  const root = await createInitializedFixture();
+  const lock = lockJson(packageJson('initialized'));
+  lock.packages[''].description = 'Different runtime description';
+  await writeText(root, 'package-lock.json', `${JSON.stringify(lock, null, 2)}\n`);
+
+  assert.ok(issueCodes((await validateRepository(root)).errors).has('PACKAGE_LOCK_MISMATCH'));
 });
 
 test('validates initialized frontmatter, README, contracts, JSON, and tokens', async () => {

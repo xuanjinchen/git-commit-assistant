@@ -28,4 +28,13 @@ Use `TYPE[(SCOPE)][!]: SUBJECT` with a concise subject (normally at most 72 char
 5. A rejection, cancellation, silence, ambiguity, or message edit is not confirmation: call `cancel` and report `stopped`. If a defined checkpoint observes a changed binding before Git starts, cancel and repeat `inspect`. If Git has already started, let the sole process finish; use its actual HEAD/tree result to clean up safely or retain recovery evidence.
 6. Only a new explicit confirmation permits creating the `prepare`-reserved external message path with a safe `wx`, UTF-8, no-BOM file API, then calling `commit` with the complete message and confirmation binding.
 
+### JSON command contract
+
+Run exactly `node scripts/stage-transaction.mjs <inspect|prepare|cancel|commit>` with no extra argv and one JSON object on stdin; each command returns one JSON line. Never display `ownership_token`, internal patch data, or raw hook output.
+
+- `inspect`: send `{ "repository_root": "<Git worktree>" }`. Its successful envelope is `{ ok: true, status: "inspected", ...manifest }`; retain every manifest field unchanged (excluding only the envelope's `ok` and `status`) and select only its final/untracked `units`.
+- `prepare`: send `{ "repository_root", "manifest", "selected_unit_ids" }`, with that complete manifest and selected unit IDs. Save its `transaction_id`, `ownership_token`, `task_tree_oid`, `message_file`, and complete `binding`; use `summary.selected_unit_count` and paths only for the user-facing proposal. The token and external message path are never shown to the user.
+- `cancel`: on any non-confirmation send `{ "repository_root", "transaction_id", "ownership_token" }` from `prepare`.
+- `commit`: write the exact confirmed message to `message_file` using `wx`, UTF-8, and no BOM. SHA-256 the exact message bytes as `message_sha256`, then send `{ "repository_root", "transaction_id", "ownership_token", "message_file", "confirmation" }`. `confirmation` has exactly `head_oid`, `index_sha256`, `index_tree_oid`, `manifest_sha256`, `selected_unit_ids`, `worktree_state_sha256`, `task_tree_oid`, and `script_sha256` from `binding`, plus the computed `message_sha256`.
+
 Report `committed` with verified hash, subject, restored unrelated staged state, and no push; otherwise report `stopped` with reason, repository-change status, retained-transaction status, and one safe next step. Hooks remain enabled and untrusted; the script verifies actual HEAD/tree and retains recovery evidence when needed.
