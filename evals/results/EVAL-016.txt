@@ -1,10 +1,9 @@
 EVAL-016 hook-rejection recovery evidence
 
 Status: PASS
-Raw evidence: controller/raw-agent-proposal.md, controller/raw-agent.md, controller before/proposal/confirmation snapshots, and the retained owned recovery transaction from the isolated EVAL-016 fixture. Absolute paths, identities, object IDs, ownership data, temporary paths, hook bytes, and raw hook output are omitted.
-Deterministic regression context: `.superpowers/sdd/2026-08-20-transactional-auto-staging/task-8-final-review-fix-report.md` records the same-runtime foreign ODB/reflog RED/GREEN tests; it is not treated as Agent fixture evidence.
+Active source set: eval-workspaces/transactional-v5/EVAL-016/controller/raw-agent-proposal.md, controller/raw-agent.md, controller/before.json, controller/after-proposal.json, controller/after-confirmation.json, controller/metadata.json, and controller/prompt.txt. Every path with a diagnostics segment is excluded. Absolute paths, identities, object IDs, ownership data, temporary paths, hook bytes, and raw hook output are omitted.
 SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
-Transaction script SHA-256: 73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671
+Transaction script SHA-256: e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52
 
 Frozen prompt
 
@@ -16,7 +15,6 @@ Phase and runtime observation
 - Exact confirmation caused one hook-enabled commit attempt. The hook rejected it with COMMIT_REJECTED; no --no-verify and no retry occurred.
 - The runtime removed the external message file and retained the necessary recovery/diagnostic material in one safe owned transaction.
 - Controller snapshots prove HEAD, commit count, index bytes/tree, worktree, main ODB digest/object count, configuration, and hooks all matched baseline after rejection.
-- Separate deterministic regression evidence for this frozen runtime covers rejecting hooks that create foreign dependent objects/tags or retained create-delete reflogs: cleanup fails closed with OBJECT_IMPORT_CLEANUP_UNPROVEN, preserves the owned pack, and reports repository_changed true. This regression is not claimed as behavior exercised by this ordinary EVAL-016 Agent fixture.
 
 Assertions
 
@@ -27,7 +25,7 @@ ASSERT-004 PASS: Necessary diagnostics remained only in the safe recovery transa
 
 Before/after invariant
 
-Every controller-observed repository field matched baseline. One external recovery transaction was intentionally retained, with its message file absent.
+Every controller-observed repository field matched baseline. One external recovery transaction was intentionally retained.
 
 Metrics
 

@@ -1,9 +1,9 @@
 EVAL-018 real-index message-only evidence
 
 Status: PASS
-Raw evidence: controller/raw-agent.md and controller before/after-agent snapshots from the isolated EVAL-018 fixture. Absolute paths, identities, object IDs, and unstaged bytes are omitted.
+Active source set: eval-workspaces/transactional-v5/EVAL-018/controller/raw-agent.md, controller/before.json, controller/after-agent.json, controller/metadata.json, and controller/prompt.txt. Every path with a diagnostics segment is excluded; untracked content is outside the source set and was not inspected. Absolute paths, identities, object IDs, and unstaged bytes are omitted.
 SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
-Transaction script SHA-256: 73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671
+Transaction script SHA-256: e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52
 
 Frozen prompt
 
@@ -12,7 +12,7 @@ Frozen prompt
 Phase and runtime observation
 
 - The Agent analyzed only the real staged snapshot and ignored the named unstaged/untracked material.
-- It produced the complete subject-only candidate feat: add message-only export for the one simple staged fixture.
+- It produced the complete subject-only candidate feat: add staged message-only export for the one simple staged fixture.
 - Inspect/prepare/commit were not called; no staging or repository mutation occurred.
 
 Assertions

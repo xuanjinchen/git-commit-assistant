@@ -1,9 +1,9 @@
 EVAL-017 observable binding-invalidation evidence
 
 Status: PASS
-Raw evidence: only the five active EVAL-017 vectors under vectors/head, vectors/index, vectors/worktree, vectors/message, and vectors/script, using each vector's controller/raw-agent-phase1.md, raw-agent-phase2.md, observable-checkpoint.json, action.ps1, and proposal/mutation/after-cancel snapshots. Every file under EVAL-017/diagnostics is an invalid attempt and is excluded. Absolute paths, identities, object IDs, tokens, temporary paths, and patch bytes are omitted.
+Active source set: only eval-workspaces/transactional-v5/EVAL-017/vectors/head, vectors/index, vectors/worktree, vectors/message, and vectors/script, using each vector's controller/raw-agent-phase1.md, controller/raw-agent-phase2.md, controller/observable-checkpoint.json, controller/before.json, controller/after-proposal.json, controller/after-checkpoint-mutation.json, controller/after-agent-cancel.json, controller/approved-message.txt, controller/metadata.json, and controller/prompt.txt. Every path with a diagnostics segment is excluded. Absolute paths, identities, object IDs, tokens, temporary paths, and patch bytes are omitted.
 SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
-Transaction script SHA-256: 73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671
+Transaction script SHA-256: e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52
 
 Frozen prompt
 
@@ -13,7 +13,8 @@ Phase and runtime observation
 
 - Five fresh active vectors prepared the same current-task unit and candidate, then retained exactly one controller-owned observable change through the defined checkpoint immediately before commit invocation.
 - HEAD vector: the controller added one non-task commit. Index vector: the controller retained one staged non-task path. Worktree vector: the controller retained appended task-path bytes. Message vector: the approved-message digest changed. Script vector: only the disposable runtime copy changed.
-- Each phase-2 Agent invalidated the old binding, created zero target Git commits, safely cancelled the owned transaction, required new inspection, and preserved the controller state.
+- Head, worktree, and script returned CONFIRMATION_STALE; index also returned exactly CONFIRMATION_STALE rather than MESSAGE_FILE_INVALID. Message was rejected Agent-side as APPROVED_MESSAGE_CHANGED before commit invocation.
+- Each old transaction created zero target commits, was safely cancelled, required new inspection, and preserved the controller state. The script-vector cancel used the trusted original e5fc1c runtime while the mutated disposable copy remained changed.
 
 Assertions
 
@@ -24,7 +25,7 @@ ASSERT-004 PASS: All five vectors required a new inspect/prepare cycle and new e
 
 Before/after invariant
 
-For every vector, the after-cancel snapshot matched its after-checkpoint-mutation snapshot for HEAD, index, worktree, ODB, configuration, and hooks. The old transaction added no further commit.
+For every vector, before matched after-proposal and after-checkpoint-mutation matched after-agent-cancel for HEAD, index, worktree, ODB, configuration, and hooks. Message SHA-256 changed from 71597bb17a5ec2a9e3c380fee82395003fb578b642d0ad97584afff60a69b30d to 0ab3e64b1fd78b6cc4ee3a9f656c6349f4039ab4a4353c020ee9a584e66eeeb1. The disposable script remained 3f61e0aadda2449813f7caf26f8f20258c009bb13a7cf29fe2b819fbf4a34fe9 after trusted-original cancellation. The old transactions added no target commit.
 
 Metrics
 

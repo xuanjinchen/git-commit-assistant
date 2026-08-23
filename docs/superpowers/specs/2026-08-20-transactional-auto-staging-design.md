@@ -3,7 +3,7 @@
 ## 状态
 
 - 日期：2026-08-20；威胁模型修订确认于 2026-08-23
-- 状态：Task 9 scoped 安装/文档复核与文档提交 `3120993` 已完成；whole-branch helper 修复会改变脚本摘要，更新安装/hash 验证、whole-branch re-review 与维护者 push 仍待完成
+- 状态：Version 5 实现、final-runtime 真实 Agent 证据、最终全局安装/hash 验证与 installed smoke 已闭环；whole-branch re-review 与维护者 push 仍待完成
 - 受众：Skill 维护者与评测人员
 - 技术级别：高级
 - 关联 Skill：`git-commit-assistant`
@@ -194,18 +194,20 @@ Node.js 没有跨平台的 descriptor-bound unlink/rename；仅凭 commit object
 ### 2026-08-24 安装验证
 
 - 全局安装使用逻辑路径 `$CODEX_HOME/skills/git-commit-assistant`，目录布局精确为 `SKILL.md` 和 `scripts/stage-transaction.mjs`。
-- Task 9 安装时，`SKILL.md` 的 SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`，`scripts/stage-transaction.mjs` 的 SHA-256 为 `73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671`；当时安装版与仓库版逐文件相等。
-- 安装版 `inspect` smoke test 以 exit 0 完成，stdout 为单行 JSON，且仓库 snapshot 保持不变。
-- Task 9 scoped 安装/文档复核已通过，文档提交 `3120993` 已完成。whole-branch review 后的 helper 授权修复改变仓库脚本字节，因此更新安装/hash 验证、whole-branch re-review 与维护者 push 仍待完成。
+- 历史 Task 9 安装时，`SKILL.md` 的 SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`，`scripts/stage-transaction.mjs` 的 SHA-256 为 `73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671`；当时安装版与仓库版逐文件相等。该摘要只记录早期安装，不再代表当前全局安装。
+- 最终重装后的 `SKILL.md` SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`，`scripts/stage-transaction.mjs` SHA-256 为 `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`；安装版逐文件等于仓库版。
+- 最终安装版 `inspect` smoke test 以 exit 0 完成，stdout 为单行 JSON；隔离仓库的 HEAD、index、status 与主 ODB 均保持不变。
+- 一次失败安装尝试留下的临时备份在核验后已清理。最终全局安装/hash 验证与 installed smoke 已闭环；whole-branch re-review 与维护者 push 仍待完成。
 
 ## 测试与评测
 
-### 2026-08-23 证据聚合结论
+### 2026-08-24 final-runtime 证据聚合结论
 
-- EVAL-001～EVAL-019 的独立真实 Agent 结论与 controller 快照全部满足冻结 assertion，并绑定 Task 8 冻结的 `SKILL.md` 与事务脚本摘要；whole-branch helper 修复后的新脚本摘要不由这些历史 artifacts 证明。
-- EVAL-007、EVAL-008、EVAL-010 和 EVAL-011 只使用各 active fixture 的 `raw-agent.md`；`diagnostics/` 下的归档调度运行不进入正式证据。
+- EVAL-001～EVAL-019 的独立真实 Agent 结论与 controller 快照全部满足冻结 assertion，并绑定 `SKILL.md` SHA-256 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` 与事务脚本 SHA-256 `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`。
+- 每个 artifact 的 source set 只列当前 active fixture path，并明确排除所有含 `diagnostics` 路径段的文件。EVAL-011 只使用 current active rerun，不使用先前 subject-only 运行。
+- EVAL-001 在正式 proposal 前有三次无副作用 harness 拒绝；formal raw report 与 canonical snapshot 全部完成后，一次过宽验证才误读排除路径。两者都未改变封存证据，只作为程序性 concern 保留。
 - EVAL-016 的普通真实 hook 拒绝路径证明单一 commit 进程、无 `--no-verify`、无重试，以及 HEAD、真实 index、worktree、主 ODB、config 和 hooks 精确恢复到基线；必要诊断只保留在安全外部恢复事务中。独立确定性回归还证明，拒绝 hook 新增 foreign dependent object/tag 或保留 create-delete reflog 时，运行时以 `OBJECT_IMPORT_CLEANUP_UNPROVEN` fail closed、保留 owned pack 并诚实报告仓库变化；该回归不冒充 EVAL-016 fixture 本身的 Agent 行为。
-- EVAL-017 只使用 `vectors/{head,index,worktree,message,script}` 五个 active vector；`EVAL-017/diagnostics` 下的无效尝试全部排除。五个 vector 均证明旧绑定失效、目标 Git commit 为 0、安全 cancel，并保留控制器制造的变化。
+- EVAL-017 只使用 `vectors/{head,index,worktree,message,script}` 五个 active vector。每个 vector 均有 before、after-proposal、after-checkpoint-mutation、after-agent-cancel；before 等于 proposal，mutation 等于 cancel。index 明确返回 `CONFIRMATION_STALE`，message 的 approved-message SHA-256 从 `71597bb17a5ec2a9e3c380fee82395003fb578b642d0ad97584afff60a69b30d` 变为 `0ab3e64b1fd78b6cc4ee3a9f656c6349f4039ab4a4353c020ee9a584e66eeeb1`，script 使用 trusted original `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52` cancel，并保留 disposable mutation `3f61e0aadda2449813f7caf26f8f20258c009bb13a7cf29fe2b819fbf4a34fe9`。五个旧事务目标提交总数为 0，控制器变化全部保留。
 - EVAL-012 正式证据只到 `awaiting-confirmation`，没有发送确认、取消或提交。EVAL-015 只证明本正式 case 拥有的事务被安全取消；不对两笔历史 EVAL-015 事务、旧 EVAL-012 事务或仓库外 recovery bundle 声称清理。
 - 冻结 `SKILL.md` 按仓库算法测得 1,734/1,800 tokens。十九份脱敏结果文件各自拥有独立 SHA-256，Evidence Contract v1 已进入 ready。
 ### 确定性测试

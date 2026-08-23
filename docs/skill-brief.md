@@ -2,7 +2,9 @@
 
 ## Requirement Version
 
-Version 5, revised and confirmed 2026-08-23, is complete. Nineteen independent real-Agent cases and controller snapshots pass against the final frozen runtime; ordinary hook rejection restores the main ODB to baseline, while deterministic foreign-object and reflog regressions fail closed and preserve the owned pack when cleanup cannot be proven. Recovery diagnostics remain externally isolated and the measured prompt budget is within its limit. Version 4 evidence remains a historical baseline.
+Version 5, revised and confirmed 2026-08-23, is complete. On 2026-08-24, nineteen independent real-Agent cases and controller snapshots passed against frozen `SKILL.md` SHA-256 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and transaction-script SHA-256 `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`. Formal source sets contain only the current active fixture paths and exclude every `diagnostics` path. Ordinary hook rejection restores the main ODB to baseline, while deterministic foreign-object and reflog regressions fail closed and preserve the owned pack when cleanup cannot be proven. The unchanged Skill remains within its previously valid 1,734/1,800 prompt budget. Version 4 evidence remains a historical baseline.
+
+On 2026-08-24, the main controller synchronized the global installation at `$CODEX_HOME/skills/git-commit-assistant` to the final frozen runtime. Its exact two-file layout is `SKILL.md` and `scripts/stage-transaction.mjs`; the installed SHA-256 values are `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`, and each installed file equals the repository version. The installed `inspect` smoke exited 0 with single-line JSON while the isolated repository's HEAD, index, status, and main ODB remained unchanged. Temporary backups from the failed installation attempt were verified and removed.
 
 ## Objective
 
@@ -142,7 +144,7 @@ An active same-privilege adversary that precisely races between two operating-sy
     },
     "scripts": {
       "status": "enabled",
-      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:61e9a790a87e994d2be4aeb931a5dcbd4b19001e9168b4178cbe8bc7a06da03c",
+      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:a78e3db4f22bfa86ef10381d3082b0cb5dab0356465fe95bafc34f3690c57c23",
       "unblock_condition": ""
     },
     "assets": {
@@ -152,7 +154,7 @@ An active same-privilege adversary that precisely races between two operating-sy
     },
     "implicit-trigger": {
       "status": "enabled",
-      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:3e6952e34392ed59848389fe2dfbd152154531b53ecd17fdb7cef963b2b84c6d",
+      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:a04f80aa2586eb4a8dd6dc71ff76c5770de85aea5bef1175270d039e15d7cb0a",
       "unblock_condition": ""
     },
     "multi-agent": {

@@ -147,8 +147,8 @@ Record requirement interpretations and superseding decisions without rewriting h
       "id": "DEC-018",
       "status": "active",
       "scope": "delivery evidence",
-      "decision": "Close Version 5 as ready only after all nineteen independent Agent/controller cases pass against the final runtime hashes, ordinary hook-rejection cleanup restores the main ODB exactly, foreign-object or reflog mutation makes cleanup fail closed with the owned pack preserved, and the conservative Skill prompt estimate remains within 1,800 tokens.",
-      "evidence": "artifact:evals/results/EVAL-016.txt#sha256:62de78037c32dd02bcc38a9f8758fd8a02ba8bc7503b1d455c34eeb789e78f1e; artifact:evals/results/prompt-budget.txt#sha256:7b64f8ce2146ff781f2f5b9e5df6baa8193f7ea214add6b6d36e3e0c08f4fc2b",
+      "decision": "Close Version 5 as ready only after all nineteen independent active Agent/controller cases pass against SKILL.md SHA-256 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914 and transaction-script SHA-256 e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52, every formal source set excludes diagnostics, ordinary hook-rejection cleanup restores the main ODB exactly, foreign-object or reflog mutation makes cleanup fail closed with the owned pack preserved, and the conservative Skill prompt estimate remains within 1,800 tokens. Harmless harness rejections before a fresh sealed run and evidence isolation mistakes strictly after sealing remain procedural concerns rather than invalidators when they cannot change any formal decision, raw report, or canonical snapshot.",
+      "evidence": "artifact:evals/results/EVAL-016.txt#sha256:c88c7c54130a833baeaaa584f5090664e31b4d7dc403b9077fc7266c1ee75cbe; artifact:evals/results/EVAL-017.txt#sha256:6a96aa33e7788033aa5f464bb26af709200fb16933c92082a0b74f83aad360b9; artifact:evals/results/prompt-budget.txt#sha256:7b64f8ce2146ff781f2f5b9e5df6baa8193f7ea214add6b6d36e3e0c08f4fc2b",
       "supersedes": "DEC-017"
     }
   ]
