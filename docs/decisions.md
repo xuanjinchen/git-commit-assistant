@@ -126,6 +126,14 @@ Record requirement interpretations and superseding decisions without rewriting h
       "decision": "After success atomically install an index based on the actual new HEAD with original unrelated staged changes; on cancellation, rejection, stale binding, or failure preserve all user bytes and retain recovery evidence whenever automatic cleanup is unsafe.",
       "evidence": "User confirmed cancellation, failure, success, and unrelated-stage restoration semantics.",
       "supersedes": null
+    },
+    {
+      "id": "DEC-016",
+      "status": "active",
+      "scope": "concurrency threat model",
+      "decision": "Clarify only the concurrency-related guarantees of DEC-004, DEC-014, and DEC-015 with portable cooperative concurrency: stop when a bound or protected content, identity, path, ownership, or metadata change is observable at a defined validation or recovery checkpoint, and preserve foreign state when ownership is uncertain. Do not claim protection against a deliberately hostile same-privilege process that races inside an individual filesystem-syscall gap and uses native APIs to erase every observable trace; do not add a platform-native helper for that residual risk. Hooks remain untrusted, observable hook mutations and post-commit actual HEAD/tree verification remain in scope, and all non-concurrency safeguards in those decisions remain unchanged.",
+      "evidence": "User approved the review-driven portable threat-model revision on 2026-08-23 after independent Round 4 review demonstrated that Node.js lacks cross-platform descriptor-bound unlink/rename and that child-visible path, identity, and timestamp barriers alone cannot prove which tree the parent Git process loaded after hooks before commit-object creation.",
+      "supersedes": null
     }
   ]
 }

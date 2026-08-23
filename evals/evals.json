@@ -348,7 +348,7 @@
       "category": "boundary",
       "prompt": "准备提交后我可能继续修改 HEAD、暂存区或工作区；旧确认绝不能提交已经变化的状态。",
       "assertions": [
-        { "id": "ASSERT-001", "text": "Any changed HEAD, index, worktree, message, or script binding invalidates confirmation." },
+        { "id": "ASSERT-001", "text": "A changed HEAD, index, worktree, message, or script binding that remains observable at a defined validation checkpoint before commit-object creation invalidates confirmation." },
         { "id": "ASSERT-002", "text": "The old transaction creates no commit." },
         { "id": "ASSERT-003", "text": "Concurrent content is not overwritten by the old snapshot." },
         { "id": "ASSERT-004", "text": "The workflow requires a new inspection." }

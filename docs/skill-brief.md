@@ -2,7 +2,7 @@
 
 ## Requirement Version
 
-Version 5, confirmed 2026-08-20. Work restarted to implement transactional hunk-level preparation for explicit commit requests; the Version 4 evidence remains a historical baseline and all affected runtime evaluations are frozen pending re-execution.
+Version 5, revised and confirmed 2026-08-23. Work continues with a portable cooperative-concurrency threat model for transactional hunk-level preparation; the Version 4 evidence remains a historical baseline and all affected runtime evaluations are frozen pending re-execution.
 
 ## Objective
 
@@ -18,7 +18,13 @@ Return a complete candidate and task-selection summary, or a safe stop reason. A
 
 ## Non-goals
 
-Do not alter the real index before confirmation; do not amend, sign, push, create tags or releases, publish or upload packages, rewrite history, install or edit hooks, write local or global Git or Codex configuration, or call an external model, API, or delegated agent. Explicit commit requests may prepare selected current-task manifest units only in an owned external transaction. A combined request stops before inspection, preparation, or commit and requires a commit-only scope.
+Do not alter the real index before confirmation; do not amend, sign, push, create tags or releases, publish or upload packages, rewrite history, install or edit hooks, write local or global Git or Codex configuration, or call an external model, API, or delegated agent. Explicit commit requests may prepare selected current-task manifest units only in an owned external transaction. A combined request stops before inspection, preparation, or commit and requires a commit-only scope. The portable runtime does not claim protection against a deliberately hostile same-privilege process that interposes in an individual filesystem-syscall gap and uses native APIs to restore every observable path identity and timestamp; no native platform helper is added for that adversarial case.
+
+## Concurrency Threat Model
+
+The runtime protects cooperative concurrency: ordinary Git commands, user actions, hooks, and other processes when their change to bound or protected content, object identity, path state, ownership evidence, or filesystem metadata is observable at a defined validation or recovery checkpoint. It fails closed on those checkpoint observations, preserves foreign locks and recoverable bytes when ownership is uncertain, and never overwrites worktree content to hide a conflict. Hooks remain untrusted and do not receive a broader exemption.
+
+An active same-privilege adversary that precisely races between two operating-system calls and then erases every observable trace with native APIs is outside the portable contract. This residual risk qualifies concurrency and lock guarantees throughout Version 5; deterministic tests must still cover every recorded, in-scope, reproducible observable replacement window and must not present metadata barriers as proof against the excluded adversary.
 
 ## Path Mapping
 
@@ -39,6 +45,7 @@ Do not alter the real index before confirmation; do not amend, sign, push, creat
 - `CONFLICT-001` is resolved: Version 3 allowed a body only for reasons or durable constraints, while Version 4 requires concise implementation-point bullets for coherent multi-change or complex business changes. Version 4 supersedes the narrower rule.
 - `CONFLICT-002` is resolved: Version 4 prohibited staging, unstaging, and splitting, while Version 5 requires an explicit commit request to prepare current-task hunks.
 - `CONFLICT-003` is resolved: the Version 4 single-file runtime conflicts with Version 5's deterministic index transaction.
+- `CONFLICT-004` is resolved: the prior plan implied absolute protection against same-privilege adversarial replacement between filesystem calls, but a portable Node.js runtime has no cross-platform descriptor-bound unlink or rename primitive and cannot prove, only from child-visible path, identity, and timestamp evidence before commit creation, which tree the parent Git process already loaded after hooks.
 
 <!-- scaffold-contract:skill-brief:v1 -->
 ```json
@@ -63,6 +70,12 @@ Do not alter the real index before confirmation; do not amend, sign, push, creat
       "summary": "Version 4 单文件运行时与 Version 5 确定性索引事务不兼容。",
       "status": "resolved",
       "resolution": "安装单元改为 SKILL.md 与 scripts/stage-transaction.mjs，脚本不解释业务意图。"
+    },
+    {
+      "id": "CONFLICT-004",
+      "summary": "原计划隐含要求跨平台 Node.js 运行时绝对防御同权限进程在文件系统调用间隙中的主动替换，并仅凭提交创建前对子进程可见的路径、身份和时间证据证明父 Git 在 hook 后已载入的内存 tree。",
+      "status": "resolved",
+      "resolution": "采用可移植 cooperative/observable concurrency 威胁模型：继续拒绝绑定或受保护状态在定义验证/恢复检查点可观察到的并发变化和所有权异常；把能精确命中 syscall 间隙并用原生 API 擦除全部证据的同权限主动对抗列为剩余风险，不引入平台原生 helper。"
     }
   ],
   "acceptance_criteria": [
@@ -74,14 +87,14 @@ Do not alter the real index before confirmation; do not amend, sign, push, creat
     },
     {
       "id": "REQ-002",
-      "requirement": "No commit occurs before a second confirmation, and confirmation is invalidated whenever a bound HEAD, index, manifest, selection, worktree, task tree, script, or complete message digest changes.",
-      "verification": "EVAL-012, EVAL-017, and deterministic transaction tests verify the confirmation binding and zero real-side-effect preparation.",
+      "requirement": "No commit occurs before a second confirmation. Any change to a bound HEAD, index, manifest, selection, worktree, task tree, script, or complete message digest that is observable at a defined validation checkpoint before commit-object creation invalidates that confirmation; after the single Git process starts, actual HEAD/tree and recovery evidence also govern hook effects and final reporting.",
+      "verification": "EVAL-012, EVAL-017, and deterministic transaction tests verify confirmation checkpoints, post-spawn actual-tree handling, and zero real-side-effect preparation.",
       "status": "pending"
     },
     {
       "id": "REQ-003",
-      "requirement": "The Skill stops without weakening safeguards for ambiguous task hunks, special Git state, likely sensitive material, concurrent changes, or hook rejection.",
-      "verification": "EVAL-013, EVAL-015, EVAL-016, EVAL-017, and deterministic transaction tests verify safe stops and protected user state.",
+      "requirement": "Within the declared cooperative-concurrency threat model, the Skill stops without weakening safeguards for ambiguous task hunks, special Git state, likely sensitive material, observable concurrent changes, or hook rejection.",
+      "verification": "EVAL-013, EVAL-015, EVAL-016, EVAL-017, and deterministic transaction tests verify safe stops, observable race handling, and protected user state.",
       "status": "pending"
     },
     {
@@ -104,20 +117,20 @@ Do not alter the real index before confirmation; do not amend, sign, push, creat
     },
     {
       "id": "REQ-007",
-      "requirement": "二次确认前真实索引、工作区和主对象库不变，确认绑定 HEAD、索引、manifest、选择、工作区、任务树、脚本和消息摘要。",
-      "verification": "EVAL-012、EVAL-017 和确定性事务测试验证 prepare 零真实副作用与绑定失效。",
+      "requirement": "二次确认前真实索引、工作区和主对象库不变；commit object 创建前在定义验证检查点可观察到的 HEAD、索引、manifest、选择、工作区、任务树、脚本或消息摘要变化使确认失效，唯一 Git 进程启动后还必须按实际 HEAD/tree 和恢复证据处理 hook 影响与最终结果。",
+      "verification": "EVAL-012、EVAL-017 和确定性事务测试验证 prepare 零真实副作用、确认检查点绑定失效与 Git 启动后的 actual-tree 恢复。",
       "status": "pending"
     },
     {
       "id": "REQ-008",
-      "requirement": "成功提交只包含已选 hunk，并把原有无关 staged 内容恢复为 staged；取消、拒绝和失败不丢失用户内容。",
-      "verification": "EVAL-013～EVAL-016 和确定性事务测试验证成功、取消、hook 拒绝与恢复。",
+      "requirement": "在已声明的 cooperative-concurrency 威胁模型内，成功提交只包含已选 hunk，并把原有无关 staged 内容恢复为 staged；取消、拒绝和失败不丢失用户内容。",
+      "verification": "EVAL-013～EVAL-017 和确定性事务测试验证成功、取消、hook 拒绝、可观察并发失效与恢复。",
       "status": "pending"
     },
     {
       "id": "REQ-009",
-      "requirement": "事务运行时只增加受审计脚本，不扩大签名、hook 绕过、amend、push、tag、release、发布、上传、历史或配置写入权限。",
-      "verification": "EVAL-016、EVAL-019、归档审计和 CLI/Git 进程测试验证权限边界。",
+      "requirement": "事务运行时只增加受审计脚本，不扩大签名、hook 绕过、amend、push、tag、release、发布、上传、历史或配置写入权限，也不引入平台原生 helper、driver 或新增运行时依赖。",
+      "verification": "EVAL-016、EVAL-019、归档审计、依赖检查和 CLI/Git 进程测试验证权限与可移植运行时边界。",
       "status": "pending"
     }
   ],

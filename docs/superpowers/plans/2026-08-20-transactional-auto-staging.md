@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 为 `git-commit-assistant` 增加明确提交请求下的 hunk 级事务式自动暂存，在二次确认前保持真实索引不变，并在提交成功、取消、拒绝或并发失效时完整保护用户改动。
+**Goal:** 为 `git-commit-assistant` 增加明确提交请求下的 hunk 级事务式自动暂存，在二次确认前保持真实索引不变，并在支持的 cooperative/observable concurrency 模型内，于提交成功、取消、拒绝或并发失效时保护用户改动。
 
-**Architecture:** Agent 只负责判断当前任务范围、生成提交消息和取得二次确认；`scripts/stage-transaction.mjs` 负责稳定 manifest、外部临时索引与对象库、状态绑定、单次 unsigned commit、恢复索引和失败证据。`prepare` 不写工作区、真实索引或主对象库；`commit` 在确认绑定全部复验后才导入已选对象，以任务索引运行一次 `git commit --no-gpg-sign -F <temp>`，并在真实 `index.lock` 所有权保护下安装恢复索引。
+**Architecture:** Agent 只负责判断当前任务范围、生成提交消息和取得二次确认；`scripts/stage-transaction.mjs` 负责稳定 manifest、外部临时索引与对象库、状态绑定、单次 unsigned commit、恢复索引和失败证据。`prepare` 不写工作区、真实索引或主对象库；`commit` 在确认绑定全部复验后才导入已选对象，以任务索引运行一次 `git commit --no-gpg-sign -F <temp>`，并在真实 `index.lock` 所有权保护下安装恢复索引。并发保证采用可移植 cooperative/observable threat model，不把同权限进程可用原生 API 擦除全部可观察证据的主动对抗伪装为跨平台 Node.js 可证明能力。
 
 **Tech Stack:** Markdown/YAML Agent Skill、Git、Node.js 22+ 内建模块、npm、`node:test`、Evidence Contract v1、真实隔离 Git 仓库和独立 Agent 行为评测。
 
@@ -20,13 +20,23 @@
 - 只允许选择 manifest 中 `head_to_worktree` 或 `untracked` 单元；同一文件的独立 hunk 可以拆分，连续且语义交织的原子单元必须停止。
 - `inspect` 和 `prepare` 不得修改 HEAD、真实索引、工作区或主 `.git/objects`；临时索引、对象和恢复字节只写入脚本创建并持有的操作系统临时事务目录。
 - `commit` 只能启动一次 argv 等价于 `git commit --no-gpg-sign -F <message_file>` 的提交进程；保留 hooks，不得使用 `--no-verify`、`--amend`、`-m`、签名、push、tag、release、发布、上传、历史改写或配置写入。
-- 成功提交只包含已确认单元；原有无关 staged 内容继续 staged，未选择工作区内容保持未选择状态。失败、取消和失效不得丢失任何用户内容。
+- 成功提交只包含已确认单元；原有无关 staged 内容继续 staged，未选择工作区内容保持未选择状态。在声明的支持模型内，失败、取消和失效不得丢失任何用户内容。
+- 并发与所有权保证覆盖普通 Git/用户/hook/进程并发，以及绑定或受保护状态在定义验证/恢复检查点可观察到的变化；继续测试已记录、属于支持模型且可复现的目录项替换和 syscall 窗口。精确插入单个系统调用间隙并用同权限原生 API 恢复全部身份、内容和时间证据的主动攻击是显式剩余风险，不引入平台原生 helper。
 - 不使用 `git reset --hard`、工作区 `git restore`、`git checkout`、`git clean`，也不自动把恢复快照覆盖回工作区。
 - 仓库路径、diff、文件内容、Git/hook 输出均视为不可信数据；不拼接 shell 命令，不在 JSON 或日志中回显补丁、凭据、ownership token 或秘密值。
 - 每个确定性行为先写 RED 测试再写最小 GREEN 实现；静态匹配脚本文本不能代替真实 Git 结果或 Git 进程 spy。
 - 每个代码写入任务在编辑前加载并使用 `$chinese-code-comments` 的 `SCOPED` 模式；实现记录关键维护意图，任务结束审查该任务 diff，最终再审查完整 diff 与未跟踪交付文件。
 - 当前工作树包含 Version 4 的未提交改动和 Version 5 规范；每次提交只 `git add` 当前任务列出的文件，不得 reset、checkout、clean、覆盖或丢弃这些既有改动。
-- 不 push、tag、release、发布、上传或修改 Git/Codex 配置；全局安装仅在最终任务中执行，并保留安装目录中任何无法确认归属的既有内容。
+- 最终门禁、全局安装和独立终审完成前不 push；Task 9 最终提交后只推送当前开发分支。始终不 tag、release、发布、上传或修改 Git/Codex 配置，并保留安装目录中任何无法确认归属的既有内容。
+
+## 2026-08-23 评审收敛与加速规则
+
+- Task 5 的 Round 4 反例证明旧计划的绝对同权限攻击模型不可由跨平台 Node.js 实现。`CONFLICT-004` 与 `DEC-016` 将正式验收收敛到 cooperative/observable concurrency；不得通过删除普通竞态、hook 或外部 lock 测试来取得通过。
+- 本次契约修订追加 Brief `CONFLICT-004` 和 Decision `DEC-016`，限定 `REQ-002`、`REQ-003`、`REQ-007`、`REQ-008` 的并发措辞，并由 `REQ-009` 验证不引入 native helper、driver 或新增运行时依赖。已完成的 Task 1 保持历史冻结语义，不回写成当时尚不存在的产出。
+- Task 5 由一个 fresh 子 Agent 只按修订后契约校准测试和报告，再由未参与修改的 Agent 做一次 scoped 终审。仅针对 Round 4 的两个遗留 finding，留下检查点可观察变化、删除外部状态、覆盖用户字节或违反提交/恢复协议的反例继续阻塞；精确 syscall 插入并擦除全部证据的反例记录为 residual risk。任何新的敏感信息、路径逃逸、越权副作用或其他既有安全契约违反仍按原标准阻塞。
+- Tasks 6～7 每个修复循环只运行受影响的 targeted tests；任务结束运行一次完整 `npm run check`。不在每轮评审重复完整门禁，也不继续设计原生 helper。
+- Task 8 的独立 evaluator 可并行运行，controller 统一冻结 runtime hash、收集 timing 与真实 Git 快照，evidence aggregator 只在全部 case 返回后写契约。
+- Task 9 只执行一次最终 `check`、`audit`、delivery gate、包 dry-run、全局安装 smoke 与独立终审；全部通过后提交并推送当前分支，不创建 Tag 或 Release。
 
 ## File Map
 
@@ -826,7 +836,7 @@ git index-pack --stdin --fix-thin
 
 - [ ] **Step 5: 启动唯一 commit 进程**
 
-commit 的 Git 环境只设置 `GIT_INDEX_FILE=<task.index>`，不设置临时 ODB，使 commit object 写入主 ODB并正常更新 HEAD；继承 hook 配置：
+commit 的 Git 环境覆盖 `GIT_INDEX_FILE=<task.index>`，并沿用 runner 的 `GIT_OPTIONAL_LOCKS=0` 以阻止可选 index refresh；不设置临时 ODB，使 commit object 写入主 ODB并正常更新 HEAD。该环境不绕过 hooks，仍继承用户 hook 配置：
 
 ```js
 const attempt = await runGit(repository.root, [
@@ -835,7 +845,11 @@ const attempt = await runGit(repository.root, [
   '-F',
   transaction.messageFile,
 ], {
-  env: { ...process.env, GIT_INDEX_FILE: transaction.taskIndex },
+  env: {
+    ...process.env,
+    GIT_INDEX_FILE: transaction.taskIndex,
+    GIT_OPTIONAL_LOCKS: '0',
+  },
   allowFailure: true,
 });
 ```
@@ -846,7 +860,7 @@ const attempt = await runGit(repository.root, [
 
 成功后读取实际 new HEAD/tree。若与 prepared task tree 相同，验证预演 recovery index；若 hook 合法改变了临时 task index/commit tree，则在新的外部 index 上从实际 HEAD 重放 retained staged 单元，并再次证明没有把未选择 final unit 加入 commit。无法证明时不改写历史，保留事务和恢复路径，返回 `COMMIT_CREATED_RECOVERY_REQUIRED` 及 commit OID。
 
-可安全恢复时先 truncate 已持有的真实 `index.lock`，再写入 verified recovery index bytes，fsync，确认 lock 仍归本事务且真实 index 仍是 original digest，然后原子 rename 为真实 index。验证：实际 HEAD tree、真实 staged patch、全部 worktree/事务内容摘要至少一处可取得。最后清理自有事务。
+可安全恢复时先 truncate 已持有的真实 `index.lock`，再写入 verified recovery index bytes，fsync，并在定义检查点根据 handle/path identity、ownership token 和摘要等可观察证据确认 lock 仍归本事务且真实 index 仍是 original digest，然后原子 rename 为真实 index。验证：实际 HEAD tree、真实 staged patch、全部 worktree/事务内容摘要至少一处可取得。最后清理自有事务。这里不声称跨平台排除 `DEC-016` 所列、能在最终路径操作的 syscall 间隙内替换并擦除全部证据的同权限主动攻击。
 
 - [ ] **Step 7: 写 binary、rename、delete、mode 和 untracked 成功用例**
 
@@ -940,9 +954,9 @@ assert.equal(commitCalls.length, 0);
 
 外部 HEAD commit 本身计入 baseline，不得被误报为本事务 commit；旧事务可在所有权验证后 cancel，但不得把 concurrent index/worktree 恢复为旧 snapshot。
 
-- [ ] **Step 4: 写 index.lock 竞态和原子安装失败测试**
+- [ ] **Step 4: 写可观察 index.lock 竞态和原子安装失败测试**
 
-覆盖 prepare 前已有 lock、commit 前外部 lock、获取后 lock 被替换、真实 index 在最终复验后改变、原子 rename 失败。断言不删除外部 lock；成功 commit 后恢复安装失败返回 commit OID 与 `COMMIT_CREATED_RECOVERY_REQUIRED`，保留 original/recovery/unexpected indexes，绝不 amend 或回滚 commit。
+覆盖 prepare 前已有 lock、commit 前外部 lock、获取后发生可观察替换、真实 index 在最终复验后发生可观察改变、原子 rename 失败。断言不删除可识别的外部 lock；成功 commit 后恢复安装失败返回 commit OID 与 `COMMIT_CREATED_RECOVERY_REQUIRED`，保留 original/recovery/unexpected indexes，绝不 amend 或回滚 commit。测试不再把 `fstat/lstat` 与路径式 `rm/rename` 之间无 descriptor-bound 原语的间隙，或可被同权限原生 API 完全擦除的父 Git 内存 index 变化，表述为跨平台可证明保证；这些反例按 `DEC-016` 记录为 residual risk。
 
 - [ ] **Step 5: 写 hook 改工作区、临时索引和提交树测试**
 
@@ -986,11 +1000,11 @@ Run:
 
 ```powershell
 node --test --test-name-pattern="hook|concurrent|stale|lock|symlink|junction|ownership|recovery required|CLI|secret" tests/stage-transaction.test.js
-node --test tests/stage-transaction.test.js
+npm run check
 git diff --check -- scripts/stage-transaction.mjs tests/stage-transaction.test.js
 ```
 
-Expected: PASS；确定性测试证明确认前主 ODB 不变、Git commit process 恰好一次或零次、失败不重试、无用户内容丢失。
+Expected: PASS；完整 `npm run check` 在 Task 6 结束时只运行一次。确定性测试证明支持威胁模型内确认前主 ODB 不变、Git commit process 恰好一次或零次、失败不重试、无用户内容丢失；不宣称排除 `DEC-016` 的同权限主动对抗。
 
 - [ ] **Step 10: 注释审查与提交加固**
 
@@ -1122,7 +1136,7 @@ Skill 正文保持聚焦，必须按顺序规定：
 3. explicit commit 读取仓库规则、特殊状态、任务范围和敏感路径；通过 stdin JSON 调用 `inspect`，只从 final/untracked units 选择当前任务 hunk。
 4. 原子 hunk 混合任务与无关语义、敏感内容、空选择或恢复预演失败时，在真实索引变化前停止。
 5. 调用 `prepare` 后展示选择路径/hunk 数、task tree、完整候选消息和不含 token 的短确认标识；明确说明真实索引仍未变。
-6. 用户拒绝、取消或未明确确认时调用 `cancel`；任何 binding 变化都 cancel 旧事务并从 inspect 重新开始。
+6. 用户拒绝、取消或未明确确认时调用 `cancel`。commit object 创建前在定义检查点观察到 binding 变化时确认失效：Git 尚未启动则 cancel 并重新 inspect；Git 已启动则由代理拒绝创建 commit object，等待该唯一进程退出并验证实际 HEAD 后，再安全清理或保留恢复事务。
 7. 只有新的明确确认才用安全文件 API 在 prepare 保留的外部 message path 以 `wx`/UTF-8/no BOM 写入完整消息，再调用 `commit`。
 8. 报告 `committed` hash/subject/无关 staged 已恢复/未 push，或 `stopped` 原因、仓库是否变化、恢复事务是否保留和一个安全下一步。
 
@@ -1136,7 +1150,8 @@ README 明确写入：
 - message-only 示例不自动暂存；明确“提交”示例授权准备任务 hunk但仍需二次确认。
 - 简单变更只有 subject；复杂/多处理点使用最小数量简洁 `- ` bullets，并保留用户给出的打款账户示例。
 - 同文件 hunk 可分离，连续混合语义停止；untracked/binary/rename/mode 作为原子单元。
-- cancel 和 hook 拒绝保持原状态；成功后原无关 staged 内容继续 staged；并发变化使确认失效。
+- cancel 和 hook 拒绝保持原状态；成功后原无关 staged 内容继续 staged；定义检查点可观察到的并发变化使确认失效。
+- 并发保证覆盖普通 Git/用户/hook/进程，以及绑定或受保护状态在定义验证/恢复检查点可观察到的变化；明确披露同权限进程精确命中 syscall 间隙并用原生 API 擦除全部证据的 residual risk，同时说明 hook 仍不可信、实际 HEAD/tree 仍会验证、恢复证据仍会保留。
 - 禁止 push、tag、release、签名、amend、hook bypass、历史/配置写入；combined 请求先缩小范围。
 - 使用 `npm run check`、`npm run audit`、`npm run gate:delivery` 和 `npm pack --json --dry-run --ignore-scripts` 验证；卸载删除所属 Skill 目录。
 
@@ -1164,7 +1179,6 @@ Expected: 只机械同步根 lock metadata，无依赖新增。规范状态改�
 Run:
 
 ```powershell
-node --test tests/stage-transaction.test.js
 node --test tests/validate.test.js tests/delivery-gate.test.js tests/audit.test.js tests/repository.test.js tests/documentation.test.js
 npm run check
 npm run audit
@@ -1212,7 +1226,6 @@ $skillHash = (Get-FileHash -LiteralPath 'SKILL.md' -Algorithm SHA256).Hash.ToLow
 $scriptHash = (Get-FileHash -LiteralPath 'scripts\stage-transaction.mjs' -Algorithm SHA256).Hash.ToLowerInvariant()
 $skillHash
 $scriptHash
-node --test tests/stage-transaction.test.js
 npm run check
 npm run audit
 git diff --check
@@ -1230,7 +1243,7 @@ Expected: 全部 PASS；两个 lowercase hash 记录到每个 evaluator metadata
 
 - [ ] **Step 4: 用新鲜子 Agent 运行 EVAL-012～EVAL-019**
 
-按 Task 1 冻结 prompt 和 assertion 原文运行，不在 evaluator 过程中修改断言。EVAL-013/014 controller 在 phase 1 后发送明确确认；EVAL-015 发送取消；EVAL-016 确认后让真实 hook 拒绝；EVAL-017 在 prepare 后分别制造绑定变化；EVAL-019 不允许 evaluator 运行 inspect/prepare 或网络命令。
+沿用 Task 1 冻结的 prompt，并以当前 `evals/evals.json` assertion 为唯一评分来源；2026-08-23 修订后的 EVAL-017 `ASSERT-001` supersede Task 1 表中的原始绝对措辞，evaluator 过程中不得再次改写。EVAL-013/014 controller 在 phase 1 后发送明确确认；EVAL-015 发送取消；EVAL-016 确认后让真实 hook 拒绝；EVAL-017 在 prepare 后分别制造并保持到定义检查点仍可观察的绑定变化，不构造同权限 native stealth race；EVAL-019 不允许 evaluator 运行 inspect/prepare 或网络命令。
 
 每个 case 必须同时有 Agent 结论和 controller 的真实 Git/文件快照；静态搜索 `SKILL.md` 或脚本不能判 PASS。
 
@@ -1309,7 +1322,7 @@ git commit -m "test: close transactional staging evidence"
 
 Expected: 只提交最终 evidence contract 和评测 artifacts；不 push。
 
-### Task 9: 全局安装、全门禁和最终审查
+### Task 9: 全局安装、全门禁、最终审查和分支推送
 
 **Files:**
 - Modify: `docs/delivery-report.md`
@@ -1319,7 +1332,7 @@ Expected: 只提交最终 evidence contract 和评测 artifacts；不 push。
 
 **Interfaces:**
 - Consumes: ready repository runtime and Evidence Contract。
-- Produces: 只含两个运行时文件的全局安装、仓库/安装版逐文件 hash 等价、最终 clean gates；不 push。
+- Produces: 只含两个运行时文件的全局安装、仓库/安装版逐文件 hash 等价、最终 clean gates，以及最终开发分支推送；不创建 Tag 或 Release。
 
 - [ ] **Step 1: 加载 skill-installer 并检查安装目标现状**
 
@@ -1401,7 +1414,7 @@ git ls-files --others --exclude-standard
 git diff --check HEAD
 ```
 
-按 `$chinese-code-comments` 审查从当前交付基线到最终 HEAD/工作树的完整代码 diff 和所有未跟踪交付文件。逐项检查：Version 5 需求偏离、用户既有改动丢失、敏感信息、绝对私有路径、包白名单、README/规范失真、过时 Version 4 声明、关键维护意图注释、无意义逐行注释。与 Task 1 仓库外 baseline patch 对照，确认未通过 reset/checkout/clean 丢失内容。
+按 `$chinese-code-comments` 审查从当前交付基线到最终 HEAD/工作树的完整代码 diff 和所有未跟踪交付文件。逐项检查：Version 5 需求偏离、用户既有改动丢失、敏感信息、绝对私有路径、包白名单、README/规范失真、过时 Version 4 声明、关键维护意图注释、无意义逐行注释，以及 Skill/README/报告是否仍错误声称绝对 inode/ctime 或父 Git 内存 tree 认证。与 Task 1 仓库外 baseline patch 对照，确认未通过 reset/checkout/clean 丢失内容。
 
 - [ ] **Step 7: 提交最终安装记录**
 
@@ -1411,7 +1424,7 @@ git diff --cached --check
 git commit -m "docs: record transactional staging installation"
 ```
 
-Expected: 只提交最终安装/终审记录；不 push。
+Expected: 只提交最终安装/终审记录；本步骤尚不 push。
 
 - [ ] **Step 8: 最终状态验证和交付**
 
@@ -1421,6 +1434,7 @@ Run:
 git status --short
 git log -8 --oneline --decorate
 git remote -v
+git push --set-upstream origin codex/transactional-auto-staging-v5
 ```
 
-Expected: 当前任务文件已提交；若仍有用户无关改动，完整列出且保持原状态；remote 未被修改；没有 push、tag、release、发布或上传。向用户报告 commit hashes、全门禁结果、全局安装两个 hash、任何保留 backup/recovery path，以及“未推送”。
+Expected: 当前任务文件已提交；若仍有用户无关改动，完整列出且保持原状态；remote 配置未被修改；当前分支成功推送并建立 upstream。没有 tag、release、发布或上传。向用户报告 commit hashes、全门禁结果、全局安装两个 hash、push 结果以及任何保留 backup/recovery path。
