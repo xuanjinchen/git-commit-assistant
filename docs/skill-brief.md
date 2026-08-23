@@ -2,9 +2,9 @@
 
 ## Requirement Version
 
-Version 5, revised and confirmed 2026-08-23, is complete. On 2026-08-24, nineteen independent real-Agent cases and controller snapshots passed against frozen `SKILL.md` SHA-256 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and transaction-script SHA-256 `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`. Formal source sets contain only the current active fixture paths and exclude every `diagnostics` path. Ordinary hook rejection restores the main ODB to baseline, while deterministic foreign-object and reflog regressions fail closed and preserve the owned pack when cleanup cannot be proven. The unchanged Skill remains within its previously valid 1,734/1,800 prompt budget. Version 4 evidence remains a historical baseline.
+Version 5, revised and confirmed 2026-08-23, is complete at post-helper-authorization delivery HEAD `dc54b60d223e157b3fe5203afb6a3168e799b6a9`. On 2026-08-24, nineteen fresh independent real-Agent cases and controller snapshots passed against frozen `SKILL.md` SHA-256 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and transaction-script SHA-256 `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`. Formal source sets contain only current active controller/runtime files. Ordinary hook rejection restores controller-observed repository state to baseline, all five observable binding-change vectors fail closed without a target commit, and message-only and combined-push boundaries remain intact. The unchanged Skill remains within its previously valid 1,734/1,800 prompt budget. Version 4 evidence remains a historical baseline.
 
-On 2026-08-24, the main controller synchronized the global installation at `$CODEX_HOME/skills/git-commit-assistant` to the final frozen runtime. Its exact two-file layout is `SKILL.md` and `scripts/stage-transaction.mjs`; the installed SHA-256 values are `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`, and each installed file equals the repository version. The installed `inspect` smoke exited 0 with single-line JSON while the isolated repository's HEAD, index, status, and main ODB remained unchanged. Temporary backups from the failed installation attempt were verified and removed.
+The final global installation at `$CODEX_HOME/skills/git-commit-assistant` is synchronized to the frozen post-helper-authorization runtime. An independent read-only check found exactly `SKILL.md` and `scripts/stage-transaction.mjs`, reproduced their frozen SHA-256 values, and confirmed byte equality with the repository copies. The controller's installed `inspect` smoke exited 0 with single-line JSON and left the isolated repository's HEAD, index, status, and main ODB unchanged.
 
 ## Objective
 
@@ -20,13 +20,15 @@ Return a complete candidate and task-selection summary, or a safe stop reason. A
 
 ## Non-goals
 
-Do not alter the real index before confirmation; do not amend, sign, push, create tags or releases, publish or upload packages, rewrite history, install or edit hooks, write local or global Git or Codex configuration, or call an external model, API, or delegated agent. Explicit commit requests may prepare selected current-task manifest units only in an owned external transaction. A combined request stops before inspection, preparation, or commit and requires a commit-only scope. The portable runtime does not claim protection against a deliberately hostile same-privilege process that interposes in an individual filesystem-syscall gap and uses native APIs to restore every observable path identity and timestamp; no native platform helper is added for that adversarial case.
+Do not alter the real index before confirmation; do not amend, sign, push, create tags or releases, publish or upload packages, rewrite history, install or edit hooks, write local or global Git or Codex configuration, or call an external model, API, or delegated agent. Explicit commit requests may prepare selected current-task manifest units only in an owned external transaction. A combined request stops before inspection, preparation, or commit and requires a commit-only scope. The portable runtime does not claim protection against a deliberately hostile same-privilege process that interposes in an individual filesystem-syscall gap and erases every observable trace, nor does it claim to attest an arbitrary same-privilege parent process or parent-created cwd; no native platform helper is added for those adversarial cases.
 
 ## Concurrency Threat Model
 
 The runtime protects cooperative concurrency: ordinary Git commands, user actions, hooks, and other processes when their change to bound or protected content, object identity, path state, ownership evidence, or filesystem metadata is observable at a defined validation or recovery checkpoint. It fails closed on those checkpoint observations, preserves foreign locks and recoverable bytes when ownership is uncertain, and never overwrites worktree content to hide a conflict. Hooks remain untrusted and do not receive a broader exemption.
 
 An active same-privilege adversary that precisely races between two operating-system calls and then erases every observable trace with native APIs is outside the portable contract. This residual risk qualifies concurrency and lock guarantees throughout Version 5; deterministic tests must still cover every recorded, in-scope, reproducible observable replacement window and must not present metadata barriers as proof against the excluded adversary.
+
+Helper authorization protects only the capability attached to an already-created real transaction: foreign callers cannot reuse that capability across transactions. A same-privilege parent process that independently constructs a cwd is not thereby an ownership-protected object. The helper boundary is capability isolation, not portable parent identity or ancestry attestation.
 
 ## Path Mapping
 
@@ -48,6 +50,7 @@ An active same-privilege adversary that precisely races between two operating-sy
 - `CONFLICT-002` is resolved: Version 4 prohibited staging, unstaging, and splitting, while Version 5 requires an explicit commit request to prepare current-task hunks.
 - `CONFLICT-003` is resolved: the Version 4 single-file runtime conflicts with Version 5's deterministic index transaction.
 - `CONFLICT-004` is resolved: the prior plan implied absolute protection against same-privilege adversarial replacement between filesystem calls, but a portable Node.js runtime has no cross-platform descriptor-bound unlink or rename primitive and cannot prove, only from child-visible path, identity, and timestamp evidence before commit creation, which tree the parent Git process already loaded after hooks.
+- `CONFLICT-005` is resolved: helper authorization must isolate an existing real transaction capability without treating an arbitrary same-privilege parent-created cwd as an owned object or claiming portable parent-process attestation.
 
 <!-- scaffold-contract:skill-brief:v1 -->
 ```json
@@ -78,6 +81,12 @@ An active same-privilege adversary that precisely races between two operating-sy
       "summary": "原计划隐含要求跨平台 Node.js 运行时绝对防御同权限进程在文件系统调用间隙中的主动替换，并仅凭提交创建前对子进程可见的路径、身份和时间证据证明父 Git 在 hook 后已载入的内存 tree。",
       "status": "resolved",
       "resolution": "采用可移植 cooperative/observable concurrency 威胁模型：继续拒绝绑定或受保护状态在定义验证/恢复检查点可观察到的并发变化和所有权异常；把能精确命中 syscall 间隙并用原生 API 擦除全部证据的同权限主动对抗列为剩余风险，不引入平台原生 helper。"
+    },
+    {
+      "id": "CONFLICT-005",
+      "summary": "Helper 授权若把任意同权限父进程自建 cwd 当作所有权对象，会超出可移植运行时能够证明的可信根。",
+      "status": "resolved",
+      "resolution": "只隔离已有真实事务 capability，拒绝 foreign caller 跨事务复用；任意同权限父进程及其自建 cwd 不属于所有权保护对象，不声明 portable parent attestation。"
     }
   ],
   "acceptance_criteria": [
@@ -95,8 +104,8 @@ An active same-privilege adversary that precisely races between two operating-sy
     },
     {
       "id": "REQ-003",
-      "requirement": "Within the declared cooperative-concurrency threat model, the Skill stops without weakening safeguards for ambiguous task hunks, special Git state, likely sensitive material, observable concurrent changes, or hook rejection.",
-      "verification": "EVAL-013, EVAL-015, EVAL-016, EVAL-017, and deterministic transaction tests verify safe stops, observable race handling, and protected user state.",
+      "requirement": "Within the declared cooperative-concurrency threat model, the Skill stops without weakening safeguards for ambiguous task hunks, special Git state, likely sensitive material, observable concurrent changes, hook rejection, or foreign reuse of an existing transaction capability; it does not treat an arbitrary same-privilege parent cwd as an owned object.",
+      "verification": "EVAL-013, EVAL-015, EVAL-016, EVAL-017, and deterministic transaction/helper-authorization tests verify safe stops, observable race handling, capability isolation, and protected user state.",
       "status": "pass"
     },
     {
@@ -144,7 +153,7 @@ An active same-privilege adversary that precisely races between two operating-sy
     },
     "scripts": {
       "status": "enabled",
-      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:a78e3db4f22bfa86ef10381d3082b0cb5dab0356465fe95bafc34f3690c57c23",
+      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:2260ae9ab62737e3ec0ea955511ce9dfac79ad2c44d0c934a5badba06dfcd9a6",
       "unblock_condition": ""
     },
     "assets": {
@@ -154,7 +163,7 @@ An active same-privilege adversary that precisely races between two operating-sy
     },
     "implicit-trigger": {
       "status": "enabled",
-      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:a04f80aa2586eb4a8dd6dc71ff76c5770de85aea5bef1175270d039e15d7cb0a",
+      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14d1977e516d0512bc6134b4ea701106ea504d19949d1d7a7aaec8c5ad08165e",
       "unblock_condition": ""
     },
     "multi-agent": {

@@ -1,10 +1,10 @@
 # Delivery Report
 
-Version 4 evidence is a historical baseline. On 2026-08-24, EVAL-001 through EVAL-019 independently passed against final frozen runtime hashes `SKILL.md=2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and `scripts/stage-transaction.mjs=e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`. Each result artifact is bound to a unique SHA-256 and cites only its current active fixture paths; all `diagnostics` paths are excluded. Ordinary hook rejection restored the main ODB to baseline, foreign-object or reflog mutation made imported-pack cleanup fail closed, and the unchanged Skill retains its valid 1,734/1,800 prompt-budget evidence.
+Version 4 evidence is a historical baseline. On 2026-08-24, EVAL-001 through EVAL-019 independently passed fresh post-helper-authorization evaluation against delivery HEAD `dc54b60d223e157b3fe5203afb6a3168e799b6a9`, `SKILL.md=2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`, and `scripts/stage-transaction.mjs=b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`. Each result artifact is bound to a unique SHA-256 and cites only current active controller/runtime source files. Ordinary hook rejection restored every controller-observed repository field to baseline, EVAL-017 rejected all five observable stale-confirmation vectors while preserving controller changes, EVAL-018 remained message-only, and EVAL-019 performed zero network action. The unchanged Skill retains its valid 1,734/1,800 prompt-budget evidence.
 
-EVAL-001 had three harmless malformed harness requests before its fresh recorded inspect and a post-completion verification command later read an excluded diagnostics path. The requests were rejected with no repository change or retained transaction; every formal decision, raw report, and canonical snapshot was complete before the later read. These are procedural concerns, not contradictions of the sealed active evidence.
+The helper trust root is intentionally narrow: it isolates the capability of an already-created real transaction from foreign callers. An arbitrary same-privilege parent process that creates its own cwd is not an ownership-protected object, and this portable runtime does not claim parent-process attestation.
 
-On 2026-08-24, the main controller completed the final global reinstallation at the logical path `$CODEX_HOME/skills/git-commit-assistant`. The installed layout is exactly `SKILL.md` and `scripts/stage-transaction.mjs`; their SHA-256 values are `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`, and each installed file is byte-for-byte equal to its repository counterpart. The installed `inspect` smoke exited 0 with single-line JSON while the isolated repository's HEAD, index, status, and main ODB remained unchanged. Temporary backups from the failed installation attempt were verified and then removed. The whole-branch re-review and separately authorized maintainer push remain pending.
+The final global installation at `$CODEX_HOME/skills/git-commit-assistant` is now closed against the frozen post-helper-authorization runtime. An independent read-only check found exactly `SKILL.md` and `scripts/stage-transaction.mjs`, reproduced SHA-256 values `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`, and confirmed that both installed files equal their repository copies. The controller's installed `inspect` smoke exited 0 with single-line JSON while the isolated repository's HEAD, index, status, and main ODB remained unchanged. This documentation closure did not stage, commit, push, or publish anything.
 
 <!-- scaffold-contract:delivery-report:v1 -->
 ```json
@@ -70,12 +70,12 @@ On 2026-08-24, the main controller completed the final global reinstallation at 
     {
       "name": "Implicit staged and current-task commit assistance",
       "track": "implicit-trigger",
-      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:a04f80aa2586eb4a8dd6dc71ff76c5770de85aea5bef1175270d039e15d7cb0a"
+      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14d1977e516d0512bc6134b4ea701106ea504d19949d1d7a7aaec8c5ad08165e"
     },
     {
       "name": "Transactional task-hunk staging and restoration",
       "track": "scripts",
-      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:a78e3db4f22bfa86ef10381d3082b0cb5dab0356465fe95bafc34f3690c57c23"
+      "evidence": "artifact:evals/results/EVAL-014.txt#sha256:2260ae9ab62737e3ec0ea955511ce9dfac79ad2c44d0c934a5badba06dfcd9a6"
     }
   ]
 }

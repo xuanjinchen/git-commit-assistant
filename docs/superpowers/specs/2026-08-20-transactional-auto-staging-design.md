@@ -3,7 +3,7 @@
 ## 状态
 
 - 日期：2026-08-20；威胁模型修订确认于 2026-08-23
-- 状态：Version 5 实现、final-runtime 真实 Agent 证据、最终全局安装/hash 验证与 installed smoke 已闭环；whole-branch re-review 与维护者 push 仍待完成
+- 状态：post-helper-authorization 实现、19/19 fresh final-runtime 真实 Agent 证据、全局重装/hash 验证与 installed smoke 已闭环；维护者 push 仍待明确授权并完成
 - 受众：Skill 维护者与评测人员
 - 技术级别：高级
 - 关联 Skill：`git-commit-assistant`
@@ -155,6 +155,8 @@ Agent 只能从 manifest 中选择 hunk 标识，不能向脚本提供任意补�
 
 Node.js 没有跨平台的 descriptor-bound unlink/rename；仅凭 commit object 创建前对子进程可见的路径、身份和时间证据，也不能直接认证父 Git 在 hook 后已载入内存的 index/tree。因此以下主动对抗不属于正式保证：同权限进程精确命中两个系统调用之间的窗口，替换目录项或让父 Git 读取另一索引，再用原生 API 把内容、文件身份、时间戳和父目录元数据全部恢复为原值。该边界不豁免普通竞态、可重复的目录项替换、持久身份变化或 hook 修改；当这些场景对绑定或受保护状态的影响在定义验证/恢复检查点仍可观察时，事务必须 fail closed，并保留外部锁和用户字节。
 
+Helper 授权的可信根只覆盖已经创建的真实事务 capability：foreign caller 不能跨事务复用该 capability。任意同权限父进程自行构造的 cwd 不因此成为所有权保护对象；运行时不声称可移植地认证父进程身份、祖先链或 parent-created cwd。该收窄不改变真实事务 token、摘要、绑定状态和恢复材料的隔离要求。
+
 ## 失败处理
 
 | 条件 | 行为 |
@@ -195,20 +197,20 @@ Node.js 没有跨平台的 descriptor-bound unlink/rename；仅凭 commit object
 
 - 全局安装使用逻辑路径 `$CODEX_HOME/skills/git-commit-assistant`，目录布局精确为 `SKILL.md` 和 `scripts/stage-transaction.mjs`。
 - 历史 Task 9 安装时，`SKILL.md` 的 SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`，`scripts/stage-transaction.mjs` 的 SHA-256 为 `73618ca6d5a947284ddb38a9ed8eaebfd16bcf11c66aa87c1cd21982f0b56671`；当时安装版与仓库版逐文件相等。该摘要只记录早期安装，不再代表当前全局安装。
-- 最终重装后的 `SKILL.md` SHA-256 为 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`，`scripts/stage-transaction.mjs` SHA-256 为 `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`；安装版逐文件等于仓库版。
-- 最终安装版 `inspect` smoke test 以 exit 0 完成，stdout 为单行 JSON；隔离仓库的 HEAD、index、status 与主 ODB 均保持不变。
-- 一次失败安装尝试留下的临时备份在核验后已清理。最终全局安装/hash 验证与 installed smoke 已闭环；whole-branch re-review 与维护者 push 仍待完成。
+- 后续重装把 `SKILL.md` 同步到 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`，并把脚本同步到当时的 `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`；当时安装版逐文件等于仓库版。安装版 `inspect` 以 exit 0 返回单行 JSON，隔离仓库的 HEAD、index、status 与主 ODB 不变，一次失败尝试的临时备份也在核验后清理。
+- post-helper-authorization 仓库脚本冻结为 `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791` 后，主 controller 已完成最终全局重装；独立只读复核确认安装目录仍精确为上述两个文件，`SKILL.md` 与脚本分别匹配 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`、`b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`，并与仓库副本逐文件相等。controller 的 installed `inspect` smoke 以 exit 0 返回单行 JSON，隔离仓库的 HEAD、index、status 与主 ODB 保持不变。上条 `e5fc1c...` 只保留为明确的历史安装记录。
 
 ## 测试与评测
 
-### 2026-08-24 final-runtime 证据聚合结论
+### 2026-08-24 post-helper-authorization final-runtime 证据聚合结论
 
-- EVAL-001～EVAL-019 的独立真实 Agent 结论与 controller 快照全部满足冻结 assertion，并绑定 `SKILL.md` SHA-256 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` 与事务脚本 SHA-256 `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52`。
-- 每个 artifact 的 source set 只列当前 active fixture path，并明确排除所有含 `diagnostics` 路径段的文件。EVAL-011 只使用 current active rerun，不使用先前 subject-only 运行。
-- EVAL-001 在正式 proposal 前有三次无副作用 harness 拒绝；formal raw report 与 canonical snapshot 全部完成后，一次过宽验证才误读排除路径。两者都未改变封存证据，只作为程序性 concern 保留。
-- EVAL-016 的普通真实 hook 拒绝路径证明单一 commit 进程、无 `--no-verify`、无重试，以及 HEAD、真实 index、worktree、主 ODB、config 和 hooks 精确恢复到基线；必要诊断只保留在安全外部恢复事务中。独立确定性回归还证明，拒绝 hook 新增 foreign dependent object/tag 或保留 create-delete reflog 时，运行时以 `OBJECT_IMPORT_CLEANUP_UNPROVEN` fail closed、保留 owned pack 并诚实报告仓库变化；该回归不冒充 EVAL-016 fixture 本身的 Agent 行为。
-- EVAL-017 只使用 `vectors/{head,index,worktree,message,script}` 五个 active vector。每个 vector 均有 before、after-proposal、after-checkpoint-mutation、after-agent-cancel；before 等于 proposal，mutation 等于 cancel。index 明确返回 `CONFIRMATION_STALE`，message 的 approved-message SHA-256 从 `71597bb17a5ec2a9e3c380fee82395003fb578b642d0ad97584afff60a69b30d` 变为 `0ab3e64b1fd78b6cc4ee3a9f656c6349f4039ab4a4353c020ee9a584e66eeeb1`，script 使用 trusted original `e5fc1cb91c468f68366a91b557b9bbd531d07cd58438ee746a4faa5d25f5fe52` cancel，并保留 disposable mutation `3f61e0aadda2449813f7caf26f8f20258c009bb13a7cf29fe2b819fbf4a34fe9`。五个旧事务目标提交总数为 0，控制器变化全部保留。
-- EVAL-012 正式证据只到 `awaiting-confirmation`，没有发送确认、取消或提交。EVAL-015 只证明本正式 case 拥有的事务被安全取消；不对两笔历史 EVAL-015 事务、旧 EVAL-012 事务或仓库外 recovery bundle 声称清理。
+- EVAL-001～EVAL-019 的 fresh 独立真实 Agent 结论与 controller 快照全部满足冻结 assertion，并绑定 delivery HEAD `dc54b60d223e157b3fe5203afb6a3168e799b6a9`、`SKILL.md` SHA-256 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` 与事务脚本 SHA-256 `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`。
+- 每个 artifact 的 source set 只列当前 active controller/runtime 文件；十九个 artifact SHA-256 全部独立，路径、冻结 prompt、metadata 与 runtime 副本均完成聚合复验。
+- EVAL-005 的 runtime 已先返回正确单行 `CONFIRMATION_STALE`；其后 evaluator trace summarizer 的非终止 empty-array 事件没有触发重试或仓库变化，不改变已封存的 runtime 结论与 snapshot。
+- EVAL-016 的真实 hook 拒绝路径证明单一 commit 进程、无 `--no-verify`、无重试，以及 HEAD、真实 index、worktree、主 ODB、config 和 hooks 精确恢复到基线；必要恢复材料只保留在安全外部事务中。
+- EVAL-017 只使用 `vectors/{head,index,worktree,message,script}` 五个 active vector。每个 vector 均满足 before 等于 after-proposal、after-checkpoint-mutation 等于 after-agent-cancel。index 明确返回 `CONFIRMATION_STALE`，message 的 approved-message SHA-256 从 `71597bb17a5ec2a9e3c380fee82395003fb578b642d0ad97584afff60a69b30d` 变为 `0ab3e64b1fd78b6cc4ee3a9f656c6349f4039ab4a4353c020ee9a584e66eeeb1`，script 使用 trusted original `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791` cancel，并保留 disposable mutation `03de4716cde907d45649240d124176bd7425a2d40b9ee9454b32ed7afeeb37a4`。五个旧事务目标提交总数为 0，控制器变化全部保留。
+- EVAL-018 保持 `message-only`，未读取 untracked content，也未调用 transaction runtime；EVAL-019 在 routing 阶段拒绝 combined commit+push，inspect/prepare/commit/network 全部为 0。
+- EVAL-012 正式证据只到 `awaiting-confirmation`，没有发送确认、取消或提交。EVAL-015 只证明本正式 case 拥有的事务被安全取消。
 - 冻结 `SKILL.md` 按仓库算法测得 1,734/1,800 tokens。十九份脱敏结果文件各自拥有独立 SHA-256，Evidence Contract v1 已进入 ready。
 ### 确定性测试
 
@@ -253,8 +255,8 @@ Node.js 没有跨平台的 descriptor-bound unlink/rename；仅凭 commit object
 2. 候选消息确认绑定任务临时索引；真实索引在确认前不变；commit object 创建前在定义检查点可观察到的绑定变化使确认失效，Git 启动后仍须等待唯一进程结束并验证实际 HEAD/tree 和恢复证据。
 3. 成功提交只包含选中 hunk，原无关已暂存内容恢复为已暂存，其他用户内容不丢失。
 4. 在已声明的 cooperative/observable concurrency 威胁模型内，取消、失败和可观察并发变化不产生提交，并保留或恢复原始索引与用户内容。
-5. 运行时仅增加经验证的事务脚本，不扩大 push、签名、amend、钩子绕过、历史改写或配置写入权限，也不引入平台原生 helper、driver 或新增运行时依赖。
-6. 新脚本、Skill、中文 README、评测证据、包清单和全局安装内容一致且通过交付门禁。
+5. 运行时仅增加经验证的事务脚本，不扩大 push、签名、amend、钩子绕过、历史改写或配置写入权限，也不引入平台原生 helper、driver 或新增运行时依赖；helper 只隔离已有真实事务 capability，不声明 parent attestation。
+6. 新脚本、Skill、中文 README、评测证据和包清单一致且通过交付门禁；全局安装已在新脚本重装、逐文件 hash 相等与 installed smoke 全部通过后单独闭环。
 
 ## 相关文档
 
