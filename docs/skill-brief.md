@@ -2,9 +2,9 @@
 
 ## Requirement Version
 
-Version 5, revised and confirmed 2026-08-23, is complete at post-helper-authorization delivery HEAD `dc54b60d223e157b3fe5203afb6a3168e799b6a9`. On 2026-08-24, nineteen fresh independent real-Agent cases and controller snapshots passed against frozen `SKILL.md` SHA-256 `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and transaction-script SHA-256 `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`. Formal source sets contain only current active controller/runtime files. Ordinary hook rejection restores controller-observed repository state to baseline, all five observable binding-change vectors fail closed without a target commit, and message-only and combined-push boundaries remain intact. The unchanged Skill remains within its previously valid 1,734/1,800 prompt budget. Version 4 evidence remains a historical baseline.
+Version 6, revised and confirmed 2026-09-05, changes only commit-message language precedence. An explicit user language controls `SUBJECT` and body; otherwise Simplified Chinese is mandatory. Code, paths, and recent subjects cannot select the language, while recent subjects may still guide a stable `SCOPE` and repository conventions. Fresh independent EVAL-002, EVAL-011, EVAL-020, and EVAL-021 cases passed against frozen `SKILL.md` SHA-256 `816711cdf84ff4565ec9d32d5078fd3f5a745fe0c04c0c31c001549f082ce1ca`; the transaction script remains frozen at SHA-256 `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`. The final Skill measures 1,778/1,800 conservative prompt tokens. Version 5 transaction and safety evidence remains the historical baseline for unchanged behavior.
 
-The final global installation at `$CODEX_HOME/skills/git-commit-assistant` is synchronized to the frozen post-helper-authorization runtime. An independent read-only check found exactly `SKILL.md` and `scripts/stage-transaction.mjs`, reproduced their frozen SHA-256 values, and confirmed byte equality with the repository copies. The controller's installed `inspect` smoke exited 0 with single-line JSON and left the isolated repository's HEAD, index, status, and main ODB unchanged.
+The global installation at `$CODEX_HOME/skills/git-commit-assistant` is synchronized to Version 6 and contains exactly `SKILL.md` plus `scripts/stage-transaction.mjs`. Their SHA-256 values match the repository copies, and an installed `inspect` smoke returned one JSON line with the isolated repository's HEAD, index, status, and object database unchanged. The prior 87-file installation was moved intact to `$CODEX_HOME/skill-backups/git-commit-assistant-20260905-pre-v6` for recoverability rather than deleted.
 
 ## Objective
 
@@ -16,7 +16,7 @@ Trigger for staged-change commit or commit-message requests, including natural r
 
 ## Outputs and Side Effects
 
-Return a complete candidate and task-selection summary, or a safe stop reason. A simple change uses only a complete subject; a coherent multi-change or complex business change adds the smallest useful set of concise hyphen bullets for material handling points. The runtime is `SKILL.md` plus `scripts/stage-transaction.mjs`: the Agent selects manifest units and the script performs deterministic external-index transactions. Before the second confirmation, the real index, worktree, HEAD, and main object database remain unchanged. Only the second confirmation may create one unsigned commit using exactly `git commit --no-gpg-sign -F <temp>` while preserving hooks. Message-only requests have no repository side effect.
+Return a complete candidate and task-selection summary, or a safe stop reason. Explicit language requests control the subject and body; otherwise they use Simplified Chinese, while recent history may still guide a stable scope. A simple change uses only a complete subject; a coherent multi-change or complex business change adds the smallest useful set of concise hyphen bullets for material handling points. The runtime is `SKILL.md` plus `scripts/stage-transaction.mjs`: the Agent selects manifest units and the script performs deterministic external-index transactions. Before the second confirmation, the real index, worktree, HEAD, and main object database remain unchanged. Only the second confirmation may create one unsigned commit using exactly `git commit --no-gpg-sign -F <temp>` while preserving hooks. Message-only requests have no repository side effect.
 
 ## Non-goals
 
@@ -26,7 +26,7 @@ Do not alter the real index before confirmation; do not amend, sign, push, creat
 
 The runtime protects cooperative concurrency: ordinary Git commands, user actions, hooks, and other processes when their change to bound or protected content, object identity, path state, ownership evidence, or filesystem metadata is observable at a defined validation or recovery checkpoint. It fails closed on those checkpoint observations, preserves foreign locks and recoverable bytes when ownership is uncertain, and never overwrites worktree content to hide a conflict. Hooks remain untrusted and do not receive a broader exemption.
 
-An active same-privilege adversary that precisely races between two operating-system calls and then erases every observable trace with native APIs is outside the portable contract. This residual risk qualifies concurrency and lock guarantees throughout Version 5; deterministic tests must still cover every recorded, in-scope, reproducible observable replacement window and must not present metadata barriers as proof against the excluded adversary.
+An active same-privilege adversary that precisely races between two operating-system calls and then erases every observable trace with native APIs is outside the portable contract. This residual risk qualifies concurrency and lock guarantees throughout the retained Version 5/6 runtime; deterministic tests must still cover every recorded, in-scope, reproducible observable replacement window and must not present metadata barriers as proof against the excluded adversary.
 
 Helper authorization protects only the capability attached to an already-created real transaction: foreign callers cannot reuse that capability across transactions. A same-privilege parent process that independently constructs a cwd is not thereby an ownership-protected object. The helper boundary is capability isolation, not portable parent identity or ancestry attestation.
 
@@ -51,6 +51,7 @@ Helper authorization protects only the capability attached to an already-created
 - `CONFLICT-003` is resolved: the Version 4 single-file runtime conflicts with Version 5's deterministic index transaction.
 - `CONFLICT-004` is resolved: the prior plan implied absolute protection against same-privilege adversarial replacement between filesystem calls, but a portable Node.js runtime has no cross-platform descriptor-bound unlink or rename primitive and cannot prove, only from child-visible path, identity, and timestamp evidence before commit creation, which tree the parent Git process already loaded after hooks.
 - `CONFLICT-005` is resolved: helper authorization must isolate an existing real transaction capability without treating an arbitrary same-privilege parent-created cwd as an owned object or claiming portable parent-process attestation.
+- `CONFLICT-006` is resolved: the Version 5 repository-history language fallback conflicts with the confirmed Version 6 requirement that unspecified messages default to Simplified Chinese.
 
 <!-- scaffold-contract:skill-brief:v1 -->
 ```json
@@ -87,13 +88,19 @@ Helper authorization protects only the capability attached to an already-created
       "summary": "Helper 授权若把任意同权限父进程自建 cwd 当作所有权对象，会超出可移植运行时能够证明的可信根。",
       "status": "resolved",
       "resolution": "只隔离已有真实事务 capability，拒绝 foreign caller 跨事务复用；任意同权限父进程及其自建 cwd 不属于所有权保护对象，不声明 portable parent attestation。"
+    },
+    {
+      "id": "CONFLICT-006",
+      "summary": "Version 5 允许近期提交语言覆盖 fallback，而 Version 6 要求用户未指定语言时默认使用简体中文。",
+      "status": "resolved",
+      "resolution": "语言先于仓库历史决定：显式语言要求优先，否则 SUBJECT 和正文必须使用简体中文；近期提交只用于稳定 scope 和其他仓库惯例。"
     }
   ],
   "acceptance_criteria": [
     {
       "id": "REQ-001",
       "requirement": "A coherent staged change produces an evidence-based Conventional Commit candidate: a simple change uses only a complete subject, while coherent multi-change or complex business work adds the smallest useful set of concise hyphen bullets for distinct material handling points.",
-      "verification": "EVAL-012, EVAL-018, and the deterministic transaction tests verify message derivation, task selection, and message-only restraint.",
+      "verification": "EVAL-011, EVAL-012, EVAL-018, EVAL-021, and the deterministic transaction tests verify simple and complex message derivation, task selection, and message-only restraint.",
       "status": "pass"
     },
     {
@@ -143,6 +150,12 @@ Helper authorization protects only the capability attached to an already-created
       "requirement": "事务运行时只增加受审计脚本，不扩大签名、hook 绕过、amend、push、tag、release、发布、上传、历史或配置写入权限，也不引入平台原生 helper、driver 或新增运行时依赖。",
       "verification": "EVAL-016、EVAL-019、归档审计、依赖检查和 CLI/Git 进程测试验证权限与可移植运行时边界。",
       "status": "pass"
+    },
+    {
+      "id": "REQ-010",
+      "requirement": "用户明确指定语言时 SUBJECT 和正文使用指定语言；未指定时默认使用简体中文。代码、路径和提交历史不能选择语言，近期提交只可辅助稳定 scope 和仓库惯例。",
+      "verification": "EVAL-002 与 EVAL-011 验证英文历史下默认简体中文 subject 和正文；EVAL-020 与 EVAL-021 验证中文历史下显式英文覆盖默认值并应用到 subject 和正文。",
+      "status": "pass"
     }
   ],
   "tracks": {
@@ -163,7 +176,7 @@ Helper authorization protects only the capability attached to an already-created
     },
     "implicit-trigger": {
       "status": "enabled",
-      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14d1977e516d0512bc6134b4ea701106ea504d19949d1d7a7aaec8c5ad08165e",
+      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14e2e74de8fc146dda129ceb437458e91b9a740fcade7a0b7337704458f598d4",
       "unblock_condition": ""
     },
     "multi-agent": {
@@ -184,8 +197,8 @@ Helper authorization protects only the capability attached to an already-created
   },
   "prompt_budget": {
     "limit_tokens": 1800,
-    "measured_tokens": 1734,
-    "evidence": "artifact:evals/results/prompt-budget.txt#sha256:7b64f8ce2146ff781f2f5b9e5df6baa8193f7ea214add6b6d36e3e0c08f4fc2b"
+    "measured_tokens": 1778,
+    "evidence": "artifact:evals/results/prompt-budget.txt#sha256:d1ef60726c7754a695e77dbbe6527de6c971a58b796e21258ca2eed12130a0ac"
   }
 }
 ```

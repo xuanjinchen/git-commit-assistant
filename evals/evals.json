@@ -48,7 +48,7 @@
         },
         {
           "id": "ASSERT-002",
-          "text": "The candidate language and stable scope follow repository history."
+          "text": "When the user does not specify a language, the candidate uses Simplified Chinese while a stable scope may still follow repository history."
         },
         {
           "id": "ASSERT-003",
@@ -57,7 +57,7 @@
       ],
       "result": {
         "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14d1977e516d0512bc6134b4ea701106ea504d19949d1d7a7aaec8c5ad08165e"
+        "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14e2e74de8fc146dda129ceb437458e91b9a740fcade7a0b7337704458f598d4"
       }
     },
     {
@@ -259,11 +259,11 @@
       "assertions": [
         {
           "id": "ASSERT-001",
-          "text": "The candidate has a valid Conventional Commit subject that summarizes the coherent remittance-account status feature."
+          "text": "With no explicit language request, the candidate has a Simplified Chinese Conventional Commit subject that summarizes the coherent remittance-account status feature."
         },
         {
           "id": "ASSERT-002",
-          "text": "After one blank line, the body uses concise hyphen bullets to cover the distinct material handling points evidenced by the staged change."
+          "text": "After one blank line, the body uses Simplified Chinese concise hyphen bullets to cover the distinct material handling points evidenced by the staged change."
         },
         {
           "id": "ASSERT-003",
@@ -280,7 +280,7 @@
       ],
       "result": {
         "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-011.txt#sha256:00d87520cfdac87806003338b9e80bea5f3788ccf183ee4613531b60589b4e54"
+        "evidence": "artifact:evals/results/EVAL-011.txt#sha256:9e22527b1d856c9a160033616abf133e0c495d27464f728ff97d88654bf8680b"
       }
     },
     {
@@ -497,6 +497,56 @@
       "result": {
         "status": "pass",
         "evidence": "artifact:evals/results/EVAL-019.txt#sha256:b80b1fb670a061d280453d25c539eb46d96c7f85713ba2bf2f138c8cb1c39649"
+      }
+    },
+    {
+      "id": "EVAL-020",
+      "category": "positive",
+      "prompt": "请只根据当前已暂存的更改生成一条英文 Conventional Commit 消息，不要提交。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The explicit English-language request overrides the default Simplified Chinese language even when recent repository subjects are Chinese."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "Only the real staged snapshot is analyzed."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "No transaction, staging, or commit occurs."
+        }
+      ],
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-020.txt#sha256:d6172968807d206e09672e5ef3ca9d700eed70186af82fb52ad22fd7db39622d"
+      }
+    },
+    {
+      "id": "EVAL-021",
+      "category": "positive",
+      "prompt": "请根据当前已暂存的打款账户启用状态功能生成一条英文提交消息，不要执行提交。",
+      "assertions": [
+        {
+          "id": "ASSERT-001",
+          "text": "The explicit English request produces an English Conventional Commit subject even when recent repository subjects are Chinese."
+        },
+        {
+          "id": "ASSERT-002",
+          "text": "After one blank line, the body uses concise English hyphen bullets for the distinct material handling points evidenced by the staged change."
+        },
+        {
+          "id": "ASSERT-003",
+          "text": "The bullets use the smallest useful semantic grouping instead of mechanically listing files or repeating the subject."
+        },
+        {
+          "id": "ASSERT-004",
+          "text": "Only the real staged snapshot is analyzed and no transaction, commit, or repository mutation occurs."
+        }
+      ],
+      "result": {
+        "status": "pass",
+        "evidence": "artifact:evals/results/EVAL-021.txt#sha256:c7833396892c3537d25cb3d2d7d08f26a4a4a0ccdc55bd42d825a60b7e9fa591"
       }
     }
   ]

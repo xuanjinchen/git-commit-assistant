@@ -1,8 +1,8 @@
-EVAL-002 implicit staged-commit assistance evidence
+EVAL-002 implicit staged-commit assistance and default-language evidence
 
 Status: PASS
-Source set: eval-workspaces/transactional-v5/EVAL-002/controller/raw-agent-proposal.md, controller/raw-agent.md, controller/before.json, controller/after-proposal.json, controller/after-confirmation.json, controller/metadata.json, controller/prompt.txt, runtime/SKILL.md, and runtime/stage-transaction.mjs. Absolute paths, identities, object IDs, ownership data, and temporary paths are omitted.
-SKILL.md SHA-256: 2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914
+Source set: eval-workspaces/language-v6/reports/EVAL-002-final.md, SKILL.md, and scripts/stage-transaction.mjs. Absolute paths, identities, transaction identifiers, ownership data, object IDs, and temporary paths are omitted.
+SKILL.md SHA-256: 816711cdf84ff4565ec9d32d5078fd3f5a745fe0c04c0c31c001549f082ce1ca
 Transaction script SHA-256: b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791
 
 Frozen prompt
@@ -12,19 +12,19 @@ Frozen prompt
 Phase and runtime observation
 
 - The natural-language request entered the explicit staged-commit workflow without naming the Skill.
-- Repository history supported an English feat(api) subject; the proposal stated only the observed invoice-creation endpoint change and invented no footer.
-- The Agent waited for exact confirmation with the repository unchanged, then created exactly one commit and did not push.
+- Although recent repository subjects were English, the Agent produced the Simplified Chinese candidate feat(api): 新增发票创建接口; only the stable api scope followed repository history.
+- The Agent displayed the complete subject-only candidate, entered awaiting-confirmation, then cancelled the evaluation transaction without creating a commit.
 
 Assertions
 
-ASSERT-001 PASS: The natural-language request is within Skill scope.
-ASSERT-002 PASS: Candidate language and the stable api scope follow repository history.
+ASSERT-001 PASS: The natural-language request is within the Skill scope.
+ASSERT-002 PASS: With no explicit language request, the candidate uses Simplified Chinese while the stable api scope follows repository history.
 ASSERT-003 PASS: The complete candidate contains no invented footer metadata.
 
 Before/after invariant
 
-Proposal state matched baseline. Final commit-count delta was +1; index bytes/tree, worktree, configuration, and hooks were preserved, with only the permitted commit and reachable-object effects.
+HEAD and the real index tree matched baseline before prepare, after prepare, and after cancel. The staged fixture remained staged; no commit, worktree rewrite, configuration change, hook change, or network action occurred.
 
 Metrics
 
-Agent phases: 2. Selected task units: 1. Commits: 1. Push/network/delegated calls: 0. Duration and token usage: unavailable.
+Agent phases: 1. Selected task units: 1. Prepared transactions: 1. Safe cancels: 1. Commits: 0. Push/network/delegated calls: 0. Duration and token usage: unavailable.

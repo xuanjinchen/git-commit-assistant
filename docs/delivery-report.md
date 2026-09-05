@@ -1,10 +1,10 @@
 # Delivery Report
 
-Version 4 evidence is a historical baseline. On 2026-08-24, EVAL-001 through EVAL-019 independently passed fresh post-helper-authorization evaluation against delivery HEAD `dc54b60d223e157b3fe5203afb6a3168e799b6a9`, `SKILL.md=2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914`, and `scripts/stage-transaction.mjs=b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`. Each result artifact is bound to a unique SHA-256 and cites only current active controller/runtime source files. Ordinary hook rejection restored every controller-observed repository field to baseline, EVAL-017 rejected all five observable stale-confirmation vectors while preserving controller changes, EVAL-018 remained message-only, and EVAL-019 performed zero network action. The unchanged Skill retains its valid 1,734/1,800 prompt-budget evidence.
+Version 5 transaction and safety evidence remains the historical baseline for unchanged behavior. On 2026-09-05, the affected language cases were rerun independently against `SKILL.md=816711cdf84ff4565ec9d32d5078fd3f5a745fe0c04c0c31c001549f082ce1ca` and unchanged `scripts/stage-transaction.mjs=b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`. EVAL-002 and EVAL-011 proved that unspecified subject-only and complex messages default to Simplified Chinese even with English repository history while retaining stable scopes; EVAL-020 and EVAL-021 proved that an explicit English request overrides the default for both subject and body even with Chinese repository history. The final Skill measures 1,778/1,800 conservative prompt tokens. No transaction, safety, trigger-description, or permission boundary changed, so the unaffected Version 5 cases were not needlessly rerun.
 
 The helper trust root is intentionally narrow: it isolates the capability of an already-created real transaction from foreign callers. An arbitrary same-privilege parent process that creates its own cwd is not an ownership-protected object, and this portable runtime does not claim parent-process attestation.
 
-The final global installation at `$CODEX_HOME/skills/git-commit-assistant` is now closed against the frozen post-helper-authorization runtime. An independent read-only check found exactly `SKILL.md` and `scripts/stage-transaction.mjs`, reproduced SHA-256 values `2d4662ca8a757ee3f099f75683feac1053ac1134d5b664696b872d4c4da18914` and `b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791`, and confirmed that both installed files equal their repository copies. The controller's installed `inspect` smoke exited 0 with single-line JSON while the isolated repository's HEAD, index, status, and main ODB remained unchanged. This documentation closure did not stage, commit, push, or publish anything.
+The global installation at `$CODEX_HOME/skills/git-commit-assistant` now contains exactly `SKILL.md` and `scripts/stage-transaction.mjs`, matches both repository hashes, and passed an installed `inspect` smoke with one JSON line and unchanged isolated-repository HEAD, index, status, and object database. The previously installed 87-file development copy lacked the transaction script; it was moved intact to `$CODEX_HOME/skill-backups/git-commit-assistant-20260905-pre-v6` so no user content was discarded. This closure did not stage, commit, push, or publish anything.
 
 <!-- scaffold-contract:delivery-report:v1 -->
 ```json
@@ -14,7 +14,7 @@ The final global installation at `$CODEX_HOME/skills/git-commit-assistant` is no
     {
       "id": "REQ-001",
       "implementation": "path:SKILL.md",
-      "verification": "eval:EVAL-012,EVAL-018",
+      "verification": "eval:EVAL-011,EVAL-012,EVAL-018,EVAL-021",
       "status": "pass"
     },
     {
@@ -64,13 +64,19 @@ The final global installation at `$CODEX_HOME/skills/git-commit-assistant` is no
       "implementation": "path:scripts/stage-transaction.mjs",
       "verification": "eval:EVAL-016,EVAL-019",
       "status": "pass"
+    },
+    {
+      "id": "REQ-010",
+      "implementation": "path:SKILL.md",
+      "verification": "eval:EVAL-002,EVAL-011,EVAL-020,EVAL-021",
+      "status": "pass"
     }
   ],
   "capability_claims": [
     {
       "name": "Implicit staged and current-task commit assistance",
       "track": "implicit-trigger",
-      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14d1977e516d0512bc6134b4ea701106ea504d19949d1d7a7aaec8c5ad08165e"
+      "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14e2e74de8fc146dda129ceb437458e91b9a740fcade7a0b7337704458f598d4"
     },
     {
       "name": "Transactional task-hunk staging and restoration",

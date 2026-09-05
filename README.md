@@ -48,16 +48,18 @@ Copy-Item -LiteralPath (Join-Path $runtimeSource 'scripts\stage-transaction.mjs'
 
 ## 提交消息
 
-消息使用 Conventional Commits。简单变更在主题行已能完整说明时只写 subject；文件数量本身不会强制添加正文。对于复杂变更或同一关注点有多个实质处理点时，在空行后使用最少数量、简洁的 `- ` bullets，并按语义合并而不是罗列文件。
+消息使用 Conventional Commits。用户明确指定语言时使用该语言；未指定时，subject 和正文默认使用简体中文。近期提交记录仍可用于判断稳定的 scope 和仓库惯例，但不会把默认语言切换成英文。
+
+简单变更在主题行已能完整说明时只写 subject；文件数量本身不会强制添加正文。对于复杂变更或同一关注点有多个实质处理点时，在空行后使用最少数量、简洁的 `- ` bullets，并按语义合并而不是罗列文件。
 
 例如，打款账户启用状态这一连贯的复杂功能可以使用：
 
 ```text
-feat(payment-account): manage account activation status
+feat(remittance): 添加打款账户启用状态管理功能
 
-- Default new accounts to active and route status changes through a dedicated endpoint
-- Filter account listings by activation status while excluding inactive accounts by default
-- Reject transfers from inactive accounts and preserve status during general edits
+- 新建账户时默认启用，并通过专用接口变更启停状态
+- 查询账户时支持状态筛选，并默认排除已停用账户
+- 转账前校验账户启用状态，防止通用编辑绕过启停规则
 ```
 
 ## 事务式准备与确认
