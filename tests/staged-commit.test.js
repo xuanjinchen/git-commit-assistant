@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { inspectRepository, StagedCommitError } from '../scripts/staged-commit.mjs';
+import {
+  cancelPrepared,
+  inspectRepository,
+  prepareSelection,
+  StagedCommitError,
+} from '../scripts/staged-commit.mjs';
 import {
   createRepository,
   git,
@@ -27,6 +32,35 @@ function runCli(args, input) {
     encoding: 'utf8',
     input,
   });
+}
+
+async function repositoryWithTwoHunksAndUnrelatedStage(t) {
+  const root = await createRepository(t);
+  const staged = numberedLines(24);
+  staged[17] = 'line 18 unrelated staged';
+  await writeFile(path.join(root, 'feature.txt'), `${staged.join('\n')}\n`);
+  git(root, ['add', '--', 'feature.txt']);
+  const worktree = [...staged];
+  worktree[1] = 'line 2 task change';
+  await writeFile(path.join(root, 'feature.txt'), `${worktree.join('\n')}\n`);
+  return root;
+}
+
+async function transactionEntries(root) {
+  const gitDir = git(root, ['rev-parse', '--absolute-git-dir']).stdout.trim();
+  try {
+    return await readdir(path.join(gitDir, 'git-commit-assistant'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+async function inspectTaskChange(root) {
+  const manifest = await inspectRepository({ repository_root: root, candidate_paths: ['feature.txt'] });
+  const selected = manifest.units.find((unit) => unit.patch.includes('task change'));
+  assert.ok(selected, 'fixture must expose the task hunk as a selectable unit');
+  return { manifest, selected };
 }
 
 test('inspect 按独立文本 hunk 返回稳定单元且不修改仓库', async (t) => {
@@ -176,6 +210,170 @@ test('inspect 在候选路径没有变化时返回空 units', async (t) => {
   const manifest = await inspectRepository({ repository_root: root, candidate_paths: ['feature.txt'] });
 
   assert.deepEqual(manifest.units, []);
+});
+
+test('prepare 只暂存选中的同文件 hunk，cancel 原样恢复索引', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const before = await snapshotRepository(root);
+  const { manifest, selected } = await inspectTaskChange(root);
+
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: [selected.unit_id],
+  });
+
+  assert.equal(prepared.status, 'prepared');
+  assert.equal(prepared.selected_unit_count, 1);
+  assert.deepEqual(prepared.selected_paths, ['feature.txt']);
+  const preparedDiff = git(root, ['diff', '--cached']).stdout;
+  assert.match(preparedDiff, /task change/u);
+  assert.doesNotMatch(preparedDiff, /unrelated staged/u);
+  assert.equal((await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id })).status, 'cancelled');
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(await transactionEntries(root), []);
+});
+
+test('prepare 在 manifest stale 时停止且不替换真实索引', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const before = await snapshotRepository(root);
+  const { manifest, selected } = await inspectTaskChange(root);
+  const changed = numberedLines(24);
+  changed[1] = 'line 2 newer task change';
+  changed[17] = 'line 18 unrelated staged';
+  await writeFile(path.join(root, 'feature.txt'), `${changed.join('\n')}\n`);
+
+  await assertRejectsCode(
+    () => prepareSelection({
+      repository_root: root,
+      candidate_paths: manifest.candidate_paths,
+      manifest_sha256: manifest.manifest_sha256,
+      selected_unit_ids: [selected.unit_id],
+    }),
+    'MANIFEST_CHANGED',
+  );
+  const after = await snapshotRepository(root);
+  assert.equal(after.head, before.head);
+  assert.deepEqual(after.index, before.index);
+  assert.deepEqual(await transactionEntries(root), []);
+});
+
+test('prepare 拒绝空选择和未知 unit ID', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const before = await snapshotRepository(root);
+  const { manifest } = await inspectTaskChange(root);
+
+  await assertRejectsCode(
+    () => prepareSelection({
+      repository_root: root,
+      candidate_paths: manifest.candidate_paths,
+      manifest_sha256: manifest.manifest_sha256,
+      selected_unit_ids: [],
+    }),
+    'SELECTION_EMPTY',
+  );
+  await assertRejectsCode(
+    () => prepareSelection({
+      repository_root: root,
+      candidate_paths: manifest.candidate_paths,
+      manifest_sha256: manifest.manifest_sha256,
+      selected_unit_ids: ['unknown-unit'],
+    }),
+    'SELECTION_INVALID',
+  );
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(await transactionEntries(root), []);
+});
+
+test('prepare 拒绝并发 active transaction 且不改写当前 prepared index', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const { manifest, selected } = await inspectTaskChange(root);
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: [selected.unit_id],
+  });
+  const preparedSnapshot = await snapshotRepository(root);
+  const current = await inspectTaskChange(root);
+
+  await assertRejectsCode(
+    () => prepareSelection({
+      repository_root: root,
+      candidate_paths: current.manifest.candidate_paths,
+      manifest_sha256: current.manifest.manifest_sha256,
+      selected_unit_ids: [current.selected.unit_id],
+    }),
+    'ACTIVE_TRANSACTION_EXISTS',
+  );
+  assert.deepEqual(await snapshotRepository(root), preparedSnapshot);
+  assert.deepEqual(await transactionEntries(root), [prepared.transaction_id]);
+});
+
+test('prepare 遇到外部 index.lock 时停止且保留原索引', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const before = await snapshotRepository(root);
+  const { manifest, selected } = await inspectTaskChange(root);
+  const lockPath = git(root, ['rev-parse', '--git-path', 'index.lock']).stdout.trim();
+  await writeFile(path.resolve(root, lockPath), 'foreign lock\n', { flag: 'wx' });
+
+  await assertRejectsCode(
+    () => prepareSelection({
+      repository_root: root,
+      candidate_paths: manifest.candidate_paths,
+      manifest_sha256: manifest.manifest_sha256,
+      selected_unit_ids: [selected.unit_id],
+    }),
+    'INDEX_LOCKED',
+  );
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(await transactionEntries(root), []);
+});
+
+test('prepare 拒绝无法三方恢复的选择且不替换真实索引', async (t) => {
+  const root = await createRepository(t);
+  const staged = numberedLines(24);
+  staged[1] = 'line 2 unrelated staged';
+  await writeFile(path.join(root, 'feature.txt'), `${staged.join('\n')}\n`);
+  git(root, ['add', '--', 'feature.txt']);
+  const worktree = [...staged];
+  worktree[1] = 'line 2 task change';
+  await writeFile(path.join(root, 'feature.txt'), `${worktree.join('\n')}\n`);
+  const before = await snapshotRepository(root);
+  const { manifest, selected } = await inspectTaskChange(root);
+
+  await assertRejectsCode(
+    () => prepareSelection({
+      repository_root: root,
+      candidate_paths: manifest.candidate_paths,
+      manifest_sha256: manifest.manifest_sha256,
+      selected_unit_ids: [selected.unit_id],
+    }),
+    'RESTORE_CONFLICT',
+  );
+  assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(await transactionEntries(root), []);
+});
+
+test('cancel 在真实索引已变化时保留事务且不覆盖新 staged 内容', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const { manifest, selected } = await inspectTaskChange(root);
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: [selected.unit_id],
+  });
+  await writeFile(path.join(root, 'later.txt'), 'later staged content\n');
+  git(root, ['add', '--', 'later.txt']);
+  const changed = await snapshotRepository(root);
+
+  const cancelled = await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id });
+
+  assert.equal(cancelled.status, 'retained');
+  assert.deepEqual(await snapshotRepository(root), changed);
+  assert.deepEqual(await transactionEntries(root), [prepared.transaction_id]);
 });
 
 test('inspect 不读取或报告未列入 candidate_paths 的未跟踪文件', async (t) => {

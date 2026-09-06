@@ -1,11 +1,24 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
+import {
+  copyFile,
+  lstat,
+  mkdtemp,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const SCHEMA_VERSION = 1;
+const TRANSACTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export class StagedCommitError extends Error {
   constructor(code, message) {
@@ -95,6 +108,80 @@ export async function inspectRepository(request, runtime = defaultRuntime) {
   return { status: 'inspected', ...body, manifest_sha256: digest(canonicalJson(body)) };
 }
 
+export async function prepareSelection(request, runtime = defaultRuntime) {
+  const repository = await resolveRepository(request?.repository_root, runtime);
+  const candidatePaths = await validateCandidatePaths(repository, request?.candidate_paths, runtime);
+  const fresh = await inspectRepository({
+    repository_root: repository.root,
+    candidate_paths: candidatePaths,
+  }, runtime);
+  assertManifestAndSelection(fresh, { ...request, candidate_paths: candidatePaths });
+  const transaction = await createTransaction(repository, runtime);
+  try {
+    await copyRealIndex(transaction.real_index, transaction.original_index);
+    await copyRealIndex(transaction.original_index, transaction.original_tree_index);
+    const originalIndexTree = await gitWithIndexText(
+      repository,
+      transaction.original_tree_index,
+      ['write-tree'],
+      runtime,
+    );
+    if (originalIndexTree !== fresh.index_tree_oid) {
+      throw new StagedCommitError('MANIFEST_CHANGED', 'Original index tree changed after inspection.');
+    }
+    await gitWithIndex(repository, transaction.selected_index, ['read-tree', fresh.head_oid], runtime);
+    await applySelectedUnits(
+      repository,
+      transaction.selected_index,
+      fresh.units,
+      request.selected_unit_ids,
+      runtime,
+    );
+    const taskTree = await gitWithIndexText(repository, transaction.selected_index, ['write-tree'], runtime);
+    // 先在两个临时 index 中完成任务视图和可恢复视图，只有二者都验证成功后才替换真实 index。
+    const restoreTree = await mergeRestoreTree(repository, fresh.head_oid, taskTree, originalIndexTree, runtime);
+    await gitWithIndex(repository, transaction.restore_index, ['read-tree', restoreTree], runtime);
+    await assertNoUnmergedEntries(repository, transaction.restore_index, runtime);
+    const preparedState = await writePreparedState(transaction, fresh, request.selected_unit_ids, taskTree);
+    await installIndexAtomically(transaction.selected_index, transaction.real_index);
+    return preparedState;
+  } catch (error) {
+    await rm(transaction.directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function cancelPrepared(request, runtime = defaultRuntime) {
+  const repository = await resolveRepository(request?.repository_root, runtime);
+  const transactionId = validateTransactionId(request?.transaction_id);
+  const transactionRoot = transactionRootPath(repository);
+  const directory = path.join(transactionRoot, transactionId);
+  const state = await readPreparedState(path.join(directory, 'state.json'));
+  if (state.repository_root !== repository.root || state.transaction_id !== transactionId) {
+    throw new StagedCommitError('TRANSACTION_INVALID', 'Prepared transaction does not match this repository.');
+  }
+
+  const currentHead = await gitText(repository, ['rev-parse', 'HEAD'], runtime);
+  const currentIndexSha256 = await fileDigest(state.real_index);
+  if (currentHead !== state.original_head_oid || currentIndexSha256 !== state.prepared_index_sha256) {
+    // 真实 index 已被用户或 Git hook 改写时，取消只能保留事务，避免盲目覆盖新的 staged 内容。
+    await markTransactionRetained(directory, currentHead !== state.original_head_oid ? 'HEAD_CHANGED' : 'INDEX_CHANGED');
+    return { status: 'retained' };
+  }
+
+  try {
+    await installIndexAtomically(path.join(directory, 'original.index'), state.real_index);
+  } catch (error) {
+    if (error instanceof StagedCommitError && error.code === 'INDEX_LOCKED') {
+      await markTransactionRetained(directory, 'INDEX_LOCKED');
+      return { status: 'retained' };
+    }
+    throw error;
+  }
+  await rm(directory, { recursive: true, force: false });
+  return { status: 'cancelled' };
+}
+
 export async function resolveRepository(root, runtime) {
   if (typeof root !== 'string' || root.length === 0) {
     throw new StagedCommitError('NOT_GIT_REPOSITORY', 'repository_root is required.');
@@ -124,6 +211,221 @@ export async function resolveRepository(root, runtime) {
     throw new StagedCommitError('NOT_GIT_REPOSITORY', 'repository_root must be the repository root.');
   }
   return { root: resolvedRoot, gitDir: await realpath(gitDir) };
+}
+
+function assertManifestAndSelection(fresh, request) {
+  if (!arraysEqual(fresh.candidate_paths, request.candidate_paths)) {
+    throw new StagedCommitError('MANIFEST_CHANGED', 'candidate_paths must match the inspected manifest.');
+  }
+  if (fresh.manifest_sha256 !== request?.manifest_sha256) {
+    throw new StagedCommitError('MANIFEST_CHANGED', 'Repository state changed after inspection.');
+  }
+  if (!Array.isArray(request?.selected_unit_ids) || request.selected_unit_ids.length === 0) {
+    throw new StagedCommitError('SELECTION_EMPTY', 'selected_unit_ids must contain at least one unit.');
+  }
+  const available = new Set(fresh.units.map(({ unit_id }) => unit_id));
+  const selected = new Set();
+  for (const unitId of request.selected_unit_ids) {
+    if (typeof unitId !== 'string' || !available.has(unitId) || selected.has(unitId)) {
+      throw new StagedCommitError('SELECTION_INVALID', 'selected_unit_ids must reference manifest units exactly once.');
+    }
+    selected.add(unitId);
+  }
+}
+
+async function createTransaction(repository, runtime) {
+  const transactionRoot = transactionRootPath(repository);
+  await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
+  if ((await activeTransactionIds(transactionRoot)).length > 0) {
+    throw new StagedCommitError('ACTIVE_TRANSACTION_EXISTS', 'A prepared transaction is already active.');
+  }
+  const id = runtime.randomUUID?.() ?? randomUUID();
+  const directory = path.join(transactionRoot, id);
+  await mkdir(directory, { mode: 0o700 });
+  const realIndex = await gitText(repository, ['rev-parse', '--git-path', 'index'], runtime);
+  return {
+    id,
+    directory,
+    repository,
+    real_index: path.resolve(repository.root, realIndex),
+    original_index: path.join(directory, 'original.index'),
+    original_tree_index: path.join(directory, 'original-tree.index'),
+    selected_index: path.join(directory, 'selected.index'),
+    restore_index: path.join(directory, 'restore.index'),
+    state_file: path.join(directory, 'state.json'),
+  };
+}
+
+async function activeTransactionIds(transactionRoot) {
+  let entries;
+  try {
+    entries = await readdir(transactionRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .map((entry) => entry.name);
+}
+
+async function copyRealIndex(source, target) {
+  await copyFile(source, target);
+}
+
+async function gitWithIndex(repository, indexPath, args, runtime, options = {}) {
+  await runGit(repository, args, runtime, {
+    ...options,
+    env: {
+      GIT_INDEX_FILE: indexPath,
+      GIT_LITERAL_PATHSPECS: '1',
+      ...(options.env ?? {}),
+    },
+  });
+}
+
+async function gitWithIndexText(repository, indexPath, args, runtime, options = {}) {
+  return gitText(repository, args, runtime, {
+    ...options,
+    env: {
+      GIT_INDEX_FILE: indexPath,
+      GIT_LITERAL_PATHSPECS: '1',
+      ...(options.env ?? {}),
+    },
+  });
+}
+
+async function applySelectedUnits(repository, indexPath, units, selectedIds, runtime) {
+  const selected = new Set(selectedIds);
+  for (const unit of units.filter(({ unit_id }) => selected.has(unit_id))) {
+    try {
+      await gitWithIndex(repository, indexPath, [
+        'apply', '--cached', '--binary', '--unidiff-zero', '--whitespace=nowarn',
+      ], runtime, { input: unit.patch });
+    } catch (error) {
+      if (error instanceof StagedCommitError) {
+        throw new StagedCommitError('APPLY_FAILED', 'Selected unit could not be applied to the task index.');
+      }
+      throw error;
+    }
+  }
+}
+
+async function assertNoUnmergedEntries(repository, indexPath, runtime) {
+  const unmerged = await gitWithIndexText(repository, indexPath, ['ls-files', '-u'], runtime);
+  if (unmerged.length > 0) {
+    // 三方恢复出现 unmerged entries 说明任务 hunk 与原暂存内容不能无损拆开，不能安装 selected index。
+    throw new StagedCommitError('RESTORE_CONFLICT', 'Selected units cannot be safely restored with the original index.');
+  }
+}
+
+async function mergeRestoreTree(repository, headOid, taskTree, originalIndexTree, runtime) {
+  const taskCommit = await gitText(repository, [
+    'commit-tree', taskTree, '-p', headOid, '-m', 'git-commit-assistant selected index',
+  ], runtime);
+  const originalIndexCommit = await gitText(repository, [
+    'commit-tree', originalIndexTree, '-p', headOid, '-m', 'git-commit-assistant original index',
+  ], runtime);
+  const result = await runGit(repository, [
+    'merge-tree', '--write-tree', '--merge-base', headOid, taskCommit, originalIndexCommit,
+  ], runtime, { allowFailure: true });
+  if ((result.status ?? 0) !== 0) {
+    // 三方内容合并失败时保留原 index，不用存在未合并条目的临时结果冒充可恢复状态。
+    throw new StagedCommitError('RESTORE_CONFLICT', 'Selected units conflict with the original staged content.');
+  }
+  return result.stdout.trim().split(/\r?\n/u)[0];
+}
+
+async function installIndexAtomically(source, target) {
+  const bytes = await readFile(source);
+  const lockPath = `${target}.lock`;
+  let handle;
+  try {
+    handle = await open(lockPath, 'wx', 0o600);
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw new StagedCommitError('INDEX_LOCKED', 'Git index is locked by another process.');
+    }
+    throw new StagedCommitError('INDEX_INSTALL_FAILED', 'Could not create Git index lock.');
+  }
+  let closed = false;
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await handle.close();
+    closed = true;
+    await rename(lockPath, target);
+  } catch {
+    if (!closed) await handle.close().catch(() => {});
+    await rm(lockPath, { force: true });
+    throw new StagedCommitError('INDEX_INSTALL_FAILED', 'Could not install Git index atomically.');
+  }
+}
+
+async function writePreparedState(transaction, manifest, selectedIds, taskTree) {
+  const preparedIndexSha256 = await fileDigest(transaction.selected_index);
+  const originalIndexSha256 = await fileDigest(transaction.original_index);
+  const selectedPaths = [...new Set(manifest.units
+    .filter(({ unit_id }) => selectedIds.includes(unit_id))
+    .map(({ path: unitPath }) => unitPath))].sort((left, right) => left.localeCompare(right));
+  const state = {
+    schema_version: SCHEMA_VERSION,
+    status: 'prepared',
+    transaction_id: transaction.id,
+    repository_root: transaction.repository.root,
+    real_index: transaction.real_index,
+    original_head_oid: manifest.head_oid,
+    original_index_tree_oid: manifest.index_tree_oid,
+    original_index_sha256: originalIndexSha256,
+    prepared_index_sha256: preparedIndexSha256,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: selectedIds,
+    selected_paths: selectedPaths,
+    selected_unit_count: selectedIds.length,
+    staged_tree_oid: taskTree,
+  };
+  await writeFile(transaction.state_file, `${canonicalJson(state)}\n`, { flag: 'wx', mode: 0o600 });
+  return {
+    status: 'prepared',
+    transaction_id: transaction.id,
+    selected_paths: selectedPaths,
+    selected_unit_count: selectedIds.length,
+    staged_tree_oid: taskTree,
+  };
+}
+
+async function readPreparedState(statePath) {
+  try {
+    return JSON.parse(await readFile(statePath, 'utf8'));
+  } catch {
+    throw new StagedCommitError('TRANSACTION_NOT_FOUND', 'Prepared transaction was not found.');
+  }
+}
+
+async function markTransactionRetained(directory, reason) {
+  await writeFile(path.join(directory, 'retained.json'), `${canonicalJson({ reason })}\n`);
+}
+
+function transactionRootPath(repository) {
+  return path.join(repository.gitDir, 'git-commit-assistant');
+}
+
+function validateTransactionId(value) {
+  if (typeof value !== 'string' || !TRANSACTION_ID_PATTERN.test(value)) {
+    throw new StagedCommitError('TRANSACTION_NOT_FOUND', 'transaction_id is invalid.');
+  }
+  return value;
+}
+
+async function fileDigest(filePath) {
+  return digest(await readFile(filePath));
+}
+
+function arraysEqual(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
 }
 
 export async function validateCandidatePaths(repository, paths, runtime) {
