@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -62,11 +62,7 @@ function transactionDirectory(root, transactionId) {
   return path.join(gitDir, 'git-commit-assistant', transactionId);
 }
 
-async function readPreparedStateForTest(root, transactionId) {
-  return JSON.parse(await readFile(path.join(transactionDirectory(root, transactionId), 'state.json'), 'utf8'));
-}
-
-async function snapshotMainObjects(root) {
+async function snapshotMainObjectTypes(root) {
   const objectsRoot = path.resolve(root, git(root, ['rev-parse', '--git-path', 'objects']).stdout.trim());
   const entries = [];
   async function walk(directory) {
@@ -76,7 +72,8 @@ async function snapshotMainObjects(root) {
       if (entry.isDirectory()) {
         await walk(absolute);
       } else if (entry.isFile()) {
-        entries.push(path.relative(objectsRoot, absolute).split(path.sep).join('/'));
+        const relative = path.relative(objectsRoot, absolute).split(path.sep).join('');
+        entries.push(`${relative} ${git(root, ['cat-file', '-t', relative]).stdout.trim()}`);
       }
     }
   }
@@ -84,10 +81,10 @@ async function snapshotMainObjects(root) {
   return entries.sort((left, right) => left.localeCompare(right));
 }
 
-async function preparedGitEnv(root, transactionId) {
-  const state = await readPreparedStateForTest(root, transactionId);
-  return state.object_directory === undefined ? {} : {
-    GIT_ALTERNATE_OBJECT_DIRECTORIES: state.object_directory,
+function snapshotReferences(root) {
+  return {
+    head: git(root, ['rev-parse', 'HEAD']).stdout.trim(),
+    refs: git(root, ['for-each-ref', '--format=%(refname) %(objectname)']).stdout,
   };
 }
 
@@ -271,9 +268,7 @@ test('prepare 只暂存选中的同文件 hunk，cancel 原样恢复索引', asy
   assert.equal(prepared.status, 'prepared');
   assert.equal(prepared.selected_unit_count, 1);
   assert.deepEqual(prepared.selected_paths, ['feature.txt']);
-  const preparedDiff = git(root, ['diff', '--cached'], {
-    env: await preparedGitEnv(root, prepared.transaction_id),
-  }).stdout;
+  const preparedDiff = git(root, ['diff', '--cached']).stdout;
   assert.match(preparedDiff, /task change/u);
   assert.doesNotMatch(preparedDiff, /unrelated staged/u);
   assert.equal((await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id })).status, 'cancelled');
@@ -281,9 +276,10 @@ test('prepare 只暂存选中的同文件 hunk，cancel 原样恢复索引', asy
   assert.deepEqual(await transactionEntries(root), []);
 });
 
-test('prepare 不向主对象库写入未确认对象', async (t) => {
+test('prepare 不创建 commit 或 ref 且普通 staged diff 可读', async (t) => {
   const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
-  const beforeObjects = await snapshotMainObjects(root);
+  const beforeObjects = await snapshotMainObjectTypes(root);
+  const beforeReferences = snapshotReferences(root);
   const { manifest, selected } = await inspectTaskChange(root);
 
   const prepared = await prepareSelection({
@@ -293,7 +289,15 @@ test('prepare 不向主对象库写入未确认对象', async (t) => {
     selected_unit_ids: [selected.unit_id],
   });
 
-  assert.deepEqual(await snapshotMainObjects(root), beforeObjects);
+  const preparedDiff = git(root, ['diff', '--cached']).stdout;
+  assert.match(preparedDiff, /task change/u);
+  assert.doesNotMatch(preparedDiff, /unrelated staged/u);
+  assert.deepEqual(snapshotReferences(root), beforeReferences);
+  const beforeObjectIds = new Set(beforeObjects.map((entry) => entry.split(' ')[0]));
+  const createdObjectTypes = (await snapshotMainObjectTypes(root))
+    .filter((entry) => !beforeObjectIds.has(entry.split(' ')[0]))
+    .map((entry) => entry.split(' ')[1]);
+  assert.ok(!createdObjectTypes.includes('commit'), 'prepare must not create commits in the main object store');
   const transactionObjects = await readdir(
     path.join(transactionDirectory(root, prepared.transaction_id), 'objects'),
   );
@@ -479,18 +483,14 @@ test('cancel 在最终恢复前复验真实 index 并保留 late staged 内容',
   const runtime = installMutationRuntime('cancel', async () => {
     injected = true;
     await writeFile(path.join(root, 'late-cancel.txt'), 'late cancel staged content\n');
-    git(root, ['add', '--', 'late-cancel.txt'], {
-      env: await preparedGitEnv(root, prepared.transaction_id),
-    });
+    git(root, ['add', '--', 'late-cancel.txt']);
   });
 
   const cancelled = await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id }, runtime);
 
   assert.equal(cancelled.status, 'retained');
   assert.equal(injected, true);
-  assert.match(git(root, ['diff', '--cached', '--name-only'], {
-    env: await preparedGitEnv(root, prepared.transaction_id),
-  }).stdout, /^feature\.txt\nlate-cancel\.txt\n$/u);
+  assert.match(git(root, ['diff', '--cached', '--name-only']).stdout, /^feature\.txt\nlate-cancel\.txt\n$/u);
   assert.deepEqual(await transactionEntries(root), [prepared.transaction_id]);
 });
 

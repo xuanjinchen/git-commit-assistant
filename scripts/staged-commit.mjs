@@ -151,6 +151,7 @@ export async function prepareSelection(request, runtime = defaultRuntime) {
       env: transactionObjectEnvironment(transaction),
     });
     await assertNoUnmergedEntries(repository, transaction.restore_index, runtime);
+    await publishPreparedIndexObjects(repository, transaction, taskTree, runtime);
     const originalIndexSha256 = await fileDigest(transaction.original_index);
     const preparedState = await writePreparedState(transaction, fresh, request.selected_unit_ids, taskTree);
     await installIndexAtomically(transaction.selected_index, transaction.real_index, {
@@ -334,6 +335,17 @@ async function gitWithIndexText(repository, indexPath, args, runtime, options = 
   });
 }
 
+async function gitWithIndexBytes(repository, indexPath, args, runtime, options = {}) {
+  return gitBytes(repository, args, runtime, {
+    ...options,
+    env: {
+      GIT_INDEX_FILE: indexPath,
+      GIT_LITERAL_PATHSPECS: '1',
+      ...(options.env ?? {}),
+    },
+  });
+}
+
 async function applySelectedUnits(repository, transaction, indexPath, units, selectedIds, runtime) {
   const selected = new Set(selectedIds);
   for (const unit of units.filter(({ unit_id }) => selected.has(unit_id))) {
@@ -375,8 +387,36 @@ async function mergeRestoreTree(repository, transaction, headOid, taskTree, orig
   return result.stdout.trim().split(/\r?\n/u)[0];
 }
 
+async function publishPreparedIndexObjects(repository, transaction, taskTree, runtime) {
+  const entries = await gitWithIndexBytes(repository, transaction.selected_index, ['ls-files', '-s', '-z'], runtime, {
+    env: transactionObjectEnvironment(transaction),
+  });
+  const blobOids = new Set(splitNull(entries)
+    .map((entry) => entry.toString('utf8').match(/^(\d+) ([0-9a-f]+) (\d)\t/u))
+    .filter((match) => match !== null && match[1] !== '160000' && match[3] === '0')
+    .map((match) => match[2]));
+  for (const oid of blobOids) {
+    const exists = await runGit(repository, ['cat-file', '-e', oid], runtime, { allowFailure: true });
+    if ((exists.status ?? 0) === 0) continue;
+    const content = await gitBytes(repository, ['cat-file', 'blob', oid], runtime, {
+      env: transactionObjectEnvironment(transaction),
+    });
+    const written = await gitText(repository, ['hash-object', '-w', '--stdin'], runtime, { input: content });
+    if (written !== oid) {
+      throw new StagedCommitError('OBJECT_PUBLISH_FAILED', 'Prepared index object could not be published safely.');
+    }
+  }
+  // 真实 index 安装后必须能被普通 Git 读取；只发布索引需要的 blob/tree，临时 merge commit 仍隔离在事务对象库。
+  const publishedTree = await gitWithIndexText(repository, transaction.selected_index, ['write-tree'], runtime, {
+    env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: transaction.object_directory },
+  });
+  if (publishedTree !== taskTree) {
+    throw new StagedCommitError('OBJECT_PUBLISH_FAILED', 'Prepared index tree changed while publishing objects.');
+  }
+}
+
 function transactionObjectEnvironment(transaction) {
-  // prepare 期间产生的 blob/tree/commit 只进入事务对象库；后续 commit 阶段再决定如何导入。
+  // prepare 的合并验证会创建临时 commit；先隔离到事务对象库，安装前再显式发布真实 index 所需对象。
   return {
     GIT_OBJECT_DIRECTORY: transaction.object_directory,
     GIT_ALTERNATE_OBJECT_DIRECTORIES: transaction.main_object_directory,
