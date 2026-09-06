@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
+  bindMessage,
   cancelPrepared,
+  commitPrepared,
   defaultRuntime,
   inspectRepository,
   prepareSelection,
@@ -102,6 +104,26 @@ async function inspectTaskChange(root) {
   const selected = manifest.units.find((unit) => unit.patch.includes('task change'));
   assert.ok(selected, 'fixture must expose the task hunk as a selectable unit');
   return { manifest, selected };
+}
+
+async function prepareTaskFixture(t) {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const manifest = await inspectRepository({ repository_root: root, candidate_paths: ['feature.txt'] });
+  const selected = manifest.units.find((unit) => unit.patch.includes('task change'));
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: [selected.unit_id],
+  });
+  return { root, ...prepared };
+}
+
+async function installHook(root, name, content) {
+  const hookPath = path.resolve(root, git(root, ['rev-parse', '--git-path', `hooks/${name}`]).stdout.trim());
+  await writeFile(hookPath, `#!/bin/sh\n${content}\n`);
+  await chmod(hookPath, 0o755);
+  return hookPath;
 }
 
 test('inspect 按独立文本 hunk 返回稳定单元且不修改仓库', async (t) => {
@@ -492,6 +514,216 @@ test('cancel 在最终恢复前复验真实 index 并保留 late staged 内容',
   assert.equal(injected, true);
   assert.match(git(root, ['diff', '--cached', '--name-only']).stdout, /^feature\.txt\nlate-cancel\.txt\n$/u);
   assert.deepEqual(await transactionEntries(root), [prepared.transaction_id]);
+});
+
+test('bind 将消息绑定到 HEAD、任务树、选择与规范化字节', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  const bound = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message: 'feat(core): 添加任务行为\r\n\r\n- 保留无关暂存内容\r\n',
+  });
+
+  assert.match(bound.confirmation_id, /^[0-9a-f]{12}$/u);
+  assert.equal(bound.status, 'awaiting-confirmation');
+  const same = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message: 'feat(core): 添加任务行为\n\n- 保留无关暂存内容\n',
+  });
+  assert.equal(same.confirmation_id, bound.confirmation_id);
+  const state = JSON.parse(await readFile(
+    path.join(transactionDirectory(prepared.root, prepared.transaction_id), 'state.json'),
+    'utf8',
+  ));
+  assert.equal('message' in state, false);
+  assert.equal(state.message_sha256, bound.message_sha256);
+});
+
+test('bind 消息变化产生新的确认标识，提交必须使用第二次确认', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  const first = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message: 'feat: first',
+  });
+  const second = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message: 'feat: second',
+  });
+  assert.notEqual(second.confirmation_id, first.confirmation_id);
+  const stale = await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: first.confirmation_id,
+    message: 'feat: first',
+  });
+  assert.deepEqual(stale, { status: 'stopped', code: 'CONFIRMATION_STALE' });
+  assert.equal(git(prepared.root, ['rev-list', '--count', 'HEAD']).stdout.trim(), '1');
+});
+
+test('commit 只提交任务树并恢复原无关 staged 内容', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  const message = 'feat(core): 添加任务行为';
+  const bound = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message,
+  });
+  const result = await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: bound.confirmation_id,
+    message,
+  });
+
+  assert.equal(result.status, 'committed');
+  assert.equal((await git(prepared.root, ['show', '-s', '--format=%s', 'HEAD'])).stdout.trim(), message);
+  assert.match((await git(prepared.root, ['diff', '--cached'])).stdout, /unrelated staged/u);
+  assert.doesNotMatch((await git(prepared.root, ['show', '--format=', 'HEAD'])).stdout, /unrelated staged/u);
+  assert.deepEqual(await transactionEntries(prepared.root), []);
+});
+
+test('pre-commit 拒绝时恢复原 index 并清理事务', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  const before = await snapshotRepository(prepared.root);
+  await installHook(prepared.root, 'pre-commit', 'exit 1');
+  const message = 'feat: rejected';
+  const bound = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message,
+  });
+
+  const result = await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: bound.confirmation_id,
+    message,
+  });
+
+  assert.deepEqual(result, { status: 'stopped', code: 'COMMIT_FAILED' });
+  assert.equal(git(prepared.root, ['rev-list', '--count', 'HEAD']).stdout.trim(), '1');
+  assert.match(git(prepared.root, ['diff', '--cached']).stdout, /unrelated staged/u);
+  assert.deepEqual(await transactionEntries(prepared.root), []);
+  assert.equal(before.head, git(prepared.root, ['rev-parse', 'HEAD']).stdout.trim());
+});
+
+test('hook 改写 index 或 HEAD tree 异常时保留恢复资料而不覆盖新 staged 内容', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  await writeFile(path.join(prepared.root, 'hook-staged.txt'), 'hook staged content\n');
+  await installHook(prepared.root, 'pre-commit', `git add -- hook-staged.txt`);
+  const message = 'feat: hook changes index';
+  const bound = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message,
+  });
+
+  const result = await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: bound.confirmation_id,
+    message,
+  });
+
+  assert.equal(result.status, 'retained');
+  assert.equal(result.code, 'COMMIT_TREE_MISMATCH');
+  assert.match(git(prepared.root, ['show', '--format=', 'HEAD']).stdout, /hook staged content/u);
+  assert.deepEqual(await transactionEntries(prepared.root), [prepared.transaction_id]);
+});
+
+test('恢复成功前出现新的 staged 内容时保留事务且不覆盖用户 index', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  const message = 'feat: late staged after commit';
+  const bound = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message,
+  });
+  const runtime = installMutationRuntime('restore-success', async () => {
+    await writeFile(path.join(prepared.root, 'late-restore.txt'), 'late restore content\n');
+    git(prepared.root, ['add', '--', 'late-restore.txt']);
+  });
+
+  const result = await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: bound.confirmation_id,
+    message,
+  }, runtime);
+
+  assert.deepEqual(result, { status: 'retained', code: 'INDEX_CHANGED' });
+  assert.match(git(prepared.root, ['diff', '--cached', '--name-only']).stdout, /late-restore\.txt/u);
+  assert.deepEqual(await transactionEntries(prepared.root), [prepared.transaction_id]);
+});
+
+test('commit 只启动一次无 shell 的 git commit 参数调用', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  const message = 'feat: one commit process';
+  const bound = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message,
+  });
+  const calls = [];
+  const runtime = {
+    ...defaultRuntime,
+    spawnGit(repositoryRoot, args, options) {
+      calls.push({ repositoryRoot, args, options });
+      return defaultRuntime.spawnGit(repositoryRoot, args, options);
+    },
+  };
+
+  await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: bound.confirmation_id,
+    message,
+  }, runtime);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(0, 3), ['commit', '--no-gpg-sign', '-F']);
+  assert.equal(calls[0].options.shell, false);
+  assert.doesNotMatch(calls[0].args.join(' '), /--no-verify|--amend/u);
+});
+
+test('cancel 后再次提交返回 TRANSACTION_NOT_ACTIVE', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  await cancelPrepared({ repository_root: prepared.root, transaction_id: prepared.transaction_id });
+  const result = await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: '000000000000',
+    message: 'feat: cancelled',
+  });
+  assert.deepEqual(result, { status: 'stopped', code: 'TRANSACTION_NOT_ACTIVE' });
+});
+
+test('CLI 路由 bind 和 commit 使用单行 JSON 协议', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  const message = 'feat: cli commit';
+  const boundCli = runCli(['bind'], `${JSON.stringify({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message,
+  })}\n`);
+  assert.equal(boundCli.status, 0, boundCli.stderr);
+  assert.equal(boundCli.stderr, '');
+  assert.equal(boundCli.stdout.trimEnd().split('\n').length, 1);
+  const bound = JSON.parse(boundCli.stdout);
+  assert.equal(bound.ok, true);
+  const commitCli = runCli(['commit'], `${JSON.stringify({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: bound.confirmation_id,
+    message,
+  })}\n`);
+  assert.equal(commitCli.status, 0, commitCli.stderr);
+  assert.equal(commitCli.stderr, '');
+  assert.equal(commitCli.stdout.trimEnd().split('\n').length, 1);
+  assert.equal(JSON.parse(commitCli.stdout).status, 'committed');
 });
 
 test('inspect 不读取或报告未列入 candidate_paths 的未跟踪文件', async (t) => {

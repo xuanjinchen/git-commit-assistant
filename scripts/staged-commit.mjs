@@ -152,6 +152,7 @@ export async function prepareSelection(request, runtime = defaultRuntime) {
     });
     await assertNoUnmergedEntries(repository, transaction.restore_index, runtime);
     await publishPreparedIndexObjects(repository, transaction, taskTree, runtime);
+    await publishIndexObjects(repository, transaction, transaction.restore_index, runtime);
     const originalIndexSha256 = await fileDigest(transaction.original_index);
     const preparedState = await writePreparedState(transaction, fresh, request.selected_unit_ids, taskTree);
     await installIndexAtomically(transaction.selected_index, transaction.real_index, {
@@ -211,6 +212,109 @@ export async function cancelPrepared(request, runtime = defaultRuntime) {
   }
   await rm(directory, { recursive: true, force: false });
   return { status: 'cancelled' };
+}
+
+export async function bindMessage(request, runtime = defaultRuntime) {
+  const repository = await resolveRepository(request?.repository_root, runtime);
+  const transactionId = validateTransactionId(request?.transaction_id);
+  const active = await readActiveState(repository, transactionId);
+  const message = canonicalMessage(request?.message);
+  const messageBytes = Buffer.from(message, 'utf8');
+  try {
+    await assertPreparedBinding(active.state, repository, runtime);
+  } catch (error) {
+    if (error instanceof StagedCommitError && error.code === 'CONFIRMATION_STALE') {
+      return { status: 'stopped', code: error.code };
+    }
+    throw error;
+  }
+  const messageSha256 = digest(messageBytes);
+  const confirmation = confirmationId(active.state, messageBytes);
+  const state = {
+    ...active.state,
+    status: 'bound',
+    message_sha256: messageSha256,
+    confirmation_id: confirmation,
+  };
+  await writeActiveState(active.directory, state);
+  return {
+    status: 'awaiting-confirmation',
+    confirmation_id: confirmation,
+    message_sha256: messageSha256,
+  };
+}
+
+export async function commitPrepared(request, runtime = defaultRuntime) {
+  const repository = await resolveRepository(request?.repository_root, runtime);
+  const transactionId = validateTransactionId(request?.transaction_id);
+  let active;
+  try {
+    active = await readActiveState(repository, transactionId);
+  } catch (error) {
+    if (error instanceof StagedCommitError && error.code === 'TRANSACTION_NOT_FOUND') {
+      return { status: 'stopped', code: 'TRANSACTION_NOT_ACTIVE' };
+    }
+    throw error;
+  }
+  const message = canonicalMessage(request?.message);
+  const messageBytes = Buffer.from(message, 'utf8');
+  const expectedMessageSha256 = digest(messageBytes);
+  if (active.state.status !== 'bound'
+    || active.state.message_sha256 !== expectedMessageSha256
+    || active.state.confirmation_id !== request?.confirmation_id
+    || confirmationId(active.state, messageBytes) !== request?.confirmation_id) {
+    return { status: 'stopped', code: 'CONFIRMATION_STALE' };
+  }
+  try {
+    await assertPreparedBinding(active.state, repository, runtime);
+  } catch (error) {
+    if (error instanceof StagedCommitError && error.code === 'CONFIRMATION_STALE') {
+      return { status: 'stopped', code: error.code };
+    }
+    throw error;
+  }
+
+  const messageFile = await writeMessageExclusive(active.directory, messageBytes);
+  try {
+    let commitResult;
+    try {
+      commitResult = await runCommit(repository, messageFile, runtime);
+    } catch {
+      commitResult = { status: 1 };
+    }
+    if ((commitResult.status ?? 1) !== 0) {
+      return await restoreAfterFailure(active.state, repository, runtime);
+    }
+
+    let commitOid;
+    let commitTree;
+    let currentIndexTree;
+    try {
+      commitOid = await gitText(repository, ['rev-parse', 'HEAD'], runtime);
+      commitTree = await gitText(repository, ['rev-parse', 'HEAD^{tree}'], runtime);
+      currentIndexTree = await readIndexTree(repository, runtime, {
+        index_path: active.state.real_index,
+        alternate_object_directories: [active.state.object_directory],
+      });
+    } catch {
+      await markTransactionRetained(active.directory, 'RECOVERY_REQUIRED');
+      return { status: 'retained', code: 'RECOVERY_REQUIRED' };
+    }
+    if (commitTree !== active.state.staged_tree_oid) {
+      await markTransactionRetained(active.directory, 'COMMIT_TREE_MISMATCH');
+      return { status: 'retained', code: 'COMMIT_TREE_MISMATCH' };
+    }
+    if (currentIndexTree !== active.state.staged_tree_oid) {
+      await markTransactionRetained(active.directory, 'INDEX_CHANGED');
+      return { status: 'retained', code: 'INDEX_CHANGED' };
+    }
+    const restored = await restoreAfterSuccess(active.state, repository, runtime, commitOid);
+    if (restored.status !== 'committed') return restored;
+    const subject = await gitText(repository, ['show', '-s', '--format=%s', 'HEAD'], runtime);
+    return { ...restored, commit_oid: commitOid, subject };
+  } finally {
+    await rm(messageFile, { force: true });
+  }
 }
 
 export async function resolveRepository(root, runtime) {
@@ -288,6 +392,179 @@ async function createTransaction(repository, runtime) {
     restore_index: path.join(directory, 'restore.index'),
     state_file: path.join(directory, 'state.json'),
   };
+}
+
+async function readActiveState(repository, transactionId) {
+  const directory = path.join(transactionRootPath(repository), transactionId);
+  const state = await readPreparedState(path.join(directory, 'state.json'));
+  if (state.repository_root !== repository.root || state.transaction_id !== transactionId) {
+    throw new StagedCommitError('TRANSACTION_INVALID', 'Prepared transaction does not match this repository.');
+  }
+  if (!['prepared', 'bound'].includes(state.status)) {
+    throw new StagedCommitError('TRANSACTION_NOT_ACTIVE', 'Prepared transaction is not active.');
+  }
+  return { directory, state };
+}
+
+async function writeActiveState(directory, state) {
+  const temporary = path.join(directory, `state.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, `${canonicalJson(state)}\n`, { flag: 'wx', mode: 0o600 });
+    await rename(temporary, path.join(directory, 'state.json'));
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+async function assertPreparedBinding(state, repository, runtime) {
+  const currentHead = await gitText(repository, ['rev-parse', 'HEAD'], runtime);
+  if (currentHead !== state.original_head_oid) {
+    throw new StagedCommitError('CONFIRMATION_STALE', 'Prepared repository HEAD changed.');
+  }
+  let currentIndexSha256;
+  try {
+    currentIndexSha256 = await fileDigest(state.real_index);
+  } catch {
+    throw new StagedCommitError('CONFIRMATION_STALE', 'Prepared Git index is unavailable.');
+  }
+  if (currentIndexSha256 !== state.prepared_index_sha256) {
+    throw new StagedCommitError('CONFIRMATION_STALE', 'Prepared Git index changed.');
+  }
+  const currentTree = await readIndexTree(repository, runtime, {
+    index_path: state.real_index,
+    alternate_object_directories: [state.object_directory],
+  });
+  if (currentTree !== state.staged_tree_oid) {
+    throw new StagedCommitError('CONFIRMATION_STALE', 'Prepared task tree changed.');
+  }
+}
+
+function canonicalMessage(value) {
+  if (typeof value !== 'string' || value.includes('\0') || value.startsWith('\uFEFF')) {
+    throw new StagedCommitError('MESSAGE_INVALID', 'Commit message must be UTF-8 text.');
+  }
+  const normalized = value.replace(/\r\n?/gu, '\n').replace(/\n+$/u, '');
+  if (normalized.trim() === '') {
+    throw new StagedCommitError('MESSAGE_EMPTY', 'Commit message is empty.');
+  }
+  return `${normalized}\n`;
+}
+
+function confirmationId(state, messageBytes) {
+  return digest(canonicalJson({
+    head_oid: state.original_head_oid,
+    task_tree_oid: state.staged_tree_oid,
+    selected_unit_ids: state.selected_unit_ids,
+    message_sha256: digest(messageBytes),
+  })).slice(0, 12);
+}
+
+async function writeMessageExclusive(directory, bytes) {
+  const messageFile = path.join(directory, 'message.txt');
+  let handle;
+  try {
+    handle = await open(messageFile, 'wx', 0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } catch (error) {
+    await rm(messageFile, { force: true });
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+  return messageFile;
+}
+
+async function runCommit(repository, messageFile, runtime) {
+  const runner = runtime.spawnGit ?? defaultRuntime.spawnGit;
+  const child = runner(repository.root, ['commit', '--no-gpg-sign', '-F', messageFile], {
+    env: { GIT_OPTIONAL_LOCKS: '0' },
+    shell: false,
+  });
+  child.stdout?.resume();
+  child.stderr?.resume();
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ status: code ?? 1 }));
+  });
+}
+
+async function restoreAfterSuccess(state, repository, runtime, commitOid) {
+  const directory = path.join(transactionRootPath(repository), state.transaction_id);
+  let currentIndexSha256;
+  try {
+    currentIndexSha256 = await fileDigest(state.real_index);
+  } catch {
+    await markTransactionRetained(directory, 'RECOVERY_REQUIRED');
+    return { status: 'retained', code: 'RECOVERY_REQUIRED' };
+  }
+  try {
+    await installIndexAtomically(path.join(directory, 'restore.index'), state.real_index, {
+      repository,
+      runtime,
+      operation: 'restore-success',
+      expected: {
+        head_oid: commitOid,
+        index_sha256: currentIndexSha256,
+        index_tree_oid: state.staged_tree_oid,
+        alternate_object_directories: [state.object_directory],
+      },
+    });
+  } catch (error) {
+    if (error instanceof StagedCommitError
+      && ['HEAD_CHANGED', 'INDEX_CHANGED', 'INDEX_LOCKED'].includes(error.code)) {
+      await markTransactionRetained(directory, error.code);
+      return { status: 'retained', code: error.code };
+    }
+    throw error;
+  }
+  await rm(directory, { recursive: true, force: false });
+  return { status: 'committed', restored_paths: state.selected_paths };
+}
+
+async function restoreAfterFailure(state, repository, runtime) {
+  const directory = path.join(transactionRootPath(repository), state.transaction_id);
+  let currentHead;
+  try {
+    currentHead = await gitText(repository, ['rev-parse', 'HEAD'], runtime);
+  } catch {
+    await markTransactionRetained(directory, 'RECOVERY_REQUIRED');
+    return { status: 'retained', code: 'RECOVERY_REQUIRED' };
+  }
+  let currentIndexSha256;
+  try {
+    currentIndexSha256 = await fileDigest(state.real_index);
+  } catch {
+    await markTransactionRetained(directory, 'RECOVERY_REQUIRED');
+    return { status: 'retained', code: 'RECOVERY_REQUIRED' };
+  }
+  if (currentHead !== state.original_head_oid || currentIndexSha256 !== state.prepared_index_sha256) {
+    // 避免覆盖 hook 或用户在等待期间产生的新 staged 内容，变化时必须保留恢复资料。
+    await markTransactionRetained(directory, 'RECOVERY_REQUIRED');
+    return { status: 'retained', code: 'RECOVERY_REQUIRED' };
+  }
+  try {
+    await installIndexAtomically(path.join(directory, 'original.index'), state.real_index, {
+      repository,
+      runtime,
+      operation: 'restore-failure',
+      expected: {
+        head_oid: state.original_head_oid,
+        index_sha256: state.prepared_index_sha256,
+        index_tree_oid: state.staged_tree_oid,
+        alternate_object_directories: [state.object_directory],
+      },
+    });
+  } catch (error) {
+    if (error instanceof StagedCommitError
+      && ['HEAD_CHANGED', 'INDEX_CHANGED', 'INDEX_LOCKED'].includes(error.code)) {
+      await markTransactionRetained(directory, 'RECOVERY_REQUIRED');
+      return { status: 'retained', code: 'RECOVERY_REQUIRED' };
+    }
+    throw error;
+  }
+  await rm(directory, { recursive: true, force: false });
+  return { status: 'stopped', code: 'COMMIT_FAILED' };
 }
 
 async function assertNoActiveTransaction(repository) {
@@ -388,7 +665,17 @@ async function mergeRestoreTree(repository, transaction, headOid, taskTree, orig
 }
 
 async function publishPreparedIndexObjects(repository, transaction, taskTree, runtime) {
-  const entries = await gitWithIndexBytes(repository, transaction.selected_index, ['ls-files', '-s', '-z'], runtime, {
+  await publishIndexObjects(repository, transaction, transaction.selected_index, runtime);
+  const publishedTree = await gitWithIndexText(repository, transaction.selected_index, ['write-tree'], runtime, {
+    env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: transaction.object_directory },
+  });
+  if (publishedTree !== taskTree) {
+    throw new StagedCommitError('OBJECT_PUBLISH_FAILED', 'Prepared index tree changed while publishing objects.');
+  }
+}
+
+async function publishIndexObjects(repository, transaction, indexPath, runtime) {
+  const entries = await gitWithIndexBytes(repository, indexPath, ['ls-files', '-s', '-z'], runtime, {
     env: transactionObjectEnvironment(transaction),
   });
   const blobOids = new Set(splitNull(entries)
@@ -405,13 +692,6 @@ async function publishPreparedIndexObjects(repository, transaction, taskTree, ru
     if (written !== oid) {
       throw new StagedCommitError('OBJECT_PUBLISH_FAILED', 'Prepared index object could not be published safely.');
     }
-  }
-  // 真实 index 安装后必须能被普通 Git 读取；只发布索引需要的 blob/tree，临时 merge commit 仍隔离在事务对象库。
-  const publishedTree = await gitWithIndexText(repository, transaction.selected_index, ['write-tree'], runtime, {
-    env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: transaction.object_directory },
-  });
-  if (publishedTree !== taskTree) {
-    throw new StagedCommitError('OBJECT_PUBLISH_FAILED', 'Prepared index tree changed while publishing objects.');
   }
 }
 
@@ -813,16 +1093,24 @@ function writeCliResult(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+const COMMANDS = new Map([
+  ['inspect', inspectRepository],
+  ['prepare', prepareSelection],
+  ['bind', bindMessage],
+  ['cancel', cancelPrepared],
+  ['commit', commitPrepared],
+]);
+
 async function runCli() {
   const [command, ...extra] = process.argv.slice(2);
-  if (command !== 'inspect' || extra.length !== 0) {
+  if (!COMMANDS.has(command) || extra.length !== 0) {
     writeCliResult({ ok: false, status: 'failed', error: { code: 'PROTOCOL_ERROR' } });
     process.exitCode = 2;
     return;
   }
   try {
-    const manifest = await inspectRepository(await readCliRequest());
-    writeCliResult({ ok: true, ...manifest });
+    const result = await COMMANDS.get(command)(await readCliRequest());
+    writeCliResult({ ok: true, ...result });
   } catch (error) {
     const code = error instanceof StagedCommitError ? error.code : 'INTERNAL_ERROR';
     writeCliResult({ ok: false, status: 'failed', error: { code } });
