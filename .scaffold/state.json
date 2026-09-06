@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "scaffold_version": "0.1.0",
-  "status": "ready",
+  "status": "draft",
   "skill": {
     "name": "git-commit-assistant",
     "description": "Generate Conventional Commit messages for staged or current-task Git changes, prepare only task-related hunks for explicit commit requests, and commit only after a second confirmation; not for Git explanations, history review, history rewriting, or combined push/release requests.",

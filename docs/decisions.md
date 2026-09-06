@@ -97,7 +97,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-012",
-      "status": "active",
+      "status": "superseded",
       "scope": "runtime architecture",
       "decision": "Ship SKILL.md plus scripts/stage-transaction.mjs; the Agent selects task-related manifest units and the script alone performs deterministic index transactions.",
       "evidence": "User-confirmed Version 5 transactional auto-staging design on 2026-08-20.",
@@ -105,7 +105,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-013",
-      "status": "active",
+      "status": "superseded",
       "scope": "commit authorization",
       "decision": "An explicit commit request authorizes inspect and prepare only; commit still requires a second confirmation bound to HEAD, original index, manifest, selected units, worktree state, task tree, script, and complete message digests.",
       "evidence": "User confirmed prepare authorization and retained second confirmation.",
@@ -113,7 +113,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-014",
-      "status": "active",
+      "status": "superseded",
       "scope": "staging transaction",
       "decision": "Build the task and recovery indexes plus new Git objects in an owned external temporary transaction, leaving the real index, worktree, and main object database unchanged before confirmation.",
       "evidence": "Confirmed external-index design and deterministic safety analysis.",
@@ -121,7 +121,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-015",
-      "status": "active",
+      "status": "superseded",
       "scope": "recovery",
       "decision": "After success atomically install an index based on the actual new HEAD with original unrelated staged changes; on cancellation, rejection, stale binding, or failure preserve all user bytes and retain recovery evidence whenever automatic cleanup is unsafe.",
       "evidence": "User confirmed cancellation, failure, success, and unrelated-stage restoration semantics.",
@@ -129,7 +129,7 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-016",
-      "status": "active",
+      "status": "superseded",
       "scope": "concurrency threat model",
       "decision": "Clarify only the concurrency-related guarantees of DEC-004, DEC-014, and DEC-015 with portable cooperative concurrency: stop when a bound or protected content, identity, path, ownership, or metadata change is observable at a defined validation or recovery checkpoint, and preserve foreign state when ownership is uncertain. Do not claim protection against a deliberately hostile same-privilege process that races inside an individual filesystem-syscall gap and uses native APIs to erase every observable trace; do not add a platform-native helper for that residual risk. Hooks remain untrusted, observable hook mutations and post-commit actual HEAD/tree verification remain in scope, and all non-concurrency safeguards in those decisions remain unchanged.",
       "evidence": "User approved the review-driven portable threat-model revision on 2026-08-23 after independent Round 4 review demonstrated that Node.js lacks cross-platform descriptor-bound unlink/rename and that child-visible path, identity, and timestamp barriers alone cannot prove which tree the parent Git process loaded after hooks before commit-object creation.",
@@ -177,11 +177,35 @@ Record requirement interpretations and superseding decisions without rewriting h
     },
     {
       "id": "DEC-022",
-      "status": "active",
+      "status": "superseded",
       "scope": "Version 6 delivery evidence and global installation",
       "decision": "Close the Version 6 language-policy update with SKILL.md SHA-256 816711cdf84ff4565ec9d32d5078fd3f5a745fe0c04c0c31c001549f082ce1ca, unchanged transaction-script SHA-256 b7332abc9bdf5a2839eb75d793a9fa44f767865ab0cbff231c4212540b873791, and a conservative 1,778/1,800 prompt budget. The global installation contains exactly those two runtime files and must pass an installed inspect smoke without changing the isolated repository. Preserve the prior 87-file installation as a recoverable backup outside the Skill discovery root rather than deleting it.",
       "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14e2e74de8fc146dda129ceb437458e91b9a740fcade7a0b7337704458f598d4; artifact:evals/results/EVAL-011.txt#sha256:9e22527b1d856c9a160033616abf133e0c495d27464f728ff97d88654bf8680b; artifact:evals/results/EVAL-020.txt#sha256:d6172968807d206e09672e5ef3ca9d700eed70186af82fb52ad22fd7db39622d; artifact:evals/results/EVAL-021.txt#sha256:c7833396892c3537d25cb3d2d7d08f26a4a4a0ccdc55bd42d825a60b7e9fa591; artifact:evals/results/prompt-budget.txt#sha256:d1ef60726c7754a695e77dbbe6527de6c971a58b796e21258ca2eed12130a0ac; installed inspect returned one JSON line and preserved HEAD, index, status, and object database on 2026-09-05.",
       "supersedes": "DEC-020"
+    },
+    {
+      "id": "DEC-023",
+      "status": "active",
+      "scope": "runtime architecture",
+      "decision": "运行时只保留 SKILL.md 和 scripts/staged-commit.mjs；Skill 处理语义，脚本只处理确定性 Git 状态。",
+      "evidence": "用户批准的 2026-09-06 精简重构设计。",
+      "supersedes": "DEC-012"
+    },
+    {
+      "id": "DEC-024",
+      "status": "active",
+      "scope": "commit workflow",
+      "decision": "明确提交请求可整理当前任务 hunk，但必须展示完整候选并等待绑定 HEAD、staged tree、选择和消息的第二次确认。",
+      "evidence": "用户逐项确认的暂存、hunk 隔离和二次确认规则。",
+      "supersedes": "DEC-013"
+    },
+    {
+      "id": "DEC-025",
+      "status": "active",
+      "scope": "project scope",
+      "decision": "删除通用脚手架与旧复杂事务资产，只保留当前 Skill 的运行时、测试、评测和交付契约。",
+      "evidence": "用户批准的项目瘦身设计。",
+      "supersedes": "DEC-022"
     }
   ]
 }
