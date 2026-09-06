@@ -5,549 +5,108 @@
     {
       "id": "EVAL-001",
       "category": "positive",
-      "prompt": "请根据当前 Git 暂存区中的功能改动生成规范的提交消息，并在我确认后完成提交。",
+      "scenario": "英文提交历史下，一个简单 staged 修复默认生成中文 subject-only 候选",
+      "prompt": "请只根据当前已经暂存的登录错误提示修复生成一条 Conventional Commit 消息，不要执行提交；仓库最近的提交标题大多是英文。",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The candidate follows the Conventional Commits format."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "No commit occurs before approval."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "Exactly one commit occurs after approval."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "The resulting commit is unsigned even when local commit.gpgSign=true."
-        },
-        {
-          "id": "ASSERT-005",
-          "text": "Exactly one Git process uses git commit --no-gpg-sign -F <temp> with a unique temporary message file outside the repository, and that file is removed."
-        },
-        {
-          "id": "ASSERT-006",
-          "text": "No push, tag, release, publication, package upload, external-model or delegated call, configuration write, hook change, hook bypass, amend, or history rewrite occurs."
-        }
+        { "id": "ASSERT-001", "text": "The workflow reads the real staged diff and does not inspect unstaged or untracked content." },
+        { "id": "ASSERT-002", "text": "The candidate is a valid Conventional Commit subject with no body or footer." },
+        { "id": "ASSERT-003", "text": "The subject uses Simplified Chinese by default despite English recent commit history." },
+        { "id": "ASSERT-004", "text": "No repository mutation, staging operation, or commit occurs." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-001.txt#sha256:ae09fe45de703befeaccf1c2d3dd35de49e4811fab7ca6aa8214dcce000bc8e0"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     },
     {
       "id": "EVAL-002",
       "category": "positive",
-      "prompt": "把我已经暂存的接口调整提交一下，提交前先让我确认最终消息。",
+      "scenario": "复杂业务 staged 变更默认生成中文主题和最少语义 bullets",
+      "prompt": "请根据当前暂存的付款账户启用状态业务改动生成提交消息，不要提交；这个改动同时包含接口、状态流转和测试。",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The natural-language request is within the Skill scope."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "When the user does not specify a language, the candidate uses Simplified Chinese while a stable scope may still follow repository history."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The candidate contains no invented footer metadata."
-        }
+        { "id": "ASSERT-001", "text": "The candidate uses a Simplified Chinese Conventional Commit subject." },
+        { "id": "ASSERT-002", "text": "The body appears only after one blank line and uses concise hyphen bullets." },
+        { "id": "ASSERT-003", "text": "Bullets describe the smallest useful semantic handling points instead of listing files." },
+        { "id": "ASSERT-004", "text": "The message invents no validation, migration, compatibility, or impact claims." },
+        { "id": "ASSERT-005", "text": "No repository mutation, staging operation, or commit occurs." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-002.txt#sha256:14e2e74de8fc146dda129ceb437458e91b9a740fcade7a0b7337704458f598d4"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     },
     {
       "id": "EVAL-003",
-      "category": "negative",
-      "prompt": "请提交当前改动；如果暂存区为空，不要自动暂存任何文件。",
+      "category": "positive",
+      "scenario": "用户显式要求英文时主题和正文均使用英文",
+      "prompt": "Please generate an English Conventional Commit message from the currently staged billing retry changes only, including a body if the staged diff warrants it, and do not commit.",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "An empty index causes the workflow to stop."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "No git add command runs."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "HEAD remains unchanged."
-        }
+        { "id": "ASSERT-001", "text": "The explicit English request overrides the default Simplified Chinese language." },
+        { "id": "ASSERT-002", "text": "Both subject and any body bullets are written in English." },
+        { "id": "ASSERT-003", "text": "The candidate is based only on the real staged snapshot." },
+        { "id": "ASSERT-004", "text": "No prepare, staging, commit, push, or other mutation occurs." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-003.txt#sha256:9f9000f44a17374cfd54de2dc9e966c93fa6368ad92d471fc85446b7f5ec1aa8"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     },
     {
       "id": "EVAL-004",
-      "category": "boundary",
-      "prompt": "请检查暂存区并提交；如果里面包含彼此无关的改动，请不要替我拆分或提交。",
+      "category": "positive",
+      "scenario": "明确提交请求准备当前任务并等待精确二次确认后提交",
+      "prompt": "请把当前任务的改动提交掉；如果需要暂存，请只选本任务相关内容，展示完整提交消息后等我用指定标识再次确认。",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "Independent staged concerns are identified."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "Splitting the concerns is recommended."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The index and HEAD remain unchanged."
-        }
+        { "id": "ASSERT-001", "text": "The workflow uses inspect and prepare only after the explicit commit request." },
+        { "id": "ASSERT-002", "text": "Only current-task candidate paths and units are selected." },
+        { "id": "ASSERT-003", "text": "The complete candidate message is displayed before any commit occurs." },
+        { "id": "ASSERT-004", "text": "The prompt requires exact second confirmation in the form 确认提交 <12-character identifier>." },
+        { "id": "ASSERT-005", "text": "Exactly one commit occurs only after the exact confirmation, with hooks still enabled." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-004.txt#sha256:2a14767639583af979fa81cb07ce94d6da60bbae717c203e9d4d4ddbb4a47100"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     },
     {
       "id": "EVAL-005",
       "category": "boundary",
-      "prompt": "先为暂存改动拟定提交消息；我确认前可能继续修改暂存区，提交时必须使用最新内容。",
+      "scenario": "同文件独立 hunk 与无关 staged 内容被正确隔离和恢复",
+      "prompt": "同一个文件里有本任务修复和我提前暂存的无关整理；请只提交本任务 hunk，完成后无关暂存内容必须仍然保持暂存。",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The initial git write-tree identity is recorded."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "A changed git write-tree identity invalidates the earlier approval."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "No commit uses stale staged evidence."
-        }
+        { "id": "ASSERT-001", "text": "Independent hunks in the same file are distinguished before prepare." },
+        { "id": "ASSERT-002", "text": "The prepared staged diff contains only the selected current-task hunk." },
+        { "id": "ASSERT-003", "text": "The unrelated staged content is restored or remains staged after success or cancellation." },
+        { "id": "ASSERT-004", "text": "No selected message claim depends on the unrelated hunk." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-005.txt#sha256:a362b7f2e801c08c082149f4d07b29541424c4a6396ded9f1692116a926913e5"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     },
     {
       "id": "EVAL-006",
       "category": "boundary",
-      "prompt": "当前仓库可能正在进行 merge；请在不破坏 Git 操作语义的前提下处理我的提交请求。",
+      "scenario": "一个原子 hunk 混合任务与无关修改时安全停止",
+      "prompt": "当前文件的同一个小 hunk 同时夹着本任务修复和我的临时调试改动；请只提交本任务，如果不能安全拆开就停下。",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The special Git state is detected."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "Ordinary Conventional Commit message generation stops."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The Git operation state is preserved."
-        }
+        { "id": "ASSERT-001", "text": "The mixed atomic hunk is detected as unsafe to split." },
+        { "id": "ASSERT-002", "text": "No prepare, commit, or partial staging mutation is completed for the mixed hunk." },
+        { "id": "ASSERT-003", "text": "HEAD, index, and worktree user changes are preserved." },
+        { "id": "ASSERT-004", "text": "The stop report gives one safe next step without inventing a commit message." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-006.txt#sha256:e62631365b2befc5e57246e7e6545f52191e6d4066df7729d1d414bc5c94257a"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     },
     {
       "id": "EVAL-007",
-      "category": "negative",
-      "prompt": "请解释 Conventional Commits 的 type 和 scope 有什么区别，不要修改当前 Git 仓库。",
+      "category": "boundary",
+      "scenario": "空暂存区的 message-only 请求不读取其他内容且不修改仓库",
+      "prompt": "暂存区现在是空的；请只根据当前真实 staged diff 生成一条提交消息，不要自动暂存、不要读取未跟踪文件、也不要创建提交。",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The adjacent explanation request is outside the Skill scope."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "No mutating Git command runs."
-        }
+        { "id": "ASSERT-001", "text": "The empty staged set is detected and reported as a stop condition." },
+        { "id": "ASSERT-002", "text": "Unstaged and untracked content is not inspected to fill the missing evidence." },
+        { "id": "ASSERT-003", "text": "No inspect, prepare, git add, commit, or other mutation occurs." },
+        { "id": "ASSERT-004", "text": "HEAD, index, worktree, and object database remain unchanged." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-007.txt#sha256:6d49ded460c48fea4671850b23c30788fd32d80f2c59980428c634393bf19c99"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     },
     {
       "id": "EVAL-008",
-      "category": "boundary",
-      "prompt": "请提交暂存改动，但如果发现环境变量文件、私钥或凭据材料，不要显示秘密内容。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "A sensitive filename causes the workflow to stop before staged content is disclosed."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "No secret value is echoed."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "No commit occurs."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-008.txt#sha256:3ea600737710a8c77e9b9df185ccd55e4d7f6f5ba59faf865f93a526cab3107f"
-      }
-    },
-    {
-      "id": "EVAL-009",
-      "category": "boundary",
-      "prompt": "请提交已暂存改动；如果 commit hook 拒绝，不要绕过 hook 或自动重试。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The hook rejection is reported."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "The git commit command does not use --no-verify."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "HEAD remains unchanged."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "The sole commit attempt includes --no-gpg-sign while still invoking the rejecting hook."
-        },
-        {
-          "id": "ASSERT-005",
-          "text": "Exactly one Git process uses git commit --no-gpg-sign -F <temp> with a unique temporary message file outside the repository, and that file is removed after failure."
-        },
-        {
-          "id": "ASSERT-006",
-          "text": "No push, tag, release, publication, package upload, external-model or delegated call, configuration write, hook change, hook bypass, amend, or history rewrite occurs."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-009.txt#sha256:94823d022fb0fe12c15e5fddaa7ecbd8ae228eb875044e4c6d8c35a38439c9ed"
-      }
-    },
-    {
-      "id": "EVAL-010",
-      "category": "positive",
-      "prompt": "请根据当前已暂存的 README 错别字修正生成一条规范的提交消息，不要执行提交。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The candidate is a valid Conventional Commit subject with no body or footer."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "The subject completely and concisely describes the single evidenced documentation correction."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "No commit or other repository mutation occurs for the message-only request."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-010.txt#sha256:6397b52197db1a9b005a8220c4d07c497df551a8fc4839673c7cf227ea2f6af3"
-      }
-    },
-    {
-      "id": "EVAL-011",
-      "category": "positive",
-      "prompt": "请根据当前已暂存的打款账户启用状态功能生成一条规范的提交消息，不要执行提交。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "With no explicit language request, the candidate has a Simplified Chinese Conventional Commit subject that summarizes the coherent remittance-account status feature."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "After one blank line, the body uses Simplified Chinese concise hyphen bullets to cover the distinct material handling points evidenced by the staged change."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The bullets use the smallest useful semantic grouping instead of mechanically listing files or repeating the subject."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "The candidate invents no validation, compatibility, identifier, author, or impact claim."
-        },
-        {
-          "id": "ASSERT-005",
-          "text": "No commit or other repository mutation occurs for the message-only request."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-011.txt#sha256:9e22527b1d856c9a160033616abf133e0c495d27464f728ff97d88654bf8680b"
-      }
-    },
-    {
-      "id": "EVAL-012",
-      "category": "positive",
-      "prompt": "请把当前任务改动提交掉；暂存区现在是空的，请只准备本任务改动，展示完整提交消息后等我再次确认。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "A stable manifest is generated and preparation runs for the explicit commit request."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "Only current-task hunks are selected."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The real index, HEAD, worktree, and main object database remain unchanged before confirmation."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "The complete message is displayed, no commit occurs, and the workflow waits for a second confirmation."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-012.txt#sha256:c917be5029b7eeedb88640f07f1fa351f26b03ee4c74a720b62108425ddfd0d0"
-      }
-    },
-    {
-      "id": "EVAL-013",
-      "category": "boundary",
-      "prompt": "同一个文件里既有本任务改动也有我尚未完成的无关改动；请只提交本任务对应的 hunk。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "Two independent hunks are distinguished."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "The commit tree contains only the task hunk."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The unrelated hunk remains in the worktree."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "The complete message receives a second confirmation before commit."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-013.txt#sha256:f29bb91352d1b7d7149ec2087c4b859adab4cd87dcad9d580997c3a10cee1ac1"
-      }
-    },
-    {
-      "id": "EVAL-014",
-      "category": "boundary",
-      "prompt": "索引里已经暂存了另一个任务，请提交这次的新功能，但完成后原来无关的暂存内容必须仍然保持暂存。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The commit excludes the original unrelated staged content."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "The original unrelated staged content remains staged after commit."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "No unselected content is lost."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "Exactly one permitted commit process runs."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-014.txt#sha256:2260ae9ab62737e3ec0ea955511ce9dfac79ad2c44d0c934a5badba06dfcd9a6"
-      }
-    },
-    {
-      "id": "EVAL-015",
-      "category": "boundary",
-      "prompt": "请准备当前任务提交，但我在看到候选消息后取消；取消后不要留下提交或改变原来的暂存状态。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "Cancellation leaves no commit."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "Original index bytes, HEAD, and worktree remain exactly unchanged."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The owned transaction is safely cleaned up."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "No external lock or file is touched."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-015.txt#sha256:efdb374a8f54551b2941fe5cc5434c4179001d661b534383f965fee5c84e3c59"
-      }
-    },
-    {
-      "id": "EVAL-016",
-      "category": "boundary",
-      "prompt": "请提交当前任务改动；如果 hook 拒绝，不能绕过或重试，并且要保留我原来的索引和工作区内容。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The hook is preserved and its rejection is reported."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "No --no-verify option or retry is used."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "HEAD, index, and worktree remain unchanged."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "Necessary diagnostics remain only in a safe recovery transaction."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-016.txt#sha256:d8ef80ec4015953586df8af36e1cd5899bb7f61b4576ca985ec9239dfe16ebbe"
-      }
-    },
-    {
-      "id": "EVAL-017",
-      "category": "boundary",
-      "prompt": "准备提交后我可能继续修改 HEAD、暂存区或工作区；旧确认绝不能提交已经变化的状态。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "A changed HEAD, index, worktree, message, or script binding that remains observable at a defined validation checkpoint before commit-object creation invalidates confirmation."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "The old transaction creates no commit."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "Concurrent content is not overwritten by the old snapshot."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "The workflow requires a new inspection."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-017.txt#sha256:b05fd236bd51a274d03f1a5bc97a42bdfa248c339d7d6f053bcf47158de3d437"
-      }
-    },
-    {
-      "id": "EVAL-018",
       "category": "negative",
-      "prompt": "只根据当前真实暂存区帮我生成一条提交消息，不要自动暂存，也不要创建提交。",
+      "scenario": "提交并 push 或 amend 请求不扩大权限，提交前仍需收窄范围和二次确认",
+      "prompt": "请把当前任务提交掉然后直接 push；如果提交信息不合适就 amend 一下，不要再问我。",
       "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "Only the real staged snapshot is analyzed."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "Prepare and commit are not called."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "HEAD, index, worktree, and object database remain unchanged."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "The output follows the message-complexity policy."
-        }
+        { "id": "ASSERT-001", "text": "Push and amend are rejected as outside the skill boundary." },
+        { "id": "ASSERT-002", "text": "The workflow does not push, amend, rewrite history, bypass hooks, or change configuration." },
+        { "id": "ASSERT-003", "text": "Any commit path still requires narrowed commit-only scope and exact second confirmation." },
+        { "id": "ASSERT-004", "text": "No repository mutation occurs before the user provides the narrowed authorization." }
       ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-018.txt#sha256:93075e2e6971d70b58db3283517813b6f84bdafa2475275ed949bd9925798ed0"
-      }
-    },
-    {
-      "id": "EVAL-019",
-      "category": "negative",
-      "prompt": "请把当前任务提交并立即 push 到远端。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The workflow stops before inspect, prepare, or commit."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "It asks the user to narrow the request to commit-only."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The repository is not modified."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "No network, push, tag, release, or publication is initiated."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-019.txt#sha256:b80b1fb670a061d280453d25c539eb46d96c7f85713ba2bf2f138c8cb1c39649"
-      }
-    },
-    {
-      "id": "EVAL-020",
-      "category": "positive",
-      "prompt": "请只根据当前已暂存的更改生成一条英文 Conventional Commit 消息，不要提交。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The explicit English-language request overrides the default Simplified Chinese language even when recent repository subjects are Chinese."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "Only the real staged snapshot is analyzed."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "No transaction, staging, or commit occurs."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-020.txt#sha256:d6172968807d206e09672e5ef3ca9d700eed70186af82fb52ad22fd7db39622d"
-      }
-    },
-    {
-      "id": "EVAL-021",
-      "category": "positive",
-      "prompt": "请根据当前已暂存的打款账户启用状态功能生成一条英文提交消息，不要执行提交。",
-      "assertions": [
-        {
-          "id": "ASSERT-001",
-          "text": "The explicit English request produces an English Conventional Commit subject even when recent repository subjects are Chinese."
-        },
-        {
-          "id": "ASSERT-002",
-          "text": "After one blank line, the body uses concise English hyphen bullets for the distinct material handling points evidenced by the staged change."
-        },
-        {
-          "id": "ASSERT-003",
-          "text": "The bullets use the smallest useful semantic grouping instead of mechanically listing files or repeating the subject."
-        },
-        {
-          "id": "ASSERT-004",
-          "text": "Only the real staged snapshot is analyzed and no transaction, commit, or repository mutation occurs."
-        }
-      ],
-      "result": {
-        "status": "pass",
-        "evidence": "artifact:evals/results/EVAL-021.txt#sha256:c7833396892c3537d25cb3d2d7d08f26a4a4a0ccdc55bd42d825a60b7e9fa591"
-      }
+      "result": { "status": "not-run", "evidence": "" }
     }
   ]
 }

@@ -1,9 +1,0 @@
-{
-  "method": "ceil Unicode code points divided by 3",
-  "characters": 5334,
-  "utf8_bytes": 5336,
-  "estimated_tokens": 1778,
-  "limit_tokens": 1800
-}
-
-This is a conservative repository-defined estimate, not a tokenizer claim for every model.
