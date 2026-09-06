@@ -13,10 +13,20 @@ const REQUIRED = [
   'docs/decisions.md',
   'docs/delivery-report.md',
   'README.md',
+  'CHANGELOG.md',
+  'CONTRIBUTING.md',
+  'SECURITY.md',
+  'evals/evals.json',
   'package.json',
   'package-lock.json',
   'LICENSE',
   'AGENTS.md',
+  'tests/helpers/git-fixture.js',
+  'tests/staged-commit.test.js',
+  'tests/skill-contract.test.js',
+  'tests/project-contract.test.js',
+  'tests/audit.test.js',
+  'tests/delivery-gate.test.js',
 ];
 const FORBIDDEN = [
   'src',
@@ -27,6 +37,7 @@ const FORBIDDEN = [
   'docs/mature-skill-development-design.md',
   'docs/mature-skill-development-plan.md',
   'docs/scaffold-usage.md',
+  'tests/stage-transaction.test.js',
 ];
 
 function readJson(relativePath) {
@@ -44,10 +55,39 @@ test('仓库只保留当前 Skill 的开发结构', () => {
 
 test('package 只发布两个运行时文件且不声明依赖', () => {
   const pkg = readJson('package.json');
+  const lock = readJson('package-lock.json');
 
   assert.deepEqual(pkg.files, ['SKILL.md', 'scripts/staged-commit.mjs']);
   assert.deepEqual(
     Object.keys(pkg).filter((key) => /Dependencies$/u.test(key)),
+    [],
+  );
+  assert.deepEqual(pkg.scripts, {
+    test: 'node --test tests/staged-commit.test.js tests/skill-contract.test.js',
+    validate: 'node --test tests/project-contract.test.js',
+    audit: 'node --test tests/audit.test.js',
+    check: 'npm test && npm run validate',
+    'gate:delivery': 'node --test tests/delivery-gate.test.js',
+  });
+  assert.equal(pkg.engines?.node, '>=22');
+  assert.equal(pkg.scaffold?.mode, 'initialized');
+  assert.deepEqual(
+    {
+      name: lock.packages?.['']?.name,
+      version: lock.packages?.['']?.version,
+      license: lock.packages?.['']?.license,
+      engines: lock.packages?.['']?.engines,
+    },
+    {
+      name: pkg.name,
+      version: pkg.version,
+      license: pkg.license,
+      engines: pkg.engines,
+    },
+  );
+  assert.deepEqual(Object.keys(lock.packages ?? {}), ['']);
+  assert.deepEqual(
+    Object.keys(lock.packages?.[''] ?? {}).filter((key) => /Dependencies$/u.test(key)),
     [],
   );
 });
