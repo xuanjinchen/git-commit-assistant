@@ -1,0 +1,409 @@
+import { execFile, spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const SCHEMA_VERSION = 1;
+
+export class StagedCommitError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function defaultSpawnGit(repositoryRoot, args, options = {}) {
+  return spawn('git', args, {
+    cwd: repositoryRoot,
+    env: {
+      ...process.env,
+      GIT_OPTIONAL_LOCKS: '0',
+      ...(options.env ?? {}),
+    },
+    shell: false,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+}
+
+function defaultRunGit(repositoryRoot, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+    const child = execFile('git', args, {
+      cwd: repositoryRoot,
+      encoding: 'buffer',
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: '0',
+        ...(options.env ?? {}),
+      },
+      maxBuffer: 64 * 1024 * 1024,
+      shell: false,
+    }, (error, childStdout, childStderr) => {
+      stdout = childStdout;
+      stderr = childStderr;
+      if (error !== null && options.allowFailure !== true) {
+        error.stdout = formatGitOutput(stdout, options.encoding);
+        error.stderr = formatGitOutput(stderr, options.encoding);
+        reject(error);
+        return;
+      }
+      resolve({
+        status: error?.code ?? 0,
+        stdout: formatGitOutput(stdout, options.encoding),
+        stderr: formatGitOutput(stderr, options.encoding),
+      });
+    });
+    child.stdin.end(options.input);
+  });
+}
+
+function formatGitOutput(bytes, encoding) {
+  if (encoding === 'buffer') return bytes;
+  return bytes.toString(encoding ?? 'utf8');
+}
+
+export const defaultRuntime = Object.freeze({
+  runGit: defaultRunGit,
+  spawnGit: defaultSpawnGit,
+  randomUUID,
+});
+
+export async function inspectRepository(request, runtime = defaultRuntime) {
+  const repository = await resolveRepository(request?.repository_root, runtime);
+  const candidatePaths = await validateCandidatePaths(repository, request?.candidate_paths, runtime);
+  await assertOrdinaryGitState(repository, runtime);
+  const headOid = await gitText(repository, ['rev-parse', 'HEAD'], runtime);
+  const indexTreeOid = await readIndexTree(repository, runtime);
+  const trackedPatch = await gitBytes(repository, [
+    'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--binary', '--full-index',
+    '--find-renames', '--unified=0', 'HEAD', '--', ...candidatePaths,
+  ], runtime);
+  const units = [
+    ...parseTrackedUnits(trackedPatch),
+    ...await readUntrackedUnits(repository, candidatePaths, runtime),
+  ].sort(compareUnits);
+  const body = {
+    schema_version: SCHEMA_VERSION,
+    head_oid: headOid,
+    index_tree_oid: indexTreeOid,
+    candidate_paths: candidatePaths,
+    units,
+  };
+  return { status: 'inspected', ...body, manifest_sha256: digest(canonicalJson(body)) };
+}
+
+export async function resolveRepository(root, runtime) {
+  if (typeof root !== 'string' || root.length === 0) {
+    throw new StagedCommitError('NOT_GIT_REPOSITORY', 'repository_root is required.');
+  }
+  const requested = path.resolve(root);
+  let metadata;
+  try {
+    metadata = await lstat(requested);
+  } catch {
+    throw new StagedCommitError('NOT_GIT_REPOSITORY', 'repository_root is not a Git repository.');
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new StagedCommitError('UNSAFE_GIT_PATH', 'repository_root must be an ordinary directory.');
+  }
+
+  let topLevel;
+  let gitDir;
+  try {
+    topLevel = await gitText({ root: requested }, ['rev-parse', '--show-toplevel'], runtime);
+    gitDir = await gitText({ root: requested }, ['rev-parse', '--absolute-git-dir'], runtime);
+  } catch {
+    throw new StagedCommitError('NOT_GIT_REPOSITORY', 'repository_root is not a Git repository.');
+  }
+  const resolvedRoot = await realpath(requested);
+  const resolvedTopLevel = await realpath(topLevel);
+  if (path.normalize(resolvedRoot) !== path.normalize(resolvedTopLevel)) {
+    throw new StagedCommitError('NOT_GIT_REPOSITORY', 'repository_root must be the repository root.');
+  }
+  return { root: resolvedRoot, gitDir: await realpath(gitDir) };
+}
+
+export async function validateCandidatePaths(repository, paths, runtime) {
+  if (!Array.isArray(paths) || paths.length === 0) {
+    throw new StagedCommitError('CANDIDATE_PATHS_INVALID', 'candidate_paths must be a non-empty array.');
+  }
+  const normalized = [];
+  const seen = new Set();
+  for (const candidate of paths) {
+    if (typeof candidate !== 'string' || candidate.length === 0 || candidate.includes('\\')) {
+      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths must contain relative Git paths.');
+    }
+    if (path.isAbsolute(candidate) || candidate === '.' || candidate.split('/').includes('..')) {
+      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot escape the repository.');
+    }
+    const normalizedPath = path.posix.normalize(candidate);
+    if (normalizedPath !== candidate || normalizedPath.startsWith('../')) {
+      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths must be normalized.');
+    }
+    if (seen.has(normalizedPath)) {
+      throw new StagedCommitError('CANDIDATE_PATHS_INVALID', 'candidate_paths cannot contain duplicates.');
+    }
+    const absolutePath = path.join(repository.root, ...normalizedPath.split('/'));
+    if (!isWithin(absolutePath, repository.root)) {
+      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot escape the repository.');
+    }
+    try {
+      const metadata = await lstat(absolutePath);
+      if (metadata.isSymbolicLink()) {
+        throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot contain symbolic links.');
+      }
+    } catch (error) {
+      if (error instanceof StagedCommitError) throw error;
+      if (error?.code !== 'ENOENT') {
+        throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths could not be inspected.');
+      }
+    }
+    seen.add(normalizedPath);
+    normalized.push(normalizedPath);
+  }
+  await gitText(repository, ['ls-files', '--error-unmatch', '--', ...normalized], runtime, {
+    allowFailure: true,
+    env: { GIT_LITERAL_PATHSPECS: '1' },
+  });
+  return normalized;
+}
+
+export async function assertOrdinaryGitState(repository, runtime) {
+  const bare = await gitText(repository, ['rev-parse', '--is-bare-repository'], runtime);
+  if (bare === 'true') {
+    throw new StagedCommitError('NOT_GIT_REPOSITORY', 'Bare repositories are not supported.');
+  }
+  try {
+    await gitText(repository, ['rev-parse', '--verify', 'HEAD'], runtime);
+  } catch {
+    throw new StagedCommitError('UNBORN_HEAD', 'Repository HEAD must point at a commit.');
+  }
+  for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-apply', 'rebase-merge']) {
+    if (await gitPathExists(repository, marker, runtime)) {
+      throw new StagedCommitError('SPECIAL_GIT_STATE', 'A merge, rebase, cherry-pick, or revert is in progress.');
+    }
+  }
+}
+
+export async function gitBytes(repository, args, runtime, options = {}) {
+  const result = await runGit(repository, args, runtime, { ...options, encoding: 'buffer' });
+  return result.stdout;
+}
+
+export async function gitText(repository, args, runtime, options = {}) {
+  const result = await runGit(repository, args, runtime, options);
+  return result.stdout.trim();
+}
+
+async function runGit(repository, args, runtime, options = {}) {
+  const runner = runtime.runGit ?? defaultRuntime.runGit;
+  const result = await runner(repository.root, args, {
+    ...options,
+    env: {
+      GIT_OPTIONAL_LOCKS: '0',
+      ...(options.env ?? {}),
+    },
+  });
+  if ((result.status ?? 0) !== 0 && options.allowFailure !== true) {
+    throw new StagedCommitError('GIT_COMMAND_FAILED', result.stderr || 'Git command failed.');
+  }
+  return result;
+}
+
+export function parseTrackedUnits(patch) {
+  const text = patch.toString('utf8');
+  return splitFilePatches(text).flatMap((filePatch) => unitsForFilePatch(filePatch));
+}
+
+export async function readUntrackedUnits(repository, candidatePaths, runtime) {
+  const bytes = await gitBytes(repository, [
+    'ls-files', '--others', '--exclude-standard', '-z', '--', ...candidatePaths,
+  ], runtime, { env: { GIT_LITERAL_PATHSPECS: '1' } });
+  const units = [];
+  for (const candidate of splitNull(bytes)) {
+    const gitPath = candidate.toString('utf8');
+    if (!candidatePaths.includes(gitPath)) continue;
+    const absolutePath = path.join(repository.root, ...gitPath.split('/'));
+    const metadata = await lstat(absolutePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'Untracked candidates must be ordinary files.');
+    }
+    const content = await readFile(absolutePath);
+    const patchText = untrackedPatch(gitPath, content, metadata.mode);
+    units.push(withUnitId({ path: gitPath, kind: 'untracked', patch: patchText }));
+  }
+  return units;
+}
+
+export function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function digest(value) {
+  return createHash('sha256').update(Buffer.isBuffer(value) ? value : String(value)).digest('hex');
+}
+
+export function compareUnits(left, right) {
+  return canonicalJson([left.path, left.kind, left.unit_id]).localeCompare(
+    canonicalJson([right.path, right.kind, right.unit_id]),
+  );
+}
+
+async function readIndexTree(repository, runtime) {
+  const indexPath = await gitText(repository, ['rev-parse', '--git-path', 'index'], runtime);
+  const objectsPath = await gitText(repository, ['rev-parse', '--git-path', 'objects'], runtime);
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'staged-commit-index-'));
+  try {
+    const tempIndex = path.join(tempRoot, 'index');
+    const tempObjects = path.join(tempRoot, 'objects');
+    await mkdir(tempObjects);
+    await copyFile(path.resolve(repository.root, indexPath), tempIndex);
+    // write-tree 会更新 index 的 cache-tree 并可能写 tree object；用临时 index/object 目录隔离只读 inspect。
+    return await gitText(repository, ['write-tree'], runtime, {
+      env: {
+        GIT_INDEX_FILE: tempIndex,
+        GIT_OBJECT_DIRECTORY: tempObjects,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(repository.root, objectsPath),
+      },
+    });
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function gitPathExists(repository, marker, runtime) {
+  const gitPath = await gitText(repository, ['rev-parse', '--git-path', marker], runtime);
+  try {
+    await lstat(path.resolve(repository.root, gitPath));
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function isWithin(candidate, parent) {
+  const relative = path.relative(parent, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function splitFilePatches(text) {
+  const starts = [...text.matchAll(/^diff --git /gmu)].map((match) => match.index);
+  return starts.map((start, index) => text.slice(start, starts[index + 1] ?? text.length));
+}
+
+function unitsForFilePatch(filePatch) {
+  const pathName = parsePatchPath(filePatch);
+  if (isAtomicPatch(filePatch)) {
+    return [withUnitId({ path: pathName, kind: 'atomic', patch: filePatch })];
+  }
+  const headerEnd = filePatch.search(/^@@ /mu);
+  if (headerEnd === -1) return [];
+  const header = filePatch.slice(0, headerEnd);
+  const hunkStarts = [...filePatch.matchAll(/^@@ /gmu)].map((match) => match.index);
+  return hunkStarts.map((start, index) => withUnitId({
+    path: pathName,
+    kind: 'hunk',
+    patch: `${header}${filePatch.slice(start, hunkStarts[index + 1] ?? filePatch.length)}`,
+  }));
+}
+
+function parsePatchPath(filePatch) {
+  const renamed = /^rename to (.+)$/mu.exec(filePatch);
+  if (renamed) return renamed[1];
+  const addedOrModified = /^\+\+\+ b\/(.+)$/mu.exec(filePatch);
+  if (addedOrModified) return addedOrModified[1];
+  const deleted = /^--- a\/(.+)$/mu.exec(filePatch);
+  if (deleted) return deleted[1];
+  const header = /^diff --git a\/(.+) b\/(.+)$/mu.exec(filePatch);
+  if (header) return header[2];
+  throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned a diff without a path.');
+}
+
+function isAtomicPatch(filePatch) {
+  return /^(?:new file mode|deleted file mode|old mode|rename from|similarity index|GIT binary patch|Binary files )/mu.test(filePatch);
+}
+
+function withUnitId(unit) {
+  return { unit_id: digest(canonicalJson(unit)), ...unit };
+}
+
+function splitNull(bytes) {
+  const values = [];
+  let start = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) continue;
+    values.push(bytes.subarray(start, index));
+    start = index + 1;
+  }
+  if (start < bytes.length) values.push(bytes.subarray(start));
+  return values;
+}
+
+function untrackedPatch(gitPath, content, mode) {
+  const fileMode = (mode & 0o111) === 0 ? '100644' : '100755';
+  const lines = content.toString('utf8').split('\n');
+  const body = lines.flatMap((line, index) => (
+    index === lines.length - 1 && line === '' ? [] : [`+${line}`]
+  )).join('\n');
+  return `diff --git a/${gitPath} b/${gitPath}\nnew file mode ${fileMode}\n--- /dev/null\n+++ b/${gitPath}\n@@ -0,0 +1,${Math.max(1, lines.length - 1)} @@\n${body}\n`;
+}
+
+async function readCliRequest() {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of process.stdin) {
+    size += chunk.length;
+    if (size > 1024 * 1024) {
+      throw new StagedCommitError('PROTOCOL_ERROR', 'stdin request is too large.');
+    }
+    chunks.push(chunk);
+  }
+  const input = Buffer.concat(chunks).toString('utf8');
+  const withoutFinalNewline = input.replace(/\r?\n$/u, '');
+  if (/\r|\n/u.test(withoutFinalNewline)) {
+    throw new StagedCommitError('PROTOCOL_ERROR', 'stdin must contain exactly one JSON line.');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(withoutFinalNewline);
+  } catch {
+    throw new StagedCommitError('PROTOCOL_ERROR', 'stdin must contain one JSON object.');
+  }
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+    throw new StagedCommitError('PROTOCOL_ERROR', 'stdin must contain one JSON object.');
+  }
+  return parsed;
+}
+
+function writeCliResult(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+async function runCli() {
+  const [command, ...extra] = process.argv.slice(2);
+  if (command !== 'inspect' || extra.length !== 0) {
+    writeCliResult({ ok: false, status: 'failed', error: { code: 'PROTOCOL_ERROR' } });
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    const manifest = await inspectRepository(await readCliRequest());
+    writeCliResult({ ok: true, ...manifest });
+  } catch (error) {
+    const code = error instanceof StagedCommitError ? error.code : 'INTERNAL_ERROR';
+    writeCliResult({ ok: false, status: 'failed', error: { code } });
+    process.exitCode = code === 'PROTOCOL_ERROR' ? 2 : 1;
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await runCli();
+}
