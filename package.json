@@ -1,24 +1,22 @@
 {
   "name": "git-commit-assistant",
   "version": "0.1.0",
-  "description": "Generate Conventional Commit messages for staged or current-task Git changes, prepare only task-related hunks for explicit commit requests, and commit only after a second confirmation; not for Git explanations, history review, history rewriting, or combined push/release requests.",
+  "description": "Generate clear, concise Conventional Commit messages from staged changes, defaulting to Simplified Chinese; stage or commit only on explicit request and require a second confirmation.",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "init:skill": "node scripts/init-skill.js",
-    "recover:lock": "node scripts/recover-lock.js",
-    "test": "node --test \"tests/*.test.js\"",
-    "validate": "node scripts/validate.js",
-    "audit": "node scripts/audit.js",
+    "test": "node --test tests/staged-commit.test.js tests/skill-contract.test.js",
+    "validate": "node --test tests/project-contract.test.js",
+    "audit": "node --test tests/audit.test.js",
     "check": "npm test && npm run validate",
-    "gate:delivery": "node scripts/delivery-gate.js"
+    "gate:delivery": "node --test tests/delivery-gate.test.js"
   },
   "files": [
     "SKILL.md",
-    "scripts/stage-transaction.mjs"
+    "scripts/staged-commit.mjs"
   ],
   "license": "Apache-2.0",
   "scaffold": {
