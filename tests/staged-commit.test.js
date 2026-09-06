@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
   cancelPrepared,
+  defaultRuntime,
   inspectRepository,
   prepareSelection,
   StagedCommitError,
@@ -54,6 +55,49 @@ async function transactionEntries(root) {
     if (error?.code === 'ENOENT') return [];
     throw error;
   }
+}
+
+function transactionDirectory(root, transactionId) {
+  const gitDir = git(root, ['rev-parse', '--absolute-git-dir']).stdout.trim();
+  return path.join(gitDir, 'git-commit-assistant', transactionId);
+}
+
+async function readPreparedStateForTest(root, transactionId) {
+  return JSON.parse(await readFile(path.join(transactionDirectory(root, transactionId), 'state.json'), 'utf8'));
+}
+
+async function snapshotMainObjects(root) {
+  const objectsRoot = path.resolve(root, git(root, ['rev-parse', '--git-path', 'objects']).stdout.trim());
+  const entries = [];
+  async function walk(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.name === 'info' || entry.name === 'pack') continue;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(absolute);
+      } else if (entry.isFile()) {
+        entries.push(path.relative(objectsRoot, absolute).split(path.sep).join('/'));
+      }
+    }
+  }
+  await walk(objectsRoot);
+  return entries.sort((left, right) => left.localeCompare(right));
+}
+
+async function preparedGitEnv(root, transactionId) {
+  const state = await readPreparedStateForTest(root, transactionId);
+  return state.object_directory === undefined ? {} : {
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: state.object_directory,
+  };
+}
+
+function installMutationRuntime(operation, mutate) {
+  return {
+    ...defaultRuntime,
+    async beforeIndexInstall(event) {
+      if (event.operation === operation) await mutate();
+    },
+  };
 }
 
 async function inspectTaskChange(root) {
@@ -227,11 +271,58 @@ test('prepare 只暂存选中的同文件 hunk，cancel 原样恢复索引', asy
   assert.equal(prepared.status, 'prepared');
   assert.equal(prepared.selected_unit_count, 1);
   assert.deepEqual(prepared.selected_paths, ['feature.txt']);
-  const preparedDiff = git(root, ['diff', '--cached']).stdout;
+  const preparedDiff = git(root, ['diff', '--cached'], {
+    env: await preparedGitEnv(root, prepared.transaction_id),
+  }).stdout;
   assert.match(preparedDiff, /task change/u);
   assert.doesNotMatch(preparedDiff, /unrelated staged/u);
   assert.equal((await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id })).status, 'cancelled');
   assert.deepEqual(await snapshotRepository(root), before);
+  assert.deepEqual(await transactionEntries(root), []);
+});
+
+test('prepare 不向主对象库写入未确认对象', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const beforeObjects = await snapshotMainObjects(root);
+  const { manifest, selected } = await inspectTaskChange(root);
+
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: [selected.unit_id],
+  });
+
+  assert.deepEqual(await snapshotMainObjects(root), beforeObjects);
+  const transactionObjects = await readdir(
+    path.join(transactionDirectory(root, prepared.transaction_id), 'objects'),
+  );
+  assert.notDeepEqual(transactionObjects.filter((entry) => !['info', 'pack'].includes(entry)), []);
+  assert.equal((await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id })).status, 'cancelled');
+});
+
+test('prepare 在最终安装前复验真实 index 并拒绝 late staged 内容丢失', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const { manifest, selected } = await inspectTaskChange(root);
+  let injected = false;
+  const runtime = installMutationRuntime('prepare', async () => {
+    injected = true;
+    await writeFile(path.join(root, 'late.txt'), 'late staged content\n');
+    git(root, ['add', '--', 'late.txt']);
+  });
+
+  await assertRejectsCode(
+    () => prepareSelection({
+      repository_root: root,
+      candidate_paths: manifest.candidate_paths,
+      manifest_sha256: manifest.manifest_sha256,
+      selected_unit_ids: [selected.unit_id],
+    }, runtime),
+    'INDEX_CHANGED',
+  );
+
+  assert.equal(injected, true);
+  assert.match(git(root, ['diff', '--cached', '--name-only']).stdout, /^feature\.txt\nlate\.txt\n$/u);
   assert.deepEqual(await transactionEntries(root), []);
 });
 
@@ -296,14 +387,13 @@ test('prepare 拒绝并发 active transaction 且不改写当前 prepared index'
     selected_unit_ids: [selected.unit_id],
   });
   const preparedSnapshot = await snapshotRepository(root);
-  const current = await inspectTaskChange(root);
 
   await assertRejectsCode(
     () => prepareSelection({
       repository_root: root,
-      candidate_paths: current.manifest.candidate_paths,
-      manifest_sha256: current.manifest.manifest_sha256,
-      selected_unit_ids: [current.selected.unit_id],
+      candidate_paths: manifest.candidate_paths,
+      manifest_sha256: manifest.manifest_sha256,
+      selected_unit_ids: [selected.unit_id],
     }),
     'ACTIVE_TRANSACTION_EXISTS',
   );
@@ -373,6 +463,34 @@ test('cancel 在真实索引已变化时保留事务且不覆盖新 staged 内�
 
   assert.equal(cancelled.status, 'retained');
   assert.deepEqual(await snapshotRepository(root), changed);
+  assert.deepEqual(await transactionEntries(root), [prepared.transaction_id]);
+});
+
+test('cancel 在最终恢复前复验真实 index 并保留 late staged 内容', async (t) => {
+  const root = await repositoryWithTwoHunksAndUnrelatedStage(t);
+  const { manifest, selected } = await inspectTaskChange(root);
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: [selected.unit_id],
+  });
+  let injected = false;
+  const runtime = installMutationRuntime('cancel', async () => {
+    injected = true;
+    await writeFile(path.join(root, 'late-cancel.txt'), 'late cancel staged content\n');
+    git(root, ['add', '--', 'late-cancel.txt'], {
+      env: await preparedGitEnv(root, prepared.transaction_id),
+    });
+  });
+
+  const cancelled = await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id }, runtime);
+
+  assert.equal(cancelled.status, 'retained');
+  assert.equal(injected, true);
+  assert.match(git(root, ['diff', '--cached', '--name-only'], {
+    env: await preparedGitEnv(root, prepared.transaction_id),
+  }).stdout, /^feature\.txt\nlate-cancel\.txt\n$/u);
   assert.deepEqual(await transactionEntries(root), [prepared.transaction_id]);
 });
 

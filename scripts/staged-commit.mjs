@@ -111,6 +111,7 @@ export async function inspectRepository(request, runtime = defaultRuntime) {
 export async function prepareSelection(request, runtime = defaultRuntime) {
   const repository = await resolveRepository(request?.repository_root, runtime);
   const candidatePaths = await validateCandidatePaths(repository, request?.candidate_paths, runtime);
+  await assertNoActiveTransaction(repository);
   const fresh = await inspectRepository({
     repository_root: repository.root,
     candidate_paths: candidatePaths,
@@ -125,25 +126,43 @@ export async function prepareSelection(request, runtime = defaultRuntime) {
       transaction.original_tree_index,
       ['write-tree'],
       runtime,
+      { env: transactionObjectEnvironment(transaction) },
     );
     if (originalIndexTree !== fresh.index_tree_oid) {
       throw new StagedCommitError('MANIFEST_CHANGED', 'Original index tree changed after inspection.');
     }
-    await gitWithIndex(repository, transaction.selected_index, ['read-tree', fresh.head_oid], runtime);
+    await gitWithIndex(repository, transaction.selected_index, ['read-tree', fresh.head_oid], runtime, {
+      env: transactionObjectEnvironment(transaction),
+    });
     await applySelectedUnits(
       repository,
+      transaction,
       transaction.selected_index,
       fresh.units,
       request.selected_unit_ids,
       runtime,
     );
-    const taskTree = await gitWithIndexText(repository, transaction.selected_index, ['write-tree'], runtime);
+    const taskTree = await gitWithIndexText(repository, transaction.selected_index, ['write-tree'], runtime, {
+      env: transactionObjectEnvironment(transaction),
+    });
     // 先在两个临时 index 中完成任务视图和可恢复视图，只有二者都验证成功后才替换真实 index。
-    const restoreTree = await mergeRestoreTree(repository, fresh.head_oid, taskTree, originalIndexTree, runtime);
-    await gitWithIndex(repository, transaction.restore_index, ['read-tree', restoreTree], runtime);
+    const restoreTree = await mergeRestoreTree(repository, transaction, fresh.head_oid, taskTree, originalIndexTree, runtime);
+    await gitWithIndex(repository, transaction.restore_index, ['read-tree', restoreTree], runtime, {
+      env: transactionObjectEnvironment(transaction),
+    });
     await assertNoUnmergedEntries(repository, transaction.restore_index, runtime);
+    const originalIndexSha256 = await fileDigest(transaction.original_index);
     const preparedState = await writePreparedState(transaction, fresh, request.selected_unit_ids, taskTree);
-    await installIndexAtomically(transaction.selected_index, transaction.real_index);
+    await installIndexAtomically(transaction.selected_index, transaction.real_index, {
+      repository,
+      runtime,
+      operation: 'prepare',
+      expected: {
+        head_oid: fresh.head_oid,
+        index_sha256: originalIndexSha256,
+        index_tree_oid: fresh.index_tree_oid,
+      },
+    });
     return preparedState;
   } catch (error) {
     await rm(transaction.directory, { recursive: true, force: true });
@@ -170,10 +189,21 @@ export async function cancelPrepared(request, runtime = defaultRuntime) {
   }
 
   try {
-    await installIndexAtomically(path.join(directory, 'original.index'), state.real_index);
+    await installIndexAtomically(path.join(directory, 'original.index'), state.real_index, {
+      repository,
+      runtime,
+      operation: 'cancel',
+      expected: {
+        head_oid: state.original_head_oid,
+        index_sha256: state.prepared_index_sha256,
+        index_tree_oid: state.staged_tree_oid,
+        alternate_object_directories: [state.object_directory],
+      },
+    });
   } catch (error) {
-    if (error instanceof StagedCommitError && error.code === 'INDEX_LOCKED') {
-      await markTransactionRetained(directory, 'INDEX_LOCKED');
+    if (error instanceof StagedCommitError
+      && ['HEAD_CHANGED', 'INDEX_CHANGED', 'INDEX_LOCKED'].includes(error.code)) {
+      await markTransactionRetained(directory, error.code);
       return { status: 'retained' };
     }
     throw error;
@@ -236,17 +266,20 @@ function assertManifestAndSelection(fresh, request) {
 async function createTransaction(repository, runtime) {
   const transactionRoot = transactionRootPath(repository);
   await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
-  if ((await activeTransactionIds(transactionRoot)).length > 0) {
-    throw new StagedCommitError('ACTIVE_TRANSACTION_EXISTS', 'A prepared transaction is already active.');
-  }
+  await assertNoActiveTransaction(repository);
   const id = runtime.randomUUID?.() ?? randomUUID();
   const directory = path.join(transactionRoot, id);
   await mkdir(directory, { mode: 0o700 });
   const realIndex = await gitText(repository, ['rev-parse', '--git-path', 'index'], runtime);
+  const mainObjects = await gitText(repository, ['rev-parse', '--git-path', 'objects'], runtime);
+  const objectDirectory = path.join(directory, 'objects');
+  await mkdir(objectDirectory, { mode: 0o700 });
   return {
     id,
     directory,
     repository,
+    object_directory: objectDirectory,
+    main_object_directory: path.resolve(repository.root, mainObjects),
     real_index: path.resolve(repository.root, realIndex),
     original_index: path.join(directory, 'original.index'),
     original_tree_index: path.join(directory, 'original-tree.index'),
@@ -254,6 +287,12 @@ async function createTransaction(repository, runtime) {
     restore_index: path.join(directory, 'restore.index'),
     state_file: path.join(directory, 'state.json'),
   };
+}
+
+async function assertNoActiveTransaction(repository) {
+  if ((await activeTransactionIds(transactionRootPath(repository))).length > 0) {
+    throw new StagedCommitError('ACTIVE_TRANSACTION_EXISTS', 'A prepared transaction is already active.');
+  }
 }
 
 async function activeTransactionIds(transactionRoot) {
@@ -295,13 +334,13 @@ async function gitWithIndexText(repository, indexPath, args, runtime, options = 
   });
 }
 
-async function applySelectedUnits(repository, indexPath, units, selectedIds, runtime) {
+async function applySelectedUnits(repository, transaction, indexPath, units, selectedIds, runtime) {
   const selected = new Set(selectedIds);
   for (const unit of units.filter(({ unit_id }) => selected.has(unit_id))) {
     try {
       await gitWithIndex(repository, indexPath, [
         'apply', '--cached', '--binary', '--unidiff-zero', '--whitespace=nowarn',
-      ], runtime, { input: unit.patch });
+      ], runtime, { input: unit.patch, env: transactionObjectEnvironment(transaction) });
     } catch (error) {
       if (error instanceof StagedCommitError) {
         throw new StagedCommitError('APPLY_FAILED', 'Selected unit could not be applied to the task index.');
@@ -319,16 +358,16 @@ async function assertNoUnmergedEntries(repository, indexPath, runtime) {
   }
 }
 
-async function mergeRestoreTree(repository, headOid, taskTree, originalIndexTree, runtime) {
+async function mergeRestoreTree(repository, transaction, headOid, taskTree, originalIndexTree, runtime) {
   const taskCommit = await gitText(repository, [
     'commit-tree', taskTree, '-p', headOid, '-m', 'git-commit-assistant selected index',
-  ], runtime);
+  ], runtime, { env: transactionObjectEnvironment(transaction) });
   const originalIndexCommit = await gitText(repository, [
     'commit-tree', originalIndexTree, '-p', headOid, '-m', 'git-commit-assistant original index',
-  ], runtime);
+  ], runtime, { env: transactionObjectEnvironment(transaction) });
   const result = await runGit(repository, [
     'merge-tree', '--write-tree', '--merge-base', headOid, taskCommit, originalIndexCommit,
-  ], runtime, { allowFailure: true });
+  ], runtime, { allowFailure: true, env: transactionObjectEnvironment(transaction) });
   if ((result.status ?? 0) !== 0) {
     // 三方内容合并失败时保留原 index，不用存在未合并条目的临时结果冒充可恢复状态。
     throw new StagedCommitError('RESTORE_CONFLICT', 'Selected units conflict with the original staged content.');
@@ -336,9 +375,18 @@ async function mergeRestoreTree(repository, headOid, taskTree, originalIndexTree
   return result.stdout.trim().split(/\r?\n/u)[0];
 }
 
-async function installIndexAtomically(source, target) {
+function transactionObjectEnvironment(transaction) {
+  // prepare 期间产生的 blob/tree/commit 只进入事务对象库；后续 commit 阶段再决定如何导入。
+  return {
+    GIT_OBJECT_DIRECTORY: transaction.object_directory,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: transaction.main_object_directory,
+  };
+}
+
+async function installIndexAtomically(source, target, { repository, runtime, operation, expected }) {
   const bytes = await readFile(source);
   const lockPath = `${target}.lock`;
+  await runtime.beforeIndexInstall?.({ operation, source, target, lock_path: lockPath });
   let handle;
   try {
     handle = await open(lockPath, 'wx', 0o600);
@@ -350,15 +398,35 @@ async function installIndexAtomically(source, target) {
   }
   let closed = false;
   try {
+    // 真实 index 只能在持有 index.lock 后复验；锁外检查无法阻止并发 git add 在 rename 前插入。
+    await assertRepositoryBinding(repository, target, expected, runtime);
     await handle.writeFile(bytes);
     await handle.sync();
     await handle.close();
     closed = true;
     await rename(lockPath, target);
-  } catch {
+  } catch (error) {
     if (!closed) await handle.close().catch(() => {});
     await rm(lockPath, { force: true });
+    if (error instanceof StagedCommitError) throw error;
     throw new StagedCommitError('INDEX_INSTALL_FAILED', 'Could not install Git index atomically.');
+  }
+}
+
+async function assertRepositoryBinding(repository, indexPath, expected, runtime) {
+  const currentHead = await gitText(repository, ['rev-parse', 'HEAD'], runtime);
+  if (currentHead !== expected.head_oid) {
+    throw new StagedCommitError('HEAD_CHANGED', 'Repository HEAD changed before index installation.');
+  }
+  if (await fileDigest(indexPath) !== expected.index_sha256) {
+    throw new StagedCommitError('INDEX_CHANGED', 'Git index changed before index installation.');
+  }
+  const currentTree = await readIndexTree(repository, runtime, {
+    index_path: indexPath,
+    alternate_object_directories: expected.alternate_object_directories,
+  });
+  if (currentTree !== expected.index_tree_oid) {
+    throw new StagedCommitError('INDEX_CHANGED', 'Git index tree changed before index installation.');
   }
 }
 
@@ -374,6 +442,7 @@ async function writePreparedState(transaction, manifest, selectedIds, taskTree) 
     transaction_id: transaction.id,
     repository_root: transaction.repository.root,
     real_index: transaction.real_index,
+    object_directory: transaction.object_directory,
     original_head_oid: manifest.head_oid,
     original_index_tree_oid: manifest.index_tree_oid,
     original_index_sha256: originalIndexSha256,
@@ -568,9 +637,14 @@ export function compareUnits(left, right) {
   );
 }
 
-async function readIndexTree(repository, runtime) {
-  const indexPath = await gitText(repository, ['rev-parse', '--git-path', 'index'], runtime);
+async function readIndexTree(repository, runtime, options = {}) {
+  const indexPath = options.index_path
+    ?? await gitText(repository, ['rev-parse', '--git-path', 'index'], runtime);
   const objectsPath = await gitText(repository, ['rev-parse', '--git-path', 'objects'], runtime);
+  const alternateObjectDirectories = [
+    ...(options.alternate_object_directories ?? []).filter((directory) => typeof directory === 'string'),
+    path.resolve(repository.root, objectsPath),
+  ];
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'staged-commit-index-'));
   try {
     const tempIndex = path.join(tempRoot, 'index');
@@ -582,7 +656,7 @@ async function readIndexTree(repository, runtime) {
       env: {
         GIT_INDEX_FILE: tempIndex,
         GIT_OBJECT_DIRECTORY: tempObjects,
-        GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(repository.root, objectsPath),
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjectDirectories.join(path.delimiter),
       },
     });
   } finally {
