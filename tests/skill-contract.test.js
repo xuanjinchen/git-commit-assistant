@@ -6,6 +6,10 @@ function readSkill() {
   return readFileSync('SKILL.md', 'utf8');
 }
 
+function readEvals() {
+  return JSON.parse(readFileSync('evals/evals.json', 'utf8'));
+}
+
 function parseFrontmatter(source) {
   const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
   assert.ok(match, 'SKILL.md must start with YAML frontmatter');
@@ -44,4 +48,35 @@ test('frontmatter 保留名称并限定触发边界', () => {
   assert.match(frontmatter.description, /explicit (staging|commit)|显式(暂存|提交)/i);
   assert.match(frontmatter.description, /second confirmation|二次确认/i);
   assert.doesNotMatch(frontmatter.description, /history review|history rewriting|push|release/i);
+});
+
+test('组合扩权提交请求必须在 inspect 前收窄为 commit-only', () => {
+  const source = readSkill();
+  assert.match(
+    source,
+    /combined[^\n.]*push[^\n.]*tag[^\n.]*release[^\n.]*amend[^\n.]*sign[^\n.]*hook-bypass[^\n.]*history[^\n.]*config[^\n.]*stop[^\n.]*before[^\n.]*inspect[^\n.]*prepare[^\n.]*staging[^\n.]*commit-only/iu,
+  );
+});
+
+test('evals 重置为 8 个未运行的 Version 7 用例', () => {
+  const data = readEvals();
+  const expectedIds = Array.from({ length: 8 }, (_, index) => `EVAL-${String(index + 1).padStart(3, '0')}`);
+
+  assert.equal(data.skill, 'git-commit-assistant');
+  assert.deepEqual(data.evals.map((item) => item.id), expectedIds);
+  assert.deepEqual(
+    Object.fromEntries(
+      ['positive', 'boundary', 'negative'].map((category) => [
+        category,
+        data.evals.filter((item) => item.category === category).length,
+      ]),
+    ),
+    { positive: 4, boundary: 3, negative: 1 },
+  );
+
+  for (const item of data.evals) {
+    assert.ok(item.prompt.length >= 20, `${item.id} prompt should be realistic`);
+    assert.ok(item.assertions.length >= 3 && item.assertions.length <= 5, `${item.id} assertion count`);
+    assert.deepEqual(item.result, { status: 'not-run', evidence: '' }, `${item.id} result reset`);
+  }
 });
