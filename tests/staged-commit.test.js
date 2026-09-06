@@ -137,6 +137,39 @@ test('inspect 拒绝空、重复、绝对、越界和符号链接候选路径', 
   );
 });
 
+test('inspect 拒绝通过符号链接祖先读取仓库外候选路径', async (t) => {
+  const root = await createRepository(t);
+  const outside = path.join(path.dirname(root), 'outside');
+  await mkdir(outside);
+  await writeFile(path.join(outside, 'secret.txt'), 'SECRET_UNLISTED\n');
+  try {
+    await symlink(outside, path.join(root, 'linked-dir'), 'junction');
+  } catch (error) {
+    if (!['EPERM', 'ENOSYS'].includes(error?.code)) throw error;
+    t.skip('current platform does not allow creating symlinks');
+    return;
+  }
+
+  await assertRejectsCode(
+    () => inspectRepository({ repository_root: root, candidate_paths: ['linked-dir/secret.txt'] }),
+    'CANDIDATE_PATH_UNSAFE',
+  );
+});
+
+test('inspect 对 tracked candidate paths 使用 literal pathspec 语义', async (t) => {
+  const root = await createRepository(t);
+  await writeFile(path.join(root, '[abc].txt'), 'literal candidate\n');
+  await writeFile(path.join(root, 'a.txt'), 'tracked secret\n');
+  git(root, ['add', '--', '[abc].txt', 'a.txt']);
+  git(root, ['commit', '-m', 'add pathspec fixtures']);
+  await writeFile(path.join(root, 'a.txt'), 'SECRET_UNLISTED\n');
+
+  const manifest = await inspectRepository({ repository_root: root, candidate_paths: ['[abc].txt'] });
+
+  assert.deepEqual(manifest.units, []);
+  assert.doesNotMatch(JSON.stringify(manifest), /a\.txt|SECRET_UNLISTED/u);
+});
+
 test('inspect 在候选路径没有变化时返回空 units', async (t) => {
   const root = await createRepository(t);
 

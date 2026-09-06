@@ -80,7 +80,7 @@ export async function inspectRepository(request, runtime = defaultRuntime) {
   const trackedPatch = await gitBytes(repository, [
     'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--binary', '--full-index',
     '--find-renames', '--unified=0', 'HEAD', '--', ...candidatePaths,
-  ], runtime);
+  ], runtime, { env: { GIT_LITERAL_PATHSPECS: '1' } });
   const units = [
     ...parseTrackedUnits(trackedPatch),
     ...await readUntrackedUnits(repository, candidatePaths, runtime),
@@ -146,21 +146,7 @@ export async function validateCandidatePaths(repository, paths, runtime) {
     if (seen.has(normalizedPath)) {
       throw new StagedCommitError('CANDIDATE_PATHS_INVALID', 'candidate_paths cannot contain duplicates.');
     }
-    const absolutePath = path.join(repository.root, ...normalizedPath.split('/'));
-    if (!isWithin(absolutePath, repository.root)) {
-      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot escape the repository.');
-    }
-    try {
-      const metadata = await lstat(absolutePath);
-      if (metadata.isSymbolicLink()) {
-        throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot contain symbolic links.');
-      }
-    } catch (error) {
-      if (error instanceof StagedCommitError) throw error;
-      if (error?.code !== 'ENOENT') {
-        throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths could not be inspected.');
-      }
-    }
+    await assertCandidatePathSafe(repository, normalizedPath);
     seen.add(normalizedPath);
     normalized.push(normalizedPath);
   }
@@ -169,6 +155,30 @@ export async function validateCandidatePaths(repository, paths, runtime) {
     env: { GIT_LITERAL_PATHSPECS: '1' },
   });
   return normalized;
+}
+
+async function assertCandidatePathSafe(repository, normalizedPath) {
+  let current = repository.root;
+  for (const segment of normalizedPath.split('/')) {
+    current = path.join(current, segment);
+    if (!isWithin(current, repository.root)) {
+      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot escape the repository.');
+    }
+    try {
+      const metadata = await lstat(current);
+      // 逐级拒绝链接祖先；只检查最终文件会允许 `link/secret` 解析到仓库外内容。
+      if (metadata.isSymbolicLink()) {
+        throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot contain symbolic links.');
+      }
+      if (!isWithin(await realpath(current), repository.root)) {
+        throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths cannot escape the repository.');
+      }
+    } catch (error) {
+      if (error instanceof StagedCommitError) throw error;
+      if (error?.code === 'ENOENT') return;
+      throw new StagedCommitError('CANDIDATE_PATH_UNSAFE', 'candidate_paths could not be inspected.');
+    }
+  }
 }
 
 export async function assertOrdinaryGitState(repository, runtime) {
