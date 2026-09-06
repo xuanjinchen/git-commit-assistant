@@ -174,6 +174,10 @@ SKILL.md
 scripts/staged-commit.mjs
 tests/
 evals/
+.scaffold/state.json
+.github/
+.gitignore
+.gitattributes
 docs/skill-brief.md
 docs/decisions.md
 docs/delivery-report.md
@@ -192,6 +196,7 @@ CHANGELOG.md
 
 - `src/` 通用脚手架实现；
 - `templates/`；
+- 通用脚手架设计与使用文档；
 - 初始化、锁恢复和旧事务脚本；
 - 通用脚手架测试与复杂事务测试；
 - 旧事务设计、计划和过期评测结果。
