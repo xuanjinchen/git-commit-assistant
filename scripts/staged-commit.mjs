@@ -117,6 +117,7 @@ export async function prepareSelection(request, runtime = defaultRuntime) {
     candidate_paths: candidatePaths,
   }, runtime);
   assertManifestAndSelection(fresh, { ...request, candidate_paths: candidatePaths });
+  const selectedUnitIds = canonicalSelectedUnitIds(fresh, request.selected_unit_ids);
   const transaction = await createTransaction(repository, runtime);
   try {
     await copyRealIndex(transaction.real_index, transaction.original_index);
@@ -139,7 +140,7 @@ export async function prepareSelection(request, runtime = defaultRuntime) {
       transaction,
       transaction.selected_index,
       fresh.units,
-      request.selected_unit_ids,
+      selectedUnitIds,
       runtime,
     );
     const taskTree = await gitWithIndexText(repository, transaction.selected_index, ['write-tree'], runtime, {
@@ -154,7 +155,7 @@ export async function prepareSelection(request, runtime = defaultRuntime) {
     await publishPreparedIndexObjects(repository, transaction, taskTree, runtime);
     await publishIndexObjects(repository, transaction, transaction.restore_index, runtime);
     const originalIndexSha256 = await fileDigest(transaction.original_index);
-    const preparedState = await writePreparedState(transaction, fresh, request.selected_unit_ids, taskTree);
+    const preparedState = await writePreparedState(transaction, fresh, selectedUnitIds, taskTree);
     await installIndexAtomically(transaction.selected_index, transaction.real_index, {
       repository,
       runtime,
@@ -368,6 +369,13 @@ function assertManifestAndSelection(fresh, request) {
   }
 }
 
+function canonicalSelectedUnitIds(manifest, selectedUnitIds) {
+  const selected = new Set(selectedUnitIds);
+  return manifest.units
+    .filter(({ unit_id }) => selected.has(unit_id))
+    .map(({ unit_id }) => unit_id);
+}
+
 async function createTransaction(repository, runtime) {
   const transactionRoot = transactionRootPath(repository);
   await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
@@ -452,6 +460,7 @@ function canonicalMessage(value) {
 
 function confirmationId(state, messageBytes) {
   return digest(canonicalJson({
+    transaction_id: state.transaction_id,
     head_oid: state.original_head_oid,
     task_tree_oid: state.staged_tree_oid,
     selected_unit_ids: state.selected_unit_ids,
@@ -478,7 +487,12 @@ async function writeMessageExclusive(directory, bytes) {
 async function runCommit(repository, messageFile, runtime) {
   const runner = runtime.spawnGit ?? defaultRuntime.spawnGit;
   const child = runner(repository.root, ['commit', '--no-gpg-sign', '-F', messageFile], {
-    env: { GIT_OPTIONAL_LOCKS: '0' },
+    env: {
+      GIT_OPTIONAL_LOCKS: '0',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'commit.cleanup',
+      GIT_CONFIG_VALUE_0: 'verbatim',
+    },
     shell: false,
   });
   child.stdout?.resume();
