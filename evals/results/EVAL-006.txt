@@ -1,0 +1,15 @@
+EVAL-006 - pass
+
+Scenario: 一个原子 hunk 混合任务与无关修改时安全停止。
+Runtime of the recorded iteration-2 run: SKILL.md sha256=9b67b913df2b2162fd2c66d94b2c22a26bd1eb021b773434f68ef4e609a999cb; scripts/staged-commit.mjs sha256=736f3e1e2b27a4a82bb18e7a33b25b57f56c1dcb71f63239e24776470ffb79bd.
+Source artifacts: eval-workspaces/version-7/iteration-2/EVAL-006/with_skill/grading.json, transcript.md, outputs/final.txt, state-before.json, state-after.json.
+
+Result: with-skill 4/4 assertions passed in one iteration-2 rerun. The initial state matched iteration-1. The run detected that src/order.js had one mixed atomic hunk containing both the task fix `Number(item.price)` and unrelated temporary `console.debug` tracing, then stopped before prepare, staging, bind, or commit.
+
+Evidence summary: grading records that the command sequence stopped at path-only Git reading and inspect. Controller deep comparison of state-before.json and state-after.json found HEAD, index tree, status, worktree file digests, and object database digest unchanged. The final response did not generate a candidate commit message and gave the safe next step of moving the temporary debug change out of that hunk before retrying.
+
+Usage limitation: path-only `git status` may collapse untracked directories such as `tests/`; the helper expects concrete file paths, so a directory candidate must not be treated as recursively including untracked files. Commit candidates must verify complete paths, and `git status --short --untracked-files=all` is recommended when untracked path expansion matters.
+
+Limitations: execution_metrics and timing are unavailable in the original grading record. This was one rerun of the affected case; unchanged baseline was not rerun.
+
+Supplemental reuse note: current helper SHA-256 is 54d0f383f41577b8c110f3854404a8ec0da1ac5b240720d9f40ff39940ecb431. This case stopped after inspect without calling prepare. The existing recorded run and its original helper digest remain evidence for the unchanged execution path; this case was not rerun for the ordering correction.

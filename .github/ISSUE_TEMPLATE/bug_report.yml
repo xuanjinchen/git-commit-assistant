@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible scaffold defect
+description: Report a reproducible git-commit-assistant defect
 title: "[Bug]: "
 labels: [bug]
 body:
@@ -10,34 +10,35 @@ body:
     id: reproduction
     attributes:
       label: Reproduction
-      description: Provide the smallest repository state and exact commands that reproduce the issue.
+      description: Provide the smallest repository state, staged or unstaged changes, prompt, and exact commands that reproduce the issue.
     validations:
       required: true
   - type: input
     id: platform
     attributes:
       label: Platform
-      description: Operating system, Node.js version, npm version, and agent or shell.
+      description: Operating system, Node.js version, npm version, Git version, and agent or shell.
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
       label: Expected and actual behavior
+      description: Include the expected commit message, stop reason, staging behavior, or recovery behavior when relevant.
     validations:
       required: true
   - type: textarea
     id: validation
     attributes:
       label: Validation output
-      description: Include redacted output from the relevant npm run check or audit command.
+      description: Include redacted output from relevant validation, such as npm run check, npm run audit, or a focused behavior test.
     validations:
       required: true
   - type: textarea
     id: compatibility
     attributes:
       label: Compatibility impact
-      description: List affected platforms, agents, existing initialized Skills, or state formats.
+      description: List affected operating systems, Node.js versions, Git versions, installed Skill versions, or existing repositories.
     validations:
       required: true
   - type: checkboxes
@@ -45,5 +46,5 @@ body:
     attributes:
       label: Sensitive information review
       options:
-        - label: I removed credentials, private paths, customer data, and other sensitive information.
+        - label: I removed credentials, private paths, customer data, logs, and other sensitive information.
           required: true

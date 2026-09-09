@@ -1,15 +1,15 @@
 # Security Policy
 
-## Supported Versions
+## 支持版本
 
-Security fixes are applied to the latest release. Upgrade before reporting an issue that only affects an older release.
+安全修复适用于最新发布版本。报告只影响旧版本的问题前，请先确认最新版本是否仍受影响。
 
-## Report A Vulnerability
+## 报告漏洞
 
-Use GitHub Private Vulnerability Reporting to submit a confidential report:
+请使用 GitHub Private Vulnerability Reporting 提交私密报告：
 
-https://github.com/xuanjinchen/skill-development-scaffold/security/advisories/new
+https://github.com/xuanjinchen/git-commit-assistant/security/advisories/new
 
-Include the affected version or commit, impact, reproduction steps, and any proposed mitigation. Do not open a public issue or pull request for an unpatched vulnerability, and do not include credentials or private repository content in a report.
+报告中请包含受影响版本或 commit、影响范围、复现步骤和可选缓解方案。不要在公开 issue 或 pull request 中披露未修复漏洞，也不要提交凭据、私有仓库内容、客户数据或其他敏感信息。
 
-Maintainers will acknowledge the report through the private advisory, assess severity, coordinate a fix, and publish disclosure details after a patched release is available.
+维护者会在私密 advisory 中确认报告、评估严重性、协调修复，并在可用补丁发布后处理公开披露。

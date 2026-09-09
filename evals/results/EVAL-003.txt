@@ -1,0 +1,15 @@
+EVAL-003 - pass
+
+Scenario: 用户显式要求英文时主题和正文均使用英文。
+Runtime: SKILL.md sha256=9b67b913df2b2162fd2c66d94b2c22a26bd1eb021b773434f68ef4e609a999cb; scripts/staged-commit.mjs sha256=ebe20d66c37d8eafe0c2019374a82644ccf61a5bc7c0f068ea45bd875e2a98a4.
+Source artifacts: eval-workspaces/version-7/iteration-1/EVAL-003/with_skill/grading.json, outputs/transcript.md, outputs/final.txt, state-before.json, state-after.json, benchmark-input/eval-003/with_skill/run-1/grading.json.
+
+Result: with-skill 4/4 assertions passed in one run. Candidate began `feat(billing): add retry scheduling`; subject and bullets were English because the prompt explicitly requested English.
+
+Evidence summary: transcript records staged-only cached diff inspection and maps the candidate to staged retry limits, exponential backoff, retry scheduling, and tests. Run summary records no prepare, staging, commit, push, or other mutation. Before/after repository fingerprints match.
+
+Baseline note: without-skill also passed 4/4, validating explicit-language override without assertion-level separation.
+
+Reuse note: this message-only run did not call `scripts/staged-commit.mjs`; the final fix wave changed the helper SHA to `54d0f383f41577b8c110f3854404a8ec0da1ac5b240720d9f40ff39940ecb431`, but the recorded SKILL input identity and staged fixture evidence remain valid. This case was not rerun.
+
+Limitations: time_seconds and token metrics are unavailable; this was one run, not repeated-run variance evidence.

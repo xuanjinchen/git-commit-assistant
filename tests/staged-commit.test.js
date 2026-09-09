@@ -11,6 +11,7 @@ import {
   commitPrepared,
   defaultRuntime,
   inspectRepository,
+  parseTrackedUnits,
   prepareSelection,
   StagedCommitError,
 } from '../scripts/staged-commit.mjs';
@@ -267,6 +268,57 @@ test('inspect 对 tracked candidate paths 使用 literal pathspec 语义', async
   assert.doesNotMatch(JSON.stringify(manifest), /a\.txt|SECRET_UNLISTED/u);
 });
 
+test('inspect lossless 解析 Git quoted 路径并保留文字路径', () => {
+  const patch = Buffer.from([
+    'diff --git "a/\\344\\270\\255\\346\\226\\207.txt" "b/\\344\\270\\255\\346\\226\\207.txt"',
+    'index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644',
+    '--- "a/\\344\\270\\255\\346\\226\\207.txt"',
+    '+++ "b/\\344\\270\\255\\346\\226\\207.txt"',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    'diff --git "a/path\\134with-space\\040file.txt" "b/path\\134with-space\\040file.txt"',
+    'index 3333333333333333333333333333333333333333..4444444444444444444444444444444444444444 100644',
+    '--- "a/path\\134with-space\\040file.txt"',
+    '+++ "b/path\\134with-space\\040file.txt"',
+    '@@ -1 +1 @@',
+    '-left',
+    '+right',
+    '',
+  ].join('\n'), 'utf8');
+
+  const units = parseTrackedUnits(patch);
+
+  assert.deepEqual(units.map((unit) => unit.path), ['中文.txt', 'path\\with-space file.txt']);
+});
+
+test('inspect、prepare 和 cancel 支持真实中文 tracked 文件名', async (t) => {
+  const root = await createRepository(t);
+  await writeFile(path.join(root, '中文文件.txt'), '原始内容\n');
+  git(root, ['add', '--', '中文文件.txt']);
+  git(root, ['commit', '-m', 'add chinese path']);
+  await writeFile(path.join(root, '中文文件.txt'), '任务内容\n');
+
+  const manifest = await inspectRepository({ repository_root: root, candidate_paths: ['中文文件.txt'] });
+  const selected = manifest.units.find((unit) => unit.path === '中文文件.txt');
+  assert.ok(selected, 'Chinese tracked path should be inspectable as a literal Git path');
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: [selected.unit_id],
+  });
+
+  assert.deepEqual(prepared.selected_paths, ['中文文件.txt']);
+  assert.deepEqual(
+    splitNull(git(root, ['diff', '--cached', '--name-only', '-z'], { encoding: 'buffer' }).stdout)
+      .map((entry) => entry.toString('utf8')),
+    ['中文文件.txt'],
+  );
+  assert.equal((await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id })).status, 'cancelled');
+  assert.deepEqual(await transactionEntries(root), []);
+});
+
 test('inspect 在候选路径没有变化时返回空 units', async (t) => {
   const root = await createRepository(t);
 
@@ -296,6 +348,40 @@ test('prepare 只暂存选中的同文件 hunk，cancel 原样恢复索引', asy
   assert.equal((await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id })).status, 'cancelled');
   assert.deepEqual(await snapshotRepository(root), before);
   assert.deepEqual(await transactionEntries(root), []);
+});
+
+test('prepare 同文件多 hunk 增删时生成手工预期的最终 staged 内容', async (t) => {
+  const root = await createRepository(t);
+  const baseline = Array.from({ length: 80 }, (_, index) => `line ${String(index + 1).padStart(2, '0')}`);
+  await writeFile(path.join(root, 'feature.txt'), `${baseline.join('\n')}\n`);
+  git(root, ['add', '--', 'feature.txt']);
+  git(root, ['commit', '-m', 'reset feature fixture']);
+  const finalLines = [
+    ...baseline.slice(0, 5),
+    'insert 1-0',
+    ...baseline.slice(5, 21),
+    ...baseline.slice(22, 37),
+    'insert 1-2',
+    ...baseline.slice(37, 52),
+    ...baseline.slice(53, 65),
+    'insert 1-4',
+    ...baseline.slice(65),
+  ];
+  await writeFile(path.join(root, 'feature.txt'), `${finalLines.join('\n')}\n`);
+  const before = await snapshotRepository(root);
+  const manifest = await inspectRepository({ repository_root: root, candidate_paths: ['feature.txt'] });
+  assert.equal(manifest.units.length, 5, 'fixture must expose selected insertions and deletions as separate hunks');
+
+  const prepared = await prepareSelection({
+    repository_root: root,
+    candidate_paths: manifest.candidate_paths,
+    manifest_sha256: manifest.manifest_sha256,
+    selected_unit_ids: manifest.units.map((unit) => unit.unit_id),
+  });
+
+  assert.equal(git(root, ['show', ':feature.txt']).stdout, `${finalLines.join('\n')}\n`);
+  assert.equal((await cancelPrepared({ repository_root: root, transaction_id: prepared.transaction_id })).status, 'cancelled');
+  assert.deepEqual(await snapshotRepository(root), before);
 });
 
 test('prepare 不创建 commit 或 ref 且普通 staged diff 可读', async (t) => {
@@ -788,6 +874,38 @@ test('commit 使用 canonical message bytes，保留合法前导空行与行尾�
   assert.equal(messageBytes, canonical);
 });
 
+test('commit-msg hook 成功改写消息时保留恢复资料且不报告普通成功', async (t) => {
+  const prepared = await prepareTaskFixture(t);
+  await installHook(prepared.root, 'commit-msg', `cat > "$1" <<'EOF'
+feat: hook replaced message
+EOF`);
+  const message = 'feat: confirmed message';
+  const canonical = `${message}\n`;
+  const bound = await bindMessage({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    message,
+  });
+
+  const result = await commitPrepared({
+    repository_root: prepared.root,
+    transaction_id: prepared.transaction_id,
+    confirmation_id: bound.confirmation_id,
+    message,
+  });
+
+  assert.deepEqual(result, { status: 'retained', code: 'COMMIT_MESSAGE_MISMATCH', commit_exists: true });
+  assert.equal(git(prepared.root, ['rev-list', '--count', 'HEAD']).stdout.trim(), '2');
+  const commitObject = git(prepared.root, ['cat-file', 'commit', 'HEAD']).stdout;
+  const actualMessage = commitObject.slice(commitObject.indexOf('\n\n') + 2);
+  assert.notEqual(actualMessage, canonical);
+  assert.deepEqual(await transactionEntries(prepared.root), [prepared.transaction_id]);
+  await assert.rejects(
+    access(path.join(transactionDirectory(prepared.root, prepared.transaction_id), 'message.txt')),
+    { code: 'ENOENT' },
+  );
+});
+
 test('恢复成功前出现新的 staged 内容时保留事务且不覆盖用户 index', async (t) => {
   const prepared = await prepareTaskFixture(t);
   const message = 'feat: late staged after commit';
@@ -812,6 +930,18 @@ test('恢复成功前出现新的 staged 内容时保留事务且不覆盖用户
   assert.match(git(prepared.root, ['diff', '--cached', '--name-only']).stdout, /late-restore\.txt/u);
   assert.deepEqual(await transactionEntries(prepared.root), [prepared.transaction_id]);
 });
+
+function splitNull(bytes) {
+  const values = [];
+  let start = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) continue;
+    values.push(bytes.subarray(start, index));
+    start = index + 1;
+  }
+  if (start < bytes.length) values.push(bytes.subarray(start));
+  return values;
+}
 
 test('commit 只启动一次无 shell 的 git commit 参数调用', async (t) => {
   const prepared = await prepareTaskFixture(t);

@@ -206,6 +206,14 @@ Record requirement interpretations and superseding decisions without rewriting h
       "decision": "删除通用脚手架与旧复杂事务资产，只保留当前 Skill 的运行时、测试、评测和交付契约。",
       "evidence": "用户批准的项目瘦身设计。",
       "supersedes": "DEC-022"
+    },
+    {
+      "id": "DEC-026",
+      "status": "active",
+      "scope": "Version 7 delivery evidence",
+      "decision": "以冻结 SKILL.md SHA-256 9b67b913df2b2162fd2c66d94b2c22a26bd1eb021b773434f68ef4e609a999cb 和 scripts/staged-commit.mjs SHA-256 54d0f383f41577b8c110f3854404a8ec0da1ac5b240720d9f40ff39940ecb431 关闭 Version 7 本地交付契约；8 个 with-skill 行为评测一次运行共 34/34 断言通过，prompt budget 估算为 900/900，用户于 2026-09-09 确认评审通过。证据形成时全局安装、最终提交、合并和 push 尚未执行，属于后续独立操作。目录候选不会自动递归纳入未跟踪文件，提交候选必须核对完整路径。后续多 hunk 合并应用修正由确定性回归及真实工作树暂存树一致性验证覆盖，原零/单 hunk 路径的评测保留运行事实并明确复用。",
+      "evidence": "artifact:evals/results/EVAL-001.txt#sha256:d513e8a29817ebfc50f4402d15faeb9a6f55d4a223c3a4aed95b8af324d61fc2; artifact:evals/results/EVAL-002.txt#sha256:a1bd760102dbfb9fd445cfb28f5b2d9ab7b8b9c2714048349e980014a879d71c; artifact:evals/results/EVAL-003.txt#sha256:70c34f3e41eacff81533bbe637387b3bb493df94909bf101892dd9b8e52ac138; artifact:evals/results/EVAL-004.txt#sha256:3be88199bed751cb44c6d6e4e557291a6225db243f8d75f72a4a75842934db5b; artifact:evals/results/EVAL-005.txt#sha256:a6300d0871cc7f142f1c265ca62e41ed64d849fccf4382d2a783d32f99c1df99; artifact:evals/results/EVAL-006.txt#sha256:7ec6f55d5e0c381f832035727467c132a8f191ccac5071161ec31836f10eefc0; artifact:evals/results/EVAL-007.txt#sha256:158b5bb58843b145ce3689af09fbf9741404d59d8287ef29d3dfb189c9d4c795; artifact:evals/results/EVAL-008.txt#sha256:baafe3378f87557673daadb826a3a23698dca5bc14a78ec50e52c2a86fda94e3; artifact:evals/results/prompt-budget.txt#sha256:609621280f7a8721e2bf183903b981aac336d73a9ac78cf39bb25007f63ef292",
+      "supersedes": null
     }
   ]
 }

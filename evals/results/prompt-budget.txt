@@ -1,0 +1,17 @@
+Prompt budget evidence - pass
+
+Runtime freeze:
+- SKILL.md sha256: 9b67b913df2b2162fd2c66d94b2c22a26bd1eb021b773434f68ef4e609a999cb
+- scripts/staged-commit.mjs sha256: 54d0f383f41577b8c110f3854404a8ec0da1ac5b240720d9f40ff39940ecb431
+
+Measurement method:
+- Source: current frozen SKILL.md bytes in this worktree.
+- Unicode code points: 2698
+- Conservative estimate: ceil(2698 / 3) = 900 prompt tokens
+- Limit: 900 prompt tokens
+- Result: pass, exactly at the configured limit.
+
+Notes:
+- This is a deterministic size estimate, not a model-provider tokenization report.
+- SKILL.md was not modified by the final fix wave, so the 2698 code point / 900 token estimate remains current.
+- scripts/staged-commit.mjs changed during the final fix wave; the value above is the verified SHA-256, not a Git blob object ID.

@@ -309,6 +309,11 @@ export async function commitPrepared(request, runtime = defaultRuntime) {
       await markTransactionRetained(active.directory, 'INDEX_CHANGED');
       return { status: 'retained', code: 'INDEX_CHANGED' };
     }
+    const commitMessageBytes = await readCommitMessageBytes(repository, commitOid, runtime);
+    if (!commitMessageBytes.equals(messageBytes)) {
+      await markTransactionRetained(active.directory, 'COMMIT_MESSAGE_MISMATCH');
+      return { status: 'retained', code: 'COMMIT_MESSAGE_MISMATCH', commit_exists: true };
+    }
     const restored = await restoreAfterSuccess(active.state, repository, runtime, commitOid);
     if (restored.status !== 'committed') return restored;
     const subject = await gitText(repository, ['show', '-s', '--format=%s', 'HEAD'], runtime);
@@ -503,6 +508,15 @@ async function runCommit(repository, messageFile, runtime) {
   });
 }
 
+async function readCommitMessageBytes(repository, commitOid, runtime) {
+  const commitObject = await gitBytes(repository, ['cat-file', 'commit', commitOid], runtime);
+  const messageStart = commitObject.indexOf(Buffer.from('\n\n'));
+  if (messageStart === -1) {
+    throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned a commit object without a message.');
+  }
+  return commitObject.subarray(messageStart + 2);
+}
+
 async function restoreAfterSuccess(state, repository, runtime, commitOid) {
   const directory = path.join(transactionRootPath(repository), state.transaction_id);
   let currentIndexSha256;
@@ -639,11 +653,11 @@ async function gitWithIndexBytes(repository, indexPath, args, runtime, options =
 
 async function applySelectedUnits(repository, transaction, indexPath, units, selectedIds, runtime) {
   const selected = new Set(selectedIds);
-  for (const unit of units.filter(({ unit_id }) => selected.has(unit_id))) {
+  for (const patch of patchesForSelectedUnits(units.filter(({ unit_id }) => selected.has(unit_id)))) {
     try {
       await gitWithIndex(repository, indexPath, [
         'apply', '--cached', '--binary', '--unidiff-zero', '--whitespace=nowarn',
-      ], runtime, { input: unit.patch, env: transactionObjectEnvironment(transaction) });
+      ], runtime, { input: patch, env: transactionObjectEnvironment(transaction) });
     } catch (error) {
       if (error instanceof StagedCommitError) {
         throw new StagedCommitError('APPLY_FAILED', 'Selected unit could not be applied to the task index.');
@@ -651,6 +665,51 @@ async function applySelectedUnits(repository, transaction, indexPath, units, sel
       throw error;
     }
   }
+}
+
+function patchesForSelectedUnits(units) {
+  const patches = [];
+  const hunkGroups = new Map();
+  for (const unit of units) {
+    if (unit.kind !== 'hunk') {
+      patches.push(unit.patch);
+      continue;
+    }
+    let group = hunkGroups.get(unit.path);
+    if (group === undefined) {
+      group = { header: filePatchHeader(unit.patch), hunks: [] };
+      hunkGroups.set(unit.path, group);
+      patches.push(group);
+    }
+    group.hunks.push({ start: hunkOriginalStart(unit.patch), patch: filePatchHunk(unit.patch) });
+  }
+  return patches.map((patch) => {
+    if (typeof patch === 'string') return patch;
+    // 同文件多 hunk 必须一次性按原始行号应用；逐个 apply 会让前方增删改变后方 hunk 坐标。
+    const hunks = patch.hunks
+      .sort((left, right) => left.start - right.start)
+      .map((hunk) => hunk.patch)
+      .join('');
+    return `${patch.header}${hunks}`;
+  });
+}
+
+function filePatchHeader(patch) {
+  const headerEnd = patch.search(/^@@ /mu);
+  if (headerEnd === -1) throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned a hunk without a header.');
+  return patch.slice(0, headerEnd);
+}
+
+function filePatchHunk(patch) {
+  const headerEnd = patch.search(/^@@ /mu);
+  if (headerEnd === -1) throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned a hunk without a body.');
+  return patch.slice(headerEnd);
+}
+
+function hunkOriginalStart(patch) {
+  const hunk = /^@@ -(\d+)(?:,\d+)? \+/mu.exec(patch);
+  if (hunk === null) throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned a hunk without an original line.');
+  return Number.parseInt(hunk[1], 10);
 }
 
 async function assertNoUnmergedEntries(repository, indexPath, runtime) {
@@ -1037,14 +1096,99 @@ function unitsForFilePatch(filePatch) {
 
 function parsePatchPath(filePatch) {
   const renamed = /^rename to (.+)$/mu.exec(filePatch);
-  if (renamed) return renamed[1];
-  const addedOrModified = /^\+\+\+ b\/(.+)$/mu.exec(filePatch);
-  if (addedOrModified) return addedOrModified[1];
-  const deleted = /^--- a\/(.+)$/mu.exec(filePatch);
-  if (deleted) return deleted[1];
-  const header = /^diff --git a\/(.+) b\/(.+)$/mu.exec(filePatch);
-  if (header) return header[2];
+  if (renamed) return parseGitPathToken(renamed[1]);
+  const addedOrModified = /^\+\+\+ (.+)$/mu.exec(filePatch);
+  if (addedOrModified) {
+    const pathName = parseGitPathToken(addedOrModified[1]);
+    if (pathName !== '/dev/null') return stripGitDiffPrefix(pathName, 'b/');
+  }
+  const deleted = /^--- (.+)$/mu.exec(filePatch);
+  if (deleted) {
+    const pathName = parseGitPathToken(deleted[1]);
+    if (pathName !== '/dev/null') return stripGitDiffPrefix(pathName, 'a/');
+  }
+  const header = /^diff --git (.+)$/mu.exec(filePatch);
+  if (header) {
+    const tokens = parseDiffGitHeaderTokens(header[1]);
+    if (tokens.length === 2) return stripGitDiffPrefix(parseGitPathToken(tokens[1]), 'b/');
+  }
   throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned a diff without a path.');
+}
+
+function parseDiffGitHeaderTokens(value) {
+  const tokens = [];
+  let rest = value.trimStart();
+  while (rest.length > 0) {
+    if (rest[0] === '"') {
+      let escaped = false;
+      let end = -1;
+      for (let index = 1; index < rest.length; index += 1) {
+        if (escaped) {
+          escaped = false;
+        } else if (rest[index] === '\\') {
+          escaped = true;
+        } else if (rest[index] === '"') {
+          end = index;
+          break;
+        }
+      }
+      if (end === -1) throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned an invalid quoted path.');
+      tokens.push(rest.slice(0, end + 1));
+      rest = rest.slice(end + 1).trimStart();
+      continue;
+    }
+    const nextSpace = rest.search(/\s/u);
+    if (nextSpace === -1) {
+      tokens.push(rest);
+      rest = '';
+    } else {
+      tokens.push(rest.slice(0, nextSpace));
+      rest = rest.slice(nextSpace).trimStart();
+    }
+  }
+  return tokens;
+}
+
+function stripGitDiffPrefix(value, prefix) {
+  if (value === '/dev/null') return value;
+  if (!value.startsWith(prefix)) {
+    throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned a diff path without the expected prefix.');
+  }
+  return value.slice(prefix.length);
+}
+
+function parseGitPathToken(value) {
+  const token = value.trim();
+  if (!token.startsWith('"')) return token;
+  if (!token.endsWith('"')) {
+    throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned an unterminated quoted path.');
+  }
+  // Git 的 quoted path 是 C-style byte escapes；按字节还原后再用 UTF-8 解码，避免中文路径损失。
+  const bytes = [];
+  for (let index = 1; index < token.length - 1; index += 1) {
+    const current = token[index];
+    if (current !== '\\') {
+      bytes.push(...Buffer.from(current, 'utf8'));
+      continue;
+    }
+    const next = token[index + 1];
+    if (/[0-7]/u.test(next)) {
+      const octal = token.slice(index + 1, index + 4).match(/^[0-7]{1,3}/u)[0];
+      bytes.push(Number.parseInt(octal, 8));
+      index += octal.length;
+      continue;
+    }
+    const escaped = new Map([
+      ['a', 0x07], ['b', 0x08], ['t', 0x09], ['n', 0x0a], ['v', 0x0b], ['f', 0x0c], ['r', 0x0d],
+      ['"', 0x22], ['\\', 0x5c],
+    ]);
+    if (!escaped.has(next)) {
+      throw new StagedCommitError('GIT_OUTPUT_INVALID', 'Git returned an unknown quoted path escape.');
+    }
+    bytes.push(escaped.get(next));
+    index += 1;
+  }
+  return Buffer.from(bytes).toString('utf8');
 }
 
 function isAtomicPatch(filePatch) {

@@ -1,17 +1,17 @@
 ## Summary
 
-Describe the scoped scaffold change and why it is needed.
+Describe the scoped `git-commit-assistant` change and why it is needed.
 
 ## Compatibility
 
-List affected operating systems, Node.js versions, agents, initialized repositories, and contract or state formats. Write `None` only after checking each category.
+List affected operating systems, Node.js versions, Git versions, agent behavior, installed Skill versions, and existing repositories. Write `None` only after checking each category.
 
 ## Validation
 
-- [ ] Tests were written or updated before implementation.
+- [ ] Tests or behavior evaluations were written or updated before implementation when behavior changed.
 - [ ] `npm run check` passes.
 - [ ] `npm run audit` passes.
-- [ ] Relevant initialization, package, and compatibility scenarios were exercised.
+- [ ] Relevant message-only, explicit staging, confirmation, recovery, and compatibility scenarios were exercised.
 
 ## Secret Review
 

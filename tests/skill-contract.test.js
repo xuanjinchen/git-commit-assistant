@@ -58,7 +58,7 @@ test('组合扩权提交请求必须在 inspect 前收窄为 commit-only', () =>
   );
 });
 
-test('evals 重置为 8 个未运行的 Version 7 用例', () => {
+test('evals 保持 8 个已验证的 Version 7 用例证据契约', () => {
   const data = readEvals();
   const expectedIds = Array.from({ length: 8 }, (_, index) => `EVAL-${String(index + 1).padStart(3, '0')}`);
 
@@ -77,6 +77,11 @@ test('evals 重置为 8 个未运行的 Version 7 用例', () => {
   for (const item of data.evals) {
     assert.ok(item.prompt.length >= 20, `${item.id} prompt should be realistic`);
     assert.ok(item.assertions.length >= 3 && item.assertions.length <= 5, `${item.id} assertion count`);
-    assert.deepEqual(item.result, { status: 'not-run', evidence: '' }, `${item.id} result reset`);
+    assert.equal(item.result?.status, 'pass', `${item.id} result status`);
+    assert.match(
+      item.result?.evidence ?? '',
+      /^artifact:evals\/results\/EVAL-\d{3}\.txt#sha256:[0-9a-f]{64}$/u,
+      `${item.id} result evidence`,
+    );
   }
 });

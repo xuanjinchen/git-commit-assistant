@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "scaffold_version": "0.1.0",
-  "status": "draft",
+  "status": "ready",
   "skill": {
     "name": "git-commit-assistant",
     "description": "Generate clear, concise Conventional Commit messages from staged changes, defaulting to Simplified Chinese; stage or commit only on explicit request and require a second confirmation.",

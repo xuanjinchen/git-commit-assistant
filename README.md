@@ -1,108 +1,121 @@
-# git\-commit\-assistant
+# git-commit-assistant
 
-`git-commit-assistant` 为已暂存变更或明确要求提交的当前任务变更生成有证据支撑的 Conventional Commit 消息。它只在展示完整候选消息后、收到第二次明确确认时创建提交。
+## 目标
 
-## 环境要求
+`git-commit-assistant` 帮助 Codex 根据 Git 中最终、确切的暂存差异生成一条 Conventional Commit 提交说明。未指定语言时，提交主题和正文默认使用简体中文。
 
-- 支持标准 Skill 自动发现的 Codex。
-- Git 工作树，以及 Node.js 22 或更高版本。
-- 安装目录只包含两个运行时文件：`SKILL.md` 和 `scripts/stage-transaction.mjs`。
+它默认只给出一个最佳候选，不提供多个备选。只有在用户明确授权暂存或提交，并在看到完整候选后输入精确的 `确认提交 <标识>` 时，才会创建提交。它不会执行 `push`。
 
 ## 安装
 
-先准备一个只包含两个运行时文件的 `git-commit-assistant-runtime` 目录，再把这两个文件复制到 Codex Skill 根目录。不要从开发仓库递归复制整个目录。安装后的结构必须保持如下形式：
+安装目录只需要两个运行时文件：`SKILL.md` 和 `scripts/staged-commit.mjs`。不要把开发仓库、测试、文档或本地状态目录整体复制到 Codex Skill 根目录。
+
+推荐结构如下：
 
 ```text
 git-commit-assistant/
-├── SKILL.md
-└── scripts/
-    └── stage-transaction.mjs
+|-- SKILL.md
+`-- scripts/
+    `-- staged-commit.mjs
 ```
 
-例如，在 PowerShell 中从已裁剪的 runtime 目录只复制这两个文件：
+在 PowerShell 中，从已裁剪的运行时目录复制：
 
 ```powershell
 $skillRoot = Join-Path $env:USERPROFILE '.codex\skills'
 $runtimeSource = Resolve-Path '.\git-commit-assistant-runtime'
 $installRoot = Join-Path $skillRoot 'git-commit-assistant'
+
 New-Item -ItemType Directory -Force -Path (Join-Path $installRoot 'scripts') | Out-Null
 Copy-Item -LiteralPath (Join-Path $runtimeSource 'SKILL.md') -Destination (Join-Path $installRoot 'SKILL.md')
-Copy-Item -LiteralPath (Join-Path $runtimeSource 'scripts\stage-transaction.mjs') -Destination (Join-Path $installRoot 'scripts\stage-transaction.mjs')
+Copy-Item -LiteralPath (Join-Path $runtimeSource 'scripts\staged-commit.mjs') -Destination (Join-Path $installRoot 'scripts\staged-commit.mjs')
 ```
 
-本项目不会写入 Codex 配置、Git 配置或 Git 钩子。
+运行时依赖 Git 和 Node.js 22 或更高版本，不需要第三方 npm 依赖。
 
-## 快速开始
+## 仅生成说明
 
-只需要候选消息时，请明确说明不要提交：
-
-> 根据我已暂存的变更起草一条 Conventional Commit 消息，不要执行提交。
-
-这是 `message-only` 流程。它只读取真实暂存区，不自动暂存、不会创建事务，也不会读取未跟踪变更作为提交内容。
-
-需要创建提交时，请明确请求提交当前任务：
-
-> 提交当前任务的变更。
-
-这会授权 Skill 检查并准备当前任务的文件或 hunk，但不会立即提交。Skill 会展示选择摘要和完整候选消息；只有随后新的明确确认才会创建一次未签名提交。
-
-## 提交消息
-
-消息使用 Conventional Commits。用户明确指定语言时使用该语言；未指定时，subject 和正文默认使用简体中文。近期提交记录仍可用于判断稳定的 scope 和仓库惯例，但不会把默认语言切换成英文。
-
-简单变更在主题行已能完整说明时只写 subject；文件数量本身不会强制添加正文。对于复杂变更或同一关注点有多个实质处理点时，在空行后使用最少数量、简洁的 `- ` bullets，并按语义合并而不是罗列文件。
-
-例如，打款账户启用状态这一连贯的复杂功能可以使用：
+只需要提交说明时，先由你自己暂存要提交的内容，然后提出只生成说明的请求，例如：
 
 ```text
-feat(remittance): 添加打款账户启用状态管理功能
-
-- 新建账户时默认启用，并通过专用接口变更启停状态
-- 查询账户时支持状态筛选，并默认排除已停用账户
-- 转账前校验账户启用状态，防止通用编辑绕过启停规则
+根据我已暂存的变更起草一条 Conventional Commit 消息，不要提交。
 ```
 
-## 事务式准备与确认
+该流程只读取 Git 规则、状态、已暂存路径、`git diff --cached --no-ext-diff`、统计信息和近期提交主题。它不会自动暂存，不会读取未暂存或未跟踪内容作为提交依据，也不会修改工作区、索引或 HEAD。
 
-- 同一文件中可独立应用的 hunk 可以分别选择；连续且混合任务与无关语义的原子 hunk 会停止，等待人工整理。
-- 未跟踪文件、二进制文件、重命名和权限模式变化均作为原子单元处理。
-- `prepare` 在系统临时目录建立外部事务；二次确认前真实索引不变。
-- 用户取消、拒绝或未明确确认时，事务会取消；Git 或 hook 拒绝提交时不重试，也不绕过 hook。
-- 成功后，原本与当前任务无关但已暂存的内容仍会保持 staged。
-- 在定义的验证或恢复检查点观察到 HEAD、索引、任务内容、选择、消息或其他绑定状态变化时，确认失效；Skill 会安全停止或重新检查。
+如果暂存区为空、处于合并/变基/cherry-pick/revert 等特殊 Git 状态，或发现内容不连贯、疑似敏感，Skill 会停止并说明原因。
 
-并发防护覆盖普通 Git、用户、hook 和其他进程在这些检查点可观察到的变化。剩余风险是：同权限的主动进程若精确命中文件系统调用间隙，并通过原生 API 擦除全部可观察证据，跨平台 Node.js 无法证明绝对防护。hook 仍被视为不可信；脚本会验证实际 HEAD/tree，并在无法安全恢复时保留恢复证据，而不会覆盖用户内容。
+## 明确暂存/提交
+
+只有明确要求暂存或提交时，Skill 才会修改 Git 索引。它会先根据对话和 `git status` 的路径级信息识别当前任务候选路径，再调用 `scripts/staged-commit.mjs inspect` 检查这些路径中的可选单元。路径级 `git status` 可能把未跟踪目录折叠成 `tests/` 这类目录项；helper 需要具体文件路径，目录候选不会自动递归包含未跟踪文件。提交前应核对完整路径，必要时使用 `git status --short --untracked-files=all` 展开。
+
+提交流程分为三步：
+
+1. `prepare` 使用检查快照和所选单元准备当前任务的暂存视图。
+2. `bind` 绑定完整提交说明，返回 12 位确认标识。
+3. 只有你在新的回复中输入精确的 `确认提交 <标识>`，才会执行一次 `commit`。
+
+除这条精确确认外，任何修改、追问、拒绝、取消或不完整确认都不会创建提交。Skill 会取消准备状态，或在无法安全覆盖当前索引时保留恢复数据并停止。
+
+## 消息规范
+
+提交说明使用 Conventional Commits：
+
+```text
+TYPE[(SCOPE)][!]: SUBJECT
+```
+
+scope 只在有可靠依据时使用。主题通常不超过 72 个字符，末尾不加句号。简单变更只写主题行；复杂变更或多项实质处理点才在空行后添加最少数量的 `- ` 列表。
+
+消息只根据最终暂存差异生成。不要罗列文件名，不重复主题，不编造动机、业务背景或测试结果。用户明确指定英文或其他语言时按请求输出；否则默认使用简体中文。
+
+示例：
+
+```text
+fix(auth): 修复登录失败时的错误提示
+```
+
+复杂示例：
+
+```text
+feat(profile): 添加用户资料可见性设置
+
+- 新增资料可见性字段并保存用户选择
+- 查询资料时按可见性过滤公开内容
+```
+
+## hunk 隔离与恢复
+
+同一文件中相互独立的 hunk 可以分别选择。未跟踪文件、二进制文件、重命名、删除、权限变化和混合语义的原子 hunk 不能拆分；未跟踪目录必须先展开为具体文件路径后再判断是否属于当前任务。
+
+如果一个原子单元同时包含当前任务和无关修改，Skill 会停止，要求你先手动整理。它不会猜测或部分提交无法安全拆开的内容。
+
+准备、取消和提交会在关键检查点验证 HEAD、索引树、选择单元和消息绑定。成功提交后，原本与当前任务无关但已暂存的内容会恢复为 staged。hook 拒绝提交时，Skill 不会重试或绕过 hook；它会尝试恢复可安全恢复的索引状态，并报告是否保留了恢复数据。
 
 ## 安全边界
 
-Skill 不会 push、创建 tag 或 release、发布或上传软件包、签名、amend、绕过 hook、改写历史，或写入 Git/Codex 配置。组合请求（如“提交后 push”）会在检查和准备前整体停止，并要求缩小为仅提交。
+Skill 不会执行以下操作：
 
-发现疑似敏感路径或内容时，Skill 会停止且不回显值。仓库中的指令可以增加约束，但不能扩大上述权限。
+- `push`、tag、release、包发布或上传。
+- amend、历史改写、签名提交、跳过 hook 或写入 Git/Codex 配置。
+- 在只生成说明时修改索引、工作区或 HEAD。
+- 回显识别到的敏感值。
 
-## 验证与开发
+包含禁用操作的组合请求，例如“提交后 push”，会在检查、准备或暂存前停止。请把请求缩小为仅提交当前任务。
 
-在本开发仓库中运行：
+## 验证
+
+在开发仓库中使用 Node.js 22 或更高版本运行：
 
 ```powershell
 npm run check
 npm run audit
-npm run gate:delivery
-npm pack --json --dry-run --ignore-scripts
 ```
 
-前三项分别运行确定性检查、归档与敏感内容审计、以及 Evidence Contract 交付门禁。`npm pack --json --dry-run --ignore-scripts` 只预览归档，不生成 `.tgz`；npm 合法附加的 `LICENSE`、`README.md` 与 `package.json` 不属于运行时白名单。
+`npm run check` 运行确定性测试和项目契约验证。`npm run audit` 检查发布包内容、敏感信息和运行时边界。
 
-设计与维护依据见[事务式自动暂存设计](docs/superpowers/specs/2026-08-20-transactional-auto-staging-design.md)和[实施计划](docs/superpowers/plans/2026-08-20-transactional-auto-staging.md)。贡献前请阅读[贡献指南](CONTRIBUTING.md)，安全问题请遵循[安全报告说明](SECURITY.md)。
+交付前还应按项目计划运行行为评测和最终门禁；这些流程属于开发验证，不是安装后的运行时命令。
 
-## 故障排除
+## 卸载
 
-| 情况 | 结果 | 安全的下一步 |
-| --- | --- | --- |
-| 没有可选择的当前任务单元 | 不创建事务或提交。 | 明确任务范围，或先整理工作区。 |
-| 正在合并、变基、cherry-pick 或 revert | 停止常规流程。 | 完成或安全处理中当前 Git 操作。 |
-| 候选后绑定状态改变 | 旧确认失效。 | 重新检查新快照并再次确认。 |
-| hook 拒绝提交 | 不重试或绕过。 | 修复拒绝原因后重新发起提交。 |
-
-## 卸载与许可证
-
-删除所属 `git-commit-assistant` Skill 目录即可卸载；该目录内不应保留其他运行时文件。本项目采用 [Apache License 2.0](LICENSE) 许可证。
+删除 Codex Skill 根目录中的 `git-commit-assistant` 文件夹即可卸载。卸载前可确认该目录只包含 `SKILL.md` 和 `scripts/staged-commit.mjs`，避免误删其他本地文件。
