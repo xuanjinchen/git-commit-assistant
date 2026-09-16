@@ -1,21 +1,13 @@
-# Changelog
+# 更新记录
 
-本文件记录 `git-commit-assistant` 的公开版本变化。版本遵循 Semantic Versioning。
+## 未发布：Version 8
 
-## [Unreleased]
+- 运行时收敛为单个 `SKILL.md`，只生成暂存提交说明，默认简体中文。
+- 删除暂存、提交、二次确认、hunk 选择和恢复事务脚本及相关测试。
+- 以完整消息文本供 `finishing-a-development-branch` 等调用方使用；Git 操作与确认规则由调用方承担。
+- 保留简单变更仅主题、复杂变更使用最少语义处理点的规则。
+- 更新中文文档、单文件包白名单和只读行为评测。
 
-### Version 7 精简重构
+## 历史版本
 
-- 将 Skill 目标收敛为根据最终确切 staged diff 生成一条最佳 Conventional Commit 候选说明。
-- 默认使用简体中文，并保留用户显式语言要求的覆盖能力。
-- 将明确提交流程拆为检查、准备、绑定和精确二次确认，确认文本为 `确认提交 <标识>`。
-- 保留当前任务 hunk 隔离、原子单元停止、取消恢复、hook 失败恢复和无关 staged 内容恢复能力。
-- 明确禁止 push、tag、release、amend、历史改写、签名、hook 绕过和配置写入。
-
-## [0.1.0] - 2026-08-19
-
-### Added
-
-- 提供 Node.js 22+、零第三方依赖的 Skill 运行时。
-- 提供基于 staged diff 的提交说明生成、明确暂存准备和二次确认提交流程。
-- 提供确定性检查、安全审计和交付门禁。
+Version 7 曾包含暂存和提交事务；已被 Version 8 取代。旧实现和详细历史可从 Git 提交记录恢复。

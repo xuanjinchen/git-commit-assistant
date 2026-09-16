@@ -10,7 +10,7 @@ body:
     id: reproduction
     attributes:
       label: Reproduction
-      description: Provide the smallest repository state, staged or unstaged changes, prompt, and exact commands that reproduce the issue.
+      description: Provide a minimal staged diff, the prompt, and the generated message or stop reason. Do not include secrets.
     validations:
       required: true
   - type: input
@@ -24,7 +24,7 @@ body:
     id: expected
     attributes:
       label: Expected and actual behavior
-      description: Include the expected commit message, stop reason, staging behavior, or recovery behavior when relevant.
+      description: Include the expected message, language, concise handling points, or read-only handoff behavior.
     validations:
       required: true
   - type: textarea

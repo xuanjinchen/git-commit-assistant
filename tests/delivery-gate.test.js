@@ -91,9 +91,15 @@ function evaluateSnapshot(snapshot) {
   if (state.status !== 'ready') failures.push(`state status is ${state.status}`);
   if (brief.status !== 'ready') failures.push(`brief status is ${brief.status}`);
   if (pkg.scaffold?.mode !== 'initialized') failures.push('package scaffold mode is not initialized');
-  if (pkg.files?.join('|') !== 'SKILL.md|scripts/staged-commit.mjs') {
-    failures.push('package publish files are not the runtime pair');
+  if (pkg.files?.join('|') !== 'SKILL.md') {
+    failures.push('package publish files are not the single Skill entrypoint');
   }
+  if ([state, brief, delivery, evals].some(document => document.requirement_version !== 8)) {
+    failures.push('requirements must all refer to Version 8');
+  }
+  const skillBytes = readFileSync(path.join(PROJECT_ROOT, 'SKILL.md'));
+  const skillDigest = createHash('sha256').update(skillBytes).digest('hex');
+  if (evals.skill_sha256 !== skillDigest) failures.push('evaluation Skill snapshot is stale');
   if (!Array.isArray(decisions.decisions)) failures.push('decisions contract is invalid');
 
   const acceptance = brief.acceptance_criteria;
@@ -132,6 +138,9 @@ function evaluateSnapshot(snapshot) {
   }
 
   const budget = brief.prompt_budget ?? {};
+  if (budget.measured_tokens !== Math.ceil([...skillBytes.toString('utf8')].length / 3)) {
+    failures.push('prompt budget measurement is stale');
+  }
   if (!Number.isInteger(budget.limit_tokens) || budget.limit_tokens > 900) {
     failures.push('prompt budget limit must be <= 900');
   }
@@ -213,11 +222,11 @@ test('delivery gate rejects empty, malformed, and unknown verification reference
 
 test('delivery gate validates every capability claim artifact digest', () => {
   const snapshot = loadSnapshot();
-  snapshot.delivery.capability_claims[0].evidence = `artifact:SKILL.md#sha256:${'0'.repeat(64)}`;
+  snapshot.delivery.capability_claims = [{ evidence: `artifact:SKILL.md#sha256:${'0'.repeat(64)}` }];
   assert.match(evaluateSnapshot(snapshot).join('; '), /capability_claims.*digest/u);
 });
 
-test('Version 7 delivery evidence is ready, complete, and hash-bound', () => {
+test('Version 8 delivery evidence is ready, complete, and bound to the current Skill', () => {
   for (const relativePath of REQUIRED_FILES) {
     assert.equal(existsSync(path.join(PROJECT_ROOT, relativePath)), true, relativePath);
   }

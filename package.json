@@ -1,22 +1,21 @@
 {
   "name": "git-commit-assistant",
   "version": "0.1.0",
-  "description": "Generate clear, concise Conventional Commit messages from staged changes, defaulting to Simplified Chinese; stage or commit only on explicit request and require a second confirmation.",
+  "description": "Generate clear, concise Conventional Commit messages from staged Git changes, defaulting to Simplified Chinese. Provide message text to users or Git-management skills; do not stage, commit, merge, or manage branches.",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test tests/staged-commit.test.js tests/skill-contract.test.js",
+    "test": "node --test tests/skill-contract.test.js",
     "validate": "node --test tests/project-contract.test.js",
     "audit": "node --test tests/audit.test.js",
     "check": "npm test && npm run validate",
     "gate:delivery": "node --test tests/delivery-gate.test.js"
   },
   "files": [
-    "SKILL.md",
-    "scripts/staged-commit.mjs"
+    "SKILL.md"
   ],
   "license": "Apache-2.0",
   "scaffold": {

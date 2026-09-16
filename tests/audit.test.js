@@ -21,7 +21,7 @@ const IGNORED_DIRECTORIES = new Set([
   '.superpowers',
 ]);
 const NPM_METADATA = new Set(['LICENSE', 'README.md', 'package.json']);
-const RUNTIME_FILES = new Set(['SKILL.md', 'scripts/staged-commit.mjs']);
+const RUNTIME_FILES = new Set(['SKILL.md']);
 
 // 这些模式只匹配高置信度凭据；测试源码用拆分字符串避免把示例本身变成审计对象。
 const CREDENTIAL_PATTERNS = [
@@ -127,7 +127,7 @@ test('审计规则拒绝凭据、私有路径和非法文本格式', () => {
   ]);
 });
 
-test('npm dry-run 除元数据外只包含两个运行时文件', () => {
+test('npm dry-run 除元数据外只包含 SKILL.md', () => {
   const files = packFiles();
   const contentFiles = files.filter((entryPath) => !NPM_METADATA.has(entryPath));
   assert.deepEqual(new Set(contentFiles), RUNTIME_FILES);

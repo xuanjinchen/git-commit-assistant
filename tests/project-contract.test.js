@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const REQUIRED = [
   'SKILL.md',
-  'scripts/staged-commit.mjs',
   '.scaffold/state.json',
   'docs/skill-brief.md',
   'docs/decisions.md',
@@ -21,8 +20,6 @@ const REQUIRED = [
   'package-lock.json',
   'LICENSE',
   'AGENTS.md',
-  'tests/helpers/git-fixture.js',
-  'tests/staged-commit.test.js',
   'tests/skill-contract.test.js',
   'tests/project-contract.test.js',
   'tests/audit.test.js',
@@ -31,6 +28,10 @@ const REQUIRED = [
 const FORBIDDEN = [
   'src',
   'templates',
+  'scripts/staged-commit.mjs',
+  'tests/staged-commit.test.js',
+  'tests/helpers/git-fixture.js',
+  'tests/helpers/repository-fixture.js',
   'scripts/stage-transaction.mjs',
   'scripts/init-skill.js',
   'scripts/recover-lock.js',
@@ -53,17 +54,17 @@ test('仓库只保留当前 Skill 的开发结构', () => {
   }
 });
 
-test('package 只发布两个运行时文件且不声明依赖', () => {
+test('package 仅发布 SKILL.md 且不声明依赖', () => {
   const pkg = readJson('package.json');
   const lock = readJson('package-lock.json');
 
-  assert.deepEqual(pkg.files, ['SKILL.md', 'scripts/staged-commit.mjs']);
+  assert.deepEqual(pkg.files, ['SKILL.md']);
   assert.deepEqual(
     Object.keys(pkg).filter((key) => /Dependencies$/u.test(key)),
     [],
   );
   assert.deepEqual(pkg.scripts, {
-    test: 'node --test tests/staged-commit.test.js tests/skill-contract.test.js',
+    test: 'node --test tests/skill-contract.test.js',
     validate: 'node --test tests/project-contract.test.js',
     audit: 'node --test tests/audit.test.js',
     check: 'npm test && npm run validate',

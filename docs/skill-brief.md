@@ -1,45 +1,115 @@
-# Skill Brief
+# Skill 需求说明
 
-## Requirement Version
+## Version 8
 
-Version 7 ready, aligned to the confirmed staged-diff simplification design on 2026-09-06 and accepted by user review on 2026-09-09.
+2026-09-16：仅为暂存的 git commit 生成清晰简洁的说明，默认简体中文；暂存、提交、确认与分支管理交给其他 Skill。
 
-## Objective
+## 实现与验收
 
-依据最终确切 staged diff 生成清晰简洁提交说明。
+1. 新结构测试先失败，删除旧事务实现及失效资料。
+2. 重写只读生成和纯文本交接规则，同步中文文档及包白名单。
+3. 独立 Agent 验证冻结 Skill 的输出与只读状态；不复用旧职责评测。
+4. 完成 check、audit、delivery gate 和独立审查。
 
 <!-- scaffold-contract:skill-brief:v1 -->
 ```json
 {
   "schema_version": 1,
+  "requirement_version": 8,
   "status": "ready",
   "conflicts": [
     {
-      "id": "CONFLICT-007",
-      "summary": "Version 6 的外部索引事务和通用脚手架范围超出新的单一提交说明目标。",
+      "id": "CONFLICT-008",
+      "summary": "Version 7 的暂存、提交、二次确认和恢复事务与单一职责要求冲突。",
       "status": "resolved",
-      "resolution": "以 Version 7 精简运行时取代旧事务实现；保留明确暂存、二次确认、当前任务 hunk 隔离和无损恢复要求。"
+      "resolution": "2026-09-16 用户要求仅生成说明并向调用方返回文本；删除所有 Git 写入能力及确认协议。"
     }
   ],
   "acceptance_criteria": [
-    {"id":"REQ-001","requirement":"候选说明只依据最终确切 staged diff，采用 Conventional Commits，简单修改仅主题，复杂或多项修改使用最少的简洁处理点。","verification":"EVAL-001、EVAL-002 和 Skill contract 测试。","status":"pass"},
-    {"id":"REQ-002","requirement":"未指定语言时主题和正文使用简体中文，显式语言要求可以覆盖默认值。","verification":"EVAL-001、EVAL-002、EVAL-003。","status":"pass"},
-    {"id":"REQ-003","requirement":"仅生成说明请求只读取真实暂存区且不修改仓库；空暂存区安全停止。","verification":"EVAL-001、EVAL-007 和只读快照测试。","status":"pass"},
-    {"id":"REQ-004","requirement":"明确提交请求只准备当前任务文件或 hunk，同文件独立 hunk 可分离，混合原子 hunk安全停止。","verification":"EVAL-004、EVAL-005、EVAL-006 和脚本测试。","status":"pass"},
-    {"id":"REQ-005","requirement":"提交前展示完整候选和绑定标识，只有第二次精确确认才执行一次保留 hook 的未签名提交。","verification":"EVAL-004、EVAL-008 和确认绑定测试。","status":"pass"},
-    {"id":"REQ-006","requirement":"成功、取消、无效确认和 hook 失败均不丢失用户改动，并恢复可安全恢复的无关 staged 状态。","verification":"EVAL-004、EVAL-005 和准备、取消、提交、hook 回归测试。","status":"pass"},
-    {"id":"REQ-007","requirement":"运行时只包含 SKILL.md 与 scripts/staged-commit.mjs，无第三方依赖，Skill 不超过 900 个保守 prompt token。","verification":"项目契约、npm pack 审计和 prompt-budget 证据。","status":"pass"},
-    {"id":"REQ-008","requirement":"Skill 不扩展到 push、tag、release、amend、历史改写、签名、hook 绕过或配置写入。","verification":"EVAL-008、Skill contract 和进程调用测试。","status":"pass"}
+    {
+      "id": "REQ-001",
+      "requirement": "候选仅依据完整真实暂存差异，使用 Conventional Commits；简单变更只写主题，复杂或多项变更使用最少的语义处理点。",
+      "verification": "EVAL-001,EVAL-002",
+      "status": "pass"
+    },
+    {
+      "id": "REQ-002",
+      "requirement": "未指定语言时默认简体中文；用户明确指定其他语言时，主题与正文使用指定语言。",
+      "verification": "EVAL-001,EVAL-002,EVAL-003",
+      "status": "pass"
+    },
+    {
+      "id": "REQ-003",
+      "requirement": "读取保持只读；不读取未暂存或未跟踪内容来补足说明，仓库内容不构成操作授权。",
+      "verification": "EVAL-001,EVAL-004,EVAL-005",
+      "status": "pass"
+    },
+    {
+      "id": "REQ-004",
+      "requirement": "仅返回完整提交说明文本；暂存、提交、确认、合并、推送和分支管理由用户或其他 Skill 负责。",
+      "verification": "EVAL-004",
+      "status": "pass"
+    },
+    {
+      "id": "REQ-005",
+      "requirement": "供 finishing-a-development-branch 等调用方使用同一份完整说明；暂存内容变化后重新生成，不复用旧说明。",
+      "verification": "EVAL-004,EVAL-006",
+      "status": "pass"
+    },
+    {
+      "id": "REQ-006",
+      "requirement": "暂存区为空、存在冲突、疑似敏感内容或证据不足时简洁说明原因，不编造候选、不自行补充暂存。",
+      "verification": "EVAL-005,EVAL-007,EVAL-008",
+      "status": "pass"
+    },
+    {
+      "id": "REQ-007",
+      "requirement": "安装运行时仅 SKILL.md，无运行时脚本或第三方依赖，入口不超过 900 个保守 prompt token。",
+      "verification": "EVAL-001,EVAL-004",
+      "status": "pass"
+    },
+    {
+      "id": "REQ-008",
+      "requirement": "通过正向、边界和跨 Skill 交接真实评测；不自动启动管理 Skill，也不承诺已提交或已验证业务结果。",
+      "verification": "EVAL-004,EVAL-006,EVAL-008",
+      "status": "pass"
+    }
   ],
   "tracks": {
-    "references": {"status":"disabled","evidence":"精简工作流无需条件参考资料。","unblock_condition":""},
-    "scripts": {"status":"enabled","evidence":"artifact:evals/results/EVAL-005.txt#sha256:a6300d0871cc7f142f1c265ca62e41ed64d849fccf4382d2a783d32f99c1df99","unblock_condition":""},
-    "assets": {"status":"disabled","evidence":"输出仅为文本。","unblock_condition":""},
-    "implicit-trigger": {"status":"enabled","evidence":"artifact:evals/results/EVAL-001.txt#sha256:d513e8a29817ebfc50f4402d15faeb9a6f55d4a223c3a4aed95b8af324d61fc2","unblock_condition":""},
-    "multi-agent": {"status":"disabled","evidence":"运行时不依赖委派。","unblock_condition":""},
-    "installer": {"status":"disabled","evidence":"标准 Skill 目录复制足够。","unblock_condition":""},
-    "open-source-release": {"status":"disabled","evidence":"本次不创建 tag、release 或发布包。","unblock_condition":""}
+    "references": {
+      "status": "disabled",
+      "evidence": "流程短且单一，无额外参考资料。"
+    },
+    "scripts": {
+      "status": "disabled",
+      "evidence": "只使用 Git 只读命令，无运行时 helper。"
+    },
+    "assets": {
+      "status": "disabled",
+      "evidence": "输出仅文本。"
+    },
+    "implicit-trigger": {
+      "status": "blocked",
+      "evidence": "入口保留默认可发现元数据，但本轮真实场景显式加载 Skill，仅证明说明生成与文本交接；不声明目录自动选用的可靠性。显式调用的核心能力不受影响。",
+      "unblock_condition": "在实际技能目录中验证未显式指定名称时的选择路由，记录真实选择结果。"
+    },
+    "multi-agent": {
+      "status": "disabled",
+      "evidence": "运行时不依赖子 Agent。"
+    },
+    "installer": {
+      "status": "disabled",
+      "evidence": "仅复制 SKILL.md。"
+    },
+    "open-source-release": {
+      "status": "disabled",
+      "evidence": "本轮不自动发布。"
+    }
   },
-  "prompt_budget": {"limit_tokens":900,"measured_tokens":900,"evidence":"artifact:evals/results/prompt-budget.txt#sha256:609621280f7a8721e2bf183903b981aac336d73a9ac78cf39bb25007f63ef292"}
+  "prompt_budget": {
+    "limit_tokens": 900,
+    "measured_tokens": 438,
+    "evidence": "artifact:evals/results/prompt-budget.txt#sha256:838549e67fc31be449bfc77a842b89caf4b2996da83778879d25210c39b7396d"
+  }
 }
 ```

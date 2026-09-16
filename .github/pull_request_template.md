@@ -1,19 +1,11 @@
-## Summary
+## 变更
 
-Describe the scoped `git-commit-assistant` change and why it is needed.
+说明本次对暂存提交说明生成的影响。
 
-## Compatibility
+## 验证
 
-List affected operating systems, Node.js versions, Git versions, agent behavior, installed Skill versions, and existing repositories. Write `None` only after checking each category.
-
-## Validation
-
-- [ ] Tests or behavior evaluations were written or updated before implementation when behavior changed.
-- [ ] `npm run check` passes.
-- [ ] `npm run audit` passes.
-- [ ] Relevant message-only, explicit staging, confirmation, recovery, and compatibility scenarios were exercised.
-
-## Secret Review
-
-- [ ] I reviewed the complete diff and generated files for credentials, private paths, personal email addresses, customer data, logs, and local state.
-- [ ] Fixtures use neutral values such as `tester@example.invalid` and contain no real sensitive information.
+- [ ] 确定性变更已有先失败后通过的检查。
+- [ ] 受影响的真实 Agent 场景已经验证。
+- [ ] check、audit 和交付门禁通过。
+- [ ] 不新增暂存、提交、确认或分支管理职责。
+- [ ] 已审查完整 diff、注释、敏感信息和发布包内容。
